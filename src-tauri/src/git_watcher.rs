@@ -126,7 +126,7 @@ pub fn install(app: &AppHandle, _db_state: &DbState, path: &Path) {
     ) {
         Ok(w) => w,
         Err(e) => {
-            eprintln!(
+            crate::relay_eprintln!(
                 "[git_watcher] failed to create watcher for {}: {e}",
                 canon.display()
             );
@@ -134,7 +134,7 @@ pub fn install(app: &AppHandle, _db_state: &DbState, path: &Path) {
         }
     };
     if let Err(e) = watcher.watch(&canon, RecursiveMode::Recursive) {
-        eprintln!("[git_watcher] failed to watch {}: {e}", canon.display());
+        crate::relay_eprintln!("[git_watcher] failed to watch {}: {e}", canon.display());
         return;
     }
     // Spawn the per-watcher debouncer. The thread is the only owner of

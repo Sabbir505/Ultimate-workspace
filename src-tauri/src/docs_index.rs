@@ -676,7 +676,7 @@ async fn run_index(
             finish!("cancelled", None);
         }
         if total_chunks >= docs::MAX_CHUNKS_PER_CORPUS {
-            eprintln!(
+            crate::relay_eprintln!(
                 "[docs] corpus '{}' hit the {} chunk cap; remaining files skipped",
                 corpus.name,
                 docs::MAX_CHUNKS_PER_CORPUS
@@ -706,7 +706,7 @@ async fn run_index(
                     }
                 }
                 Err(e) => {
-                    eprintln!("[docs] read failed for {}: {e}", abs.display());
+                    crate::relay_eprintln!("[docs] read failed for {}: {e}", abs.display());
                     None
                 }
             },
@@ -795,7 +795,7 @@ async fn run_index(
                     .collect();
                 match embed_all(&base_url, &shrunk).await {
                     Ok(v) => {
-                        eprintln!(
+                        crate::relay_eprintln!(
                             "[docs] embedding failed for {rel} ({first}); retry with \
 {EMBED_RETRY_CHAR_CAP}-char heads succeeded"
                         );

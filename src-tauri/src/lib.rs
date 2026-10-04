@@ -305,10 +305,10 @@ pub fn run() {
                         Ok(canon) => {
                             let killed = sidecar_sweep::sweep(&canon);
                             if killed > 0 {
-                                eprintln!("[relay] sidecar sweep: reaped {killed} orphaned sidecar(s) at boot");
+                                crate::relay_eprintln!("[relay] sidecar sweep: reaped {killed} orphaned sidecar(s) at boot");
                             }
                         }
-                        Err(e) => eprintln!("[relay] sidecar sweep skipped (canonicalize failed): {e}"),
+                        Err(e) => crate::relay_eprintln!("[relay] sidecar sweep skipped (canonicalize failed): {e}"),
                     }
                 }
             }
@@ -340,7 +340,7 @@ pub fn run() {
             // tool falls back to the Python engine with a hint.
             #[cfg(windows)]
             if let Err(e) = chat::pdfprint::ensure_print_window(app.handle()) {
-                eprintln!("[relay] hidden PDF print window unavailable: {e}");
+                crate::relay_eprintln!("[relay] hidden PDF print window unavailable: {e}");
             }
             // Subagent run-history boot sweep: the live-run registry and the
             // release watchers are per-process, so a `running` row from a
@@ -643,11 +643,11 @@ pub fn run() {
                                 )
                                 .await
                                 {
-                                    eprintln!("[relay] live price refresh failed: {e}");
+                                    crate::relay_eprintln!("[relay] live price refresh failed: {e}");
                                 }
                             }
                             Err(e) => {
-                                eprintln!("[relay] live price http client unavailable: {e}")
+                                crate::relay_eprintln!("[relay] live price http client unavailable: {e}")
                             }
                         }
                         tokio::time::sleep(std::time::Duration::from_secs(24 * 60 * 60)).await;
@@ -1217,7 +1217,7 @@ pub fn run() {
                     .await
                     .is_err()
                     {
-                        eprintln!("[relay] llama-server stop_all timed out after 3s; exiting anyway (kill already delivered)");
+                        crate::relay_eprintln!("[relay] llama-server stop_all timed out after 3s; exiting anyway (kill already delivered)");
                     }
                 });
             }
@@ -1234,7 +1234,7 @@ pub fn run() {
                     .await
                     .is_err()
                     {
-                        eprintln!("[stt] sidecar kill timed out at exit; exiting anyway");
+                        crate::relay_eprintln!("[stt] sidecar kill timed out at exit; exiting anyway");
                     }
                 });
             }
@@ -1249,7 +1249,7 @@ pub fn run() {
                     .await
                     .is_err()
                     {
-                        eprintln!("[image-gen] sidecar kill timed out at exit; exiting anyway");
+                        crate::relay_eprintln!("[image-gen] sidecar kill timed out at exit; exiting anyway");
                     }
                 });
             }

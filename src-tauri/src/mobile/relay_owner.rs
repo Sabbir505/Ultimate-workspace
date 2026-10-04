@@ -130,7 +130,7 @@ pub fn start_chat_stream_forwarder(app: &AppHandle, owner_map: OwnerMap) {
     // times after N restarts — the phone saw every streamed token duplicated
     // N times, and one pairing-token rotation already doubled the stream.
     if !claim_listener_slot(&CHAT_STREAM_FORWARDER_REGISTERED) {
-        eprintln!("[mobile-relay] chat stream forwarder already registered; skipping");
+        crate::relay_eprintln!("[mobile-relay] chat stream forwarder already registered; skipping");
         return;
     }
     // Owned clone: the listener closures are 'static and must not capture

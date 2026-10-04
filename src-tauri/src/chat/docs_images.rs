@@ -34,7 +34,7 @@ pub fn ocr_image(path: &Path) -> Option<String> {
             }
         }
         Err(e) => {
-            eprintln!("[docs] OCR failed for {}: {e}", path.display());
+            crate::relay_eprintln!("[docs] OCR failed for {}: {e}", path.display());
             None
         }
     }
@@ -98,7 +98,7 @@ pub async fn vision_caption(base_url: &str, abs_path: &Path) -> Option<String> {
         .await
         .ok()?;
     if !resp.status().is_success() {
-        eprintln!(
+        crate::relay_eprintln!(
             "[docs] vision caption HTTP {} for {}",
             resp.status(),
             abs_path.display()

@@ -800,12 +800,12 @@ pub fn install_watcher(app: &AppHandle) {
     ) {
         Ok(w) => w,
         Err(e) => {
-            eprintln!("[vault] watcher create failed: {e}");
+            crate::relay_eprintln!("[vault] watcher create failed: {e}");
             return;
         }
     };
     if let Err(e) = watcher.watch(&root, RecursiveMode::Recursive) {
-        eprintln!("[vault] watch failed for {}: {e}", root.display());
+        crate::relay_eprintln!("[vault] watch failed for {}: {e}", root.display());
         return;
     }
     let app = app.clone();

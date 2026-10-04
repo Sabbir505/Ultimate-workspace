@@ -110,7 +110,7 @@ async fn wait_for_row(db: &Arc<Mutex<Connection>>, attempts: usize) -> Option<st
 #[tokio::test]
 async fn relays_a_real_streamed_completion_and_logs_it() {
     let Some((db, token, port)) = boot_gateway().await else {
-        eprintln!("SKIP: no llama-server on {LIVE_UPSTREAM} — run scripts/live-llm-log-test.sh");
+        crate::relay_eprintln!("SKIP: no llama-server on {LIVE_UPSTREAM} — run scripts/live-llm-log-test.sh");
         return;
     };
 
@@ -180,7 +180,7 @@ async fn relays_a_real_streamed_completion_and_logs_it() {
 #[tokio::test]
 async fn relays_a_non_streamed_completion_with_content_length() {
     let Some((db, token, port)) = boot_gateway().await else {
-        eprintln!("SKIP: no llama-server on {LIVE_UPSTREAM}");
+        crate::relay_eprintln!("SKIP: no llama-server on {LIVE_UPSTREAM}");
         return;
     };
 
@@ -217,7 +217,7 @@ async fn relays_a_non_streamed_completion_with_content_length() {
 #[tokio::test]
 async fn refuses_an_unauthenticated_request() {
     let Some((_db, token, port)) = boot_gateway().await else {
-        eprintln!("SKIP: no llama-server on {LIVE_UPSTREAM}");
+        crate::relay_eprintln!("SKIP: no llama-server on {LIVE_UPSTREAM}");
         return;
     };
     assert!(!token.is_empty(), "a token must have been minted");
@@ -234,7 +234,7 @@ async fn refuses_an_unauthenticated_request() {
 #[tokio::test]
 async fn serves_the_read_only_log_api_over_http() {
     let Some((db, token, port)) = boot_gateway().await else {
-        eprintln!("SKIP: no llama-server on {LIVE_UPSTREAM}");
+        crate::relay_eprintln!("SKIP: no llama-server on {LIVE_UPSTREAM}");
         return;
     };
 
@@ -262,7 +262,7 @@ async fn serves_the_read_only_log_api_over_http() {
 #[tokio::test]
 async fn the_clients_gateway_token_is_never_forwarded_upstream() {
     let Some((_db, token, port)) = boot_gateway().await else {
-        eprintln!("SKIP: no llama-server on {LIVE_UPSTREAM}");
+        crate::relay_eprintln!("SKIP: no llama-server on {LIVE_UPSTREAM}");
         return;
     };
     // The live server is started with `--api-key testtoken123`, so this only

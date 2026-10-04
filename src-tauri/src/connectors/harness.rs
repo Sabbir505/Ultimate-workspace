@@ -108,7 +108,7 @@ pub async fn harness_mcp_servers_for_message(
         // harness surface is the relay-tools bridge's REST fallback reads,
         // which key off credentials, not off this list.
         if cfg.effective_mcp_server_url().is_empty() {
-            eprintln!(
+            crate::relay_eprintln!(
                 "[relay:connectors] {id} has no hosted MCP server — harness surface is the relay-tools fallback reads only"
             );
             continue;
@@ -120,7 +120,7 @@ pub async fn harness_mcp_servers_for_message(
                 bearer_token: if tok.is_empty() { None } else { Some(tok) },
             }),
             Err(e) => {
-                eprintln!("[relay:connectors] {id} token resolve for harness failed: {e} — skipping");
+                crate::relay_eprintln!("[relay:connectors] {id} token resolve for harness failed: {e} — skipping");
             }
         }
     }

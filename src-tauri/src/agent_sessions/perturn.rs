@@ -585,7 +585,7 @@ End your reply with the plan and wait for the user's approval.]"
                     .0
                     .kill_child_if_generation(&sid3, my_generation);
             if killed {
-                eprintln!(
+                crate::relay_eprintln!(
                     "[agent_sessions] {sid3}: {} printed its terminal frame but never exited \
 — watchdog killed the CLI tree to close the turn",
                     kind.display()
@@ -836,7 +836,7 @@ pub(super) fn read_per_turn_stream(
                         );
                     }
                 }
-                eprintln!(
+                crate::relay_eprintln!(
                     "[context] {} resume failed (no turn output); dropping stale CLI session id — the next send replays the context primer",
                     kind.harness_id()
                 );

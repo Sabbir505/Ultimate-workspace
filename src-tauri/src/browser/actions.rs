@@ -657,7 +657,7 @@ return JSON.stringify({scrollHeight: h, viewportHeight: vh});
                     // lazy-loaded sections. Threshold: scrollHeight > 2x viewport
                     // AND extracted content < 2000 chars.
                     if scroll_height > viewport * 2 && markdown_len < 2000 {
-                        eprintln!(
+                        crate::relay_eprintln!(
                             "[relay:browser] lazy-load scroll loop: scrollHeight={scroll_height} \
                              viewport={viewport} markdownLen={markdown_len}"
                         );
@@ -678,7 +678,7 @@ return JSON.stringify({scrollHeight: h, viewportHeight: vh});
                                     let new_len = new_md.len();
                                     // Short-circuit: content didn't grow meaningfully
                                     if new_len <= content.markdown.len() + 100 {
-                                        eprintln!(
+                                        crate::relay_eprintln!(
                                             "[relay:browser] lazy-load scroll stop: no content growth at step {step}"
                                         );
                                         break;
@@ -695,7 +695,7 @@ return JSON.stringify({scrollHeight: h, viewportHeight: vh});
                                 if let Ok(check) = serde_json::from_str::<serde_json::Value>(&check_str) {
                                     let new_sh = check["scrollHeight"].as_f64().unwrap_or(0.0) as i64;
                                     if new_sh <= prev_scroll_height {
-                                        eprintln!(
+                                        crate::relay_eprintln!(
                                             "[relay:browser] lazy-load scroll stop: scrollHeight stable at {new_sh}"
                                         );
                                         break;

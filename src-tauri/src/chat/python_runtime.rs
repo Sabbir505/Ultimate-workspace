@@ -193,17 +193,17 @@ mod tests {
             .join("resources")
             .join("python");
         let Some(exe) = bundled_interpreter_in(&dir) else {
-            eprintln!("bundled python not staged at {dir:?} — skipping");
+            crate::relay_eprintln!("bundled python not staged at {dir:?} — skipping");
             return;
         };
         // Cheap magic-byte probe: a real python interpreter is an ELF /
         // Mach-O / PE binary. A 0-byte placeholder is neither.
         let Ok(meta) = std::fs::metadata(&exe) else {
-            eprintln!("bundled python not accessible at {exe:?} — skipping");
+            crate::relay_eprintln!("bundled python not accessible at {exe:?} — skipping");
             return;
         };
         if meta.len() < 1024 {
-            eprintln!(
+            crate::relay_eprintln!(
                 "bundled python placeholder at {exe:?} ({meta_len} bytes) — skipping",
                 meta_len = meta.len()
             );

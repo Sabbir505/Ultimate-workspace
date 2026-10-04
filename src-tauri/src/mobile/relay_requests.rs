@@ -263,7 +263,7 @@ where
             return Err(reason.to_string());
         }
         if legacy_ok {
-            eprintln!(
+            crate::relay_eprintln!(
                 "[mobile-relay] paired via LEGACY static proof (pre-v2 client) — replay protection inactive for this connection"
             );
         }
@@ -294,7 +294,7 @@ where
         let key =
             super::relay_crypto::derive_session_key_with_salt(expected_token, &effective_salt);
         super::relay_ws::enable_e2e(&write, key).await;
-        eprintln!("[mobile-relay] paired (E2E encrypted, per-connection key); processing commands");
+        crate::relay_eprintln!("[mobile-relay] paired (E2E encrypted, per-connection key); processing commands");
     }
     Ok(true)
 }

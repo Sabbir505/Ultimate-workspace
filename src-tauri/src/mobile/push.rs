@@ -107,7 +107,7 @@ async fn send_push(token: String, title: String, body: String, db: Arc<Mutex<Con
     {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("[mobile-push] client build failed: {e}");
+            crate::relay_eprintln!("[mobile-push] client build failed: {e}");
             return;
         }
     };
@@ -124,7 +124,7 @@ async fn send_push(token: String, title: String, body: String, db: Arc<Mutex<Con
             if !resp.status().is_success() {
                 let status = resp.status();
                 let body = resp.text().await.unwrap_or_default();
-                eprintln!("[mobile-push] delivery failed: HTTP {status}: {body}");
+                crate::relay_eprintln!("[mobile-push] delivery failed: HTTP {status}: {body}");
                 return;
             }
             // SS5.22: a 200 envelope can still carry a per-message error.
@@ -146,10 +146,10 @@ async fn send_push(token: String, title: String, body: String, db: Arc<Mutex<Con
                 .unwrap_or(false);
             if device_gone {
                 clear_push_token(&db);
-                eprintln!("[mobile-push] token pruned (DeviceNotRegistered)");
+                crate::relay_eprintln!("[mobile-push] token pruned (DeviceNotRegistered)");
             }
         }
-        Err(e) => eprintln!("[mobile-push] delivery error: {e}"),
+        Err(e) => crate::relay_eprintln!("[mobile-push] delivery error: {e}"),
     }
 }
 

@@ -550,18 +550,18 @@ pub fn materialize_bundled_loops(conn: &rusqlite::Connection) {
         }
         let dir = agents_root.join(b.slug);
         if let Err(e) = fs::create_dir_all(&dir) {
-            eprintln!("[loops] materialize mkdir {} failed: {e}", dir.display());
+            crate::relay_eprintln!("[loops] materialize mkdir {} failed: {e}", dir.display());
             continue;
         }
         if let Err(e) = fs::write(dir.join("LOOP.md"), b.body) {
-            eprintln!("[loops] materialize write {} failed: {e}", dir.display());
+            crate::relay_eprintln!("[loops] materialize write {} failed: {e}", dir.display());
             continue;
         }
         wrote += 1;
     }
     if wrote > 0 {
         invalidate_skill_cache();
-        eprintln!("[loops] materialized {wrote} bundled loop(s) into {}", agents_root.display());
+        crate::relay_eprintln!("[loops] materialized {wrote} bundled loop(s) into {}", agents_root.display());
     }
     let _ = crate::db::set_setting(conn, LOOPS_MATERIALIZED_KEY, "1");
 }

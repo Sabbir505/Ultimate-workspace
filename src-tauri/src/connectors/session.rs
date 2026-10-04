@@ -71,7 +71,7 @@ pub async fn connect_all(
     let mut out = Vec::new();
     for id in connector_ids {
         let Some(cfg) = connector_by_id(id) else {
-            eprintln!("[relay:connectors] unknown connector id `{id}` — skipping");
+            crate::relay_eprintln!("[relay:connectors] unknown connector id `{id}` — skipping");
             continue;
         };
         // REST fallbacks: Google's MCP service layer denies every `tools/call`
@@ -92,7 +92,7 @@ pub async fn connect_all(
                 let tools: Vec<RemoteTool> = match session.list_tools().await {
                     Ok(t) => t,
                     Err(e) => {
-                        eprintln!(
+                        crate::relay_eprintln!(
                             "[relay:connectors] {id} tools/list failed: {e} — attaching with no tools"
                         );
                         Vec::new()
@@ -125,7 +125,7 @@ pub async fn connect_all(
             }
             Err(e) => {
                 if fallback_defs.is_empty() {
-                    eprintln!(
+                    crate::relay_eprintln!(
                         "[relay:connectors] {id} connect failed: {e} — skipping for this turn"
                     );
                     continue;
@@ -133,7 +133,7 @@ pub async fn connect_all(
                 // Fallback-only connector (YouTube: no hosted MCP server
                 // exists) — attach WITHOUT a session so the local REST tools
                 // still reach the model.
-                eprintln!(
+                crate::relay_eprintln!(
                     "[relay:connectors] {id} has no reachable MCP server ({e}) — attaching local fallback tools only"
                 );
                 let mut map = HashMap::new();

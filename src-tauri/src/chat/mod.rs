@@ -788,7 +788,7 @@ impl ChatManager {
                     .iter()
                     .map(|(name, (n, desc))| format!("{name}={n} tools/{desc} desc chars"))
                     .collect();
-                eprintln!(
+                crate::relay_eprintln!(
                     "[prompt-audit] attached: connectors=[{}] mcp_servers=[{}]",
                     conns.join(", "),
                     mcps.join(", ")
@@ -1084,7 +1084,7 @@ impl ChatManager {
                             .unwrap_or(false);
                         if retryable && ci + 1 < candidates.len() {
                             let next = &candidates[ci + 1];
-                            eprintln!(
+                            crate::relay_eprintln!(
                                 "[chat:auto] {} · {} failed pre-stream ({}); failing over to {} · {}",
                                 cand.provider_id.as_str(),
                                 cand.model,
@@ -1143,7 +1143,7 @@ impl ChatManager {
                     // this turn — the figure the meter renders as "used".
                     // There is deliberately NO context limit on this boundary;
                     // the cap lives in the meter (lib/contextWindow.ts).
-                    eprintln!(
+                    crate::relay_eprintln!(
                         "[context] provider turn: provider={} model='{}' in={} out={} cache_create={} cache_read={}",
                         winning_provider.as_str(),
                         chat_req.model,
@@ -1263,7 +1263,7 @@ impl ChatManager {
                                     // used to vanish — the reply renders fine,
                                     // but the files never reappear on its
                                     // bubble after a reopen.
-                                    eprintln!(
+                                    crate::relay_eprintln!(
                                         "[chat:stream] artifact attach failed for {sid} (msg {}): {e}",
                                         msg.id
                                     );
@@ -1279,7 +1279,7 @@ impl ChatManager {
                     // when it wasn't (the text existed only in the live bubble
                     // and disappeared on the next reload).
                     if let Some(perr) = persist_error {
-                        eprintln!("[chat:stream] persist failed for {sid}: {perr}");
+                        crate::relay_eprintln!("[chat:stream] persist failed for {sid}: {perr}");
                         crate::chat::stream_events::emit_error_with_code(
                             Some(&app),
                             &sid,
@@ -1383,11 +1383,11 @@ impl ChatManager {
                                     {
                                         Ok(Ok(v)) => v,
                                         Ok(Err(e)) => {
-                                            eprintln!("[citations] verify failed: {e}");
+                                            crate::relay_eprintln!("[citations] verify failed: {e}");
                                             return;
                                         }
                                         Err(_) => {
-                                            eprintln!("[citations] verify timed out after 120s");
+                                            crate::relay_eprintln!("[citations] verify timed out after 120s");
                                             return;
                                         }
                                     };
@@ -1546,7 +1546,7 @@ impl ChatManager {
                     // abort, …). Log it — the UI banner only shows a truncated
                     // version, and some errors (e.g. llama-server 400 bodies)
                     // name the exact rejected field.
-                    eprintln!("[chat:stream] turn failed for {sid}: {e}");
+                    crate::relay_eprintln!("[chat:stream] turn failed for {sid}: {e}");
                     // Classify before moving the message into the payload: a
                     // context-overflow rejection is recoverable and the
                     // frontend keys its "compact / new chat" copy off the code.
@@ -2193,7 +2193,7 @@ async fn compact_and_retry(
         let conn = db.lock();
         crate::chat::cloud_compact::persist_summary_row(&conn, sid, &run).ok()?;
     }
-    eprintln!(
+    crate::relay_eprintln!(
         "[cloud-compaction] overflow retry: compacted {} exchange(s) (~{}→{} est. tokens)",
         run.compacted_exchange_count, run.pre_tokens, run.post_tokens,
     );

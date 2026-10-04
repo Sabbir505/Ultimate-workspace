@@ -314,7 +314,7 @@ pub(crate) async fn build_primer_summary(
     )
     .await
     .ok()?;
-    eprintln!(
+    crate::relay_eprintln!(
         "[context] harness primer: summarized {head_count} older turn(s) ({head_chars} chars) via {}/{model}",
         provider_id.as_str(),
     );

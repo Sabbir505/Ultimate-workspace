@@ -117,7 +117,7 @@ pub fn apply_task_pick(
         return (provider, pick.model, api_key, base_url);
     }
     if pick_engine(&pick).is_some() {
-        eprintln!(
+        crate::relay_eprintln!(
             "[subagent-model] {}::{} ignored — Task subagents run on API providers; \
              spawn_session delegates to CLI engines",
             pick.provider.as_deref().unwrap_or_default(),
@@ -141,7 +141,7 @@ pub fn apply_task_pick(
                 }
             }
         }
-        eprintln!(
+        crate::relay_eprintln!(
             "[subagent-model] {override_provider}::{} ignored — sidecar not running it",
             pick.model
         );
@@ -153,7 +153,7 @@ pub fn apply_task_pick(
             .unwrap_or(None),
     );
     if override_key.trim().is_empty() {
-        eprintln!(
+        crate::relay_eprintln!(
             "[subagent-model] {override_provider}::{} ignored — no API key saved for {override_provider}",
             pick.model
         );
@@ -209,7 +209,7 @@ pub fn resolve_spawn_model(
     }
     let key = crate::secrets::get_chat_api_key(conn, pick_provider).unwrap_or_default();
     if key.trim().is_empty() {
-        eprintln!(
+        crate::relay_eprintln!(
             "[subagent-model] {pick_provider}::{} ignored — no API key saved for {pick_provider}",
             pick.model
         );

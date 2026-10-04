@@ -603,7 +603,7 @@ pub fn write_bundle(
         match std::fs::write(path, contents) {
             Ok(()) => true,
             Err(e) => {
-                eprintln!("[harness_bundle] failed to write {}: {e}", path.display());
+                crate::relay_eprintln!("[harness_bundle] failed to write {}: {e}", path.display());
                 false
             }
         }

@@ -154,7 +154,7 @@ impl PaneCtx {
     /// Navigation START: the frontend uses this to ARM the spinner, and it is
     /// the only place the pushState patch is (re)installed.
     fn on_nav_start(&self, nav_url: &tauri::Url) -> bool {
-        eprintln!("[relay:browser] navigation: {nav_url}");
+        crate::relay_eprintln!("[relay:browser] navigation: {nav_url}");
         browser_log(
             &self.app,
             &format!(
@@ -246,7 +246,7 @@ impl PaneCtx {
         let blank = new_url.as_str().is_empty()
             || new_url.as_str().eq_ignore_ascii_case("about:blank");
         if blank {
-            eprintln!("[relay:browser] new_window: blank popup — allowing real popup window (OAuth)");
+            crate::relay_eprintln!("[relay:browser] new_window: blank popup — allowing real popup window (OAuth)");
             return NewWindowResponse::Allow;
         }
         let navigated = match self.app.get_webview(&self.label) {
@@ -254,7 +254,7 @@ impl PaneCtx {
             None => false,
         };
         if navigated {
-            eprintln!("[relay:browser] new_window: {new_url} — navigating in-place");
+            crate::relay_eprintln!("[relay:browser] new_window: {new_url} — navigating in-place");
             let _ = self.app.emit(
                 "browser:navigated",
                 BrowserNavigatedEvent {
@@ -264,7 +264,7 @@ impl PaneCtx {
                 },
             );
         } else {
-            eprintln!("[relay:browser] new_window: {new_url} — pane gone, ignoring");
+            crate::relay_eprintln!("[relay:browser] new_window: {new_url} — pane gone, ignoring");
         }
         NewWindowResponse::Deny
     }
@@ -2138,7 +2138,7 @@ impl BrowserManager {
         project_id: Option<&str>,
     ) -> Result<(), String> {
         let label = browser_label(pane_id, tab_id);
-        eprintln!("[relay:browser] create pane={pane_id} tab={tab_id} label={label} url={url} rect={rect:?}");
+        crate::relay_eprintln!("[relay:browser] create pane={pane_id} tab={tab_id} label={label} url={url} rect={rect:?}");
         browser_log(&self.app, &format!("create pane={pane_id} tab={tab_id} label={label} url={url} rect={rect:?}"));
 
         // Guard against concurrent creates for the same label. React
@@ -2148,7 +2148,7 @@ impl BrowserManager {
         {
             let mut inf = self.in_flight.lock();
             if inf.contains(&label) {
-                eprintln!("[relay:browser] create SKIP label={label} — already in-flight");
+                crate::relay_eprintln!("[relay:browser] create SKIP label={label} — already in-flight");
                 browser_log(&self.app, &format!("create SKIP label={label} — already in-flight"));
                 return Ok(());
             }
@@ -2160,7 +2160,7 @@ impl BrowserManager {
         let _in_flight_guard = InFlightGuard::new(&self.in_flight, label.clone());
 
         ensure_supported().map_err(|e| {
-            eprintln!("[relay:browser] ensure_supported FAILED: {e}");
+            crate::relay_eprintln!("[relay:browser] ensure_supported FAILED: {e}");
             e
         })?;
 
@@ -2173,10 +2173,10 @@ impl BrowserManager {
         {
             let old = self.webviews.lock().remove(&label);
             if let Some(pane) = old {
-                eprintln!("[relay:browser] create replacing existing label={label} — closing old webview on main thread");
+                crate::relay_eprintln!("[relay:browser] create replacing existing label={label} — closing old webview on main thread");
                 self.run_main_thread_call(move || pane.close().map_err(|e| e.to_string()))
                     .map_err(|e| {
-                        eprintln!("[relay:browser] close(existing) FAILED: {e}");
+                        crate::relay_eprintln!("[relay:browser] close(existing) FAILED: {e}");
                         e
                     })?;
                 std::thread::sleep(std::time::Duration::from_millis(50));
@@ -2187,7 +2187,7 @@ impl BrowserManager {
         // `file://` containment in the pane's scope — see validate_nav_url).
         let scope_roots = self.pane_scope_roots(project_id);
         let _parsed = validate_nav_url_in_scope(url, &scope_roots).map_err(|e| {
-            eprintln!("[relay:browser] url validation FAILED: {e}");
+            crate::relay_eprintln!("[relay:browser] url validation FAILED: {e}");
             e
         })?;
         let rect = sanitize(rect);
@@ -2204,7 +2204,7 @@ impl BrowserManager {
                 return Err(e);
             }
         };
-        eprintln!("[relay:browser] create OK for label={label}");
+        crate::relay_eprintln!("[relay:browser] create OK for label={label}");
 
         self.webviews.lock().insert(label.clone(), pane);
 
@@ -2222,7 +2222,7 @@ impl BrowserManager {
         match self.call_devtools_protocol(&label, "Page.enable", "{}") {
             Ok(_) => browser_log(&self.app, &format!("Page.enable OK label={label}")),
             Err(e) => {
-                eprintln!("[relay:browser] Page.enable failed (non-fatal): {e}");
+                crate::relay_eprintln!("[relay:browser] Page.enable failed (non-fatal): {e}");
                 browser_log(&self.app, &format!("Page.enable FAILED label={label}: {e}"));
             }
         }
@@ -2415,7 +2415,7 @@ impl BrowserManager {
                         .map(|(l, _)| l.to_string())
                         .collect();
                     let msg = "main window not found".to_string();
-                    eprintln!("[relay:browser] get_window('main') FAILED: {msg} — known: {known:?}");
+                    crate::relay_eprintln!("[relay:browser] get_window('main') FAILED: {msg} — known: {known:?}");
                     msg
                 })?;
 
@@ -2432,7 +2432,7 @@ impl BrowserManager {
                 true,
             );
 
-            eprintln!(
+            crate::relay_eprintln!(
                 "[relay:browser] add_child at ({},{}) {}x{} (main-thread scheduled)",
                 rect.x, rect.y, rect.width, rect.height
             );
@@ -2462,13 +2462,13 @@ impl BrowserManager {
                         } else {
                             "unknown panic".to_string()
                         };
-                        eprintln!("[relay:browser] add_child PANICKED on main thread: {detail}");
+                        crate::relay_eprintln!("[relay:browser] add_child PANICKED on main thread: {detail}");
                         Err(format!("browser webview creation panicked: {detail}"))
                     }
                 };
                 match &res {
-                    Ok(_) => eprintln!("[relay:browser] add_child OK on main thread for label={label_owned}"),
-                    Err(msg) => eprintln!("[relay:browser] add_child FAILED on main thread: {msg}"),
+                    Ok(_) => crate::relay_eprintln!("[relay:browser] add_child OK on main thread for label={label_owned}"),
+                    Err(msg) => crate::relay_eprintln!("[relay:browser] add_child FAILED on main thread: {msg}"),
                 }
                 let _ = tx.send(res);
             });
@@ -2552,8 +2552,8 @@ impl BrowserManager {
                 .build()
                 .map_err(|e| format!("failed to create browser webview window: {e}"));
                 match &res {
-                    Ok(_) => eprintln!("[relay:browser] WebviewWindow OK for label={label_for_win}"),
-                    Err(msg) => eprintln!("[relay:browser] WebviewWindow FAILED for label={label_for_win}: {msg}"),
+                    Ok(_) => crate::relay_eprintln!("[relay:browser] WebviewWindow OK for label={label_for_win}"),
+                    Err(msg) => crate::relay_eprintln!("[relay:browser] WebviewWindow FAILED for label={label_for_win}: {msg}"),
                 }
                 let _ = tx.send(res);
             });

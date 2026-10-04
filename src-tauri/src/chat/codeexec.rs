@@ -324,7 +324,7 @@ mod tests {
         // drain itself is pinned by wait_with_bounded_output_tails_both_pipes
         // and the util::BoundedTail unit tests).
         if which_python_missing() {
-            eprintln!("skipping: no Python interpreter on this machine");
+            crate::relay_eprintln!("skipping: no Python interpreter on this machine");
             return;
         }
         // ~4MB of stdout — far past both the drain cap and MAX_OUTPUT.

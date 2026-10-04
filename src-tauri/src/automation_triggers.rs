@@ -586,12 +586,12 @@ fn install_fs_watcher(
     ) {
         Ok(w) => w,
         Err(e) => {
-            eprintln!("[automation-triggers] watcher create failed for {}: {e}", canon.display());
+            crate::relay_eprintln!("[automation-triggers] watcher create failed for {}: {e}", canon.display());
             return None;
         }
     };
     if let Err(e) = watcher.watch(canon, RecursiveMode::Recursive) {
-        eprintln!("[automation-triggers] watch failed for {}: {e}", canon.display());
+        crate::relay_eprintln!("[automation-triggers] watch failed for {}: {e}", canon.display());
         return None;
     }
     let app = app.clone();
@@ -674,7 +674,7 @@ fn fire_fs_automations(app: &AppHandle, db: &Arc<Mutex<Connection>>, canon: &Pat
             let _ = db::set_automation_trigger_state(&conn, &a.id, &now.to_string());
         }
         if let Err(e) = launch_run(Some(app), db, &a, RunSource::FsWatch) {
-            eprintln!("[automation-triggers] fs launch failed for {}: {e}", a.id);
+            crate::relay_eprintln!("[automation-triggers] fs launch failed for {}: {e}", a.id);
         }
     }
 }

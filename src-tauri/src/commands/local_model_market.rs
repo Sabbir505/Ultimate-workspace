@@ -1425,7 +1425,7 @@ async fn run_download(
             let r = match req.send().await {
                 Ok(r) => r,
                 Err(e) => {
-                    eprintln!(
+                    crate::relay_eprintln!(
                         "[download] attempt {attempt}/{DOWNLOAD_ATTEMPTS} could not reach the \
                          server ({e}); retrying"
                     );
@@ -1461,7 +1461,7 @@ async fn run_download(
             // A 4xx/5xx on a retryable request is worth another go (the CDN
             // edge can 5xx a Range request); only the last attempt reports.
             if attempt < DOWNLOAD_ATTEMPTS {
-                eprintln!(
+                crate::relay_eprintln!(
                     "[download] attempt {attempt}/{DOWNLOAD_ATTEMPTS} got HTTP {status}; retrying"
                 );
                 backoff_before_retry(attempt).await;
@@ -1592,7 +1592,7 @@ async fn run_download(
                     _ => String::new(),
                 };
                 if attempt < DOWNLOAD_ATTEMPTS {
-                    eprintln!(
+                    crate::relay_eprintln!(
                         "[download] attempt {attempt}/{DOWNLOAD_ATTEMPTS} hit {why}; \
                          resuming from {} bytes",
                         partial_size(partial_path).await

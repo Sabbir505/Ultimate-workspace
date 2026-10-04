@@ -165,7 +165,7 @@ pub async fn connector_disconnect(
         let db_err = db::delete_connector_credential_row(&conn, &connector_id);
         if let Err(e) = &keychain_err {
             // Keychain failure is non-fatal (may not exist), but log it.
-            eprintln!("warning: keychain delete for {connector_id} failed: {e}");
+            crate::relay_eprintln!("warning: keychain delete for {connector_id} failed: {e}");
         }
         if let Err(e) = &db_err {
             return Err(format!("DB credential delete failed: {e}"));

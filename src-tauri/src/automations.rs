@@ -159,7 +159,7 @@ pub fn start(app: AppHandle, db: Arc<Mutex<Connection>>) {
                 };
                 let Some(automation) = automation else { continue };
                 if let Err(e) = launch_run(Some(&app), &db, &automation, RunSource::Email) {
-                    eprintln!("[automations] gmail-triggered launch failed for {}: {e}", automation.id);
+                    crate::relay_eprintln!("[automations] gmail-triggered launch failed for {}: {e}", automation.id);
                 }
             }
         }
@@ -187,7 +187,7 @@ fn tick(app: Option<&AppHandle>, db: &Arc<Mutex<Connection>>) {
     };
     for automation in due {
         if let Err(e) = launch_run(app, db, &automation, RunSource::Scheduled) {
-            eprintln!("[automations] scheduled launch failed for {}: {e}", automation.id);
+            crate::relay_eprintln!("[automations] scheduled launch failed for {}: {e}", automation.id);
         }
     }
     // Event triggers that need no resident process: a git HEAD-SHA comparison
@@ -204,7 +204,7 @@ fn tick(app: Option<&AppHandle>, db: &Arc<Mutex<Connection>>) {
         };
         let Some(automation) = automation else { continue };
         if let Err(e) = launch_run(app, db, &automation, RunSource::GitChange) {
-            eprintln!("[automations] git-triggered launch failed for {}: {e}", automation.id);
+            crate::relay_eprintln!("[automations] git-triggered launch failed for {}: {e}", automation.id);
         }
     }
 }
@@ -450,7 +450,7 @@ fn stamp_skipped_once(db: &Arc<Mutex<Connection>>, automation: &Automation) {
     }
     let conn = db.lock();
     if let Err(e) = record_status(&conn, &automation.id, "skipped") {
-        eprintln!("[automations] record_status(skipped) failed for {}: {e}", automation.id);
+        crate::relay_eprintln!("[automations] record_status(skipped) failed for {}: {e}", automation.id);
     }
 }
 
@@ -611,7 +611,7 @@ fn prepare_run_inner(db: &Arc<Mutex<Connection>>, automation: &Automation, sourc
             cs_id
         } else {
             if automation.chat_session_id.is_some() {
-                eprintln!(
+                crate::relay_eprintln!(
                     "[automations] run-log chat session {:?} of {} is gone — recreating it",
                     automation.chat_session_id, automation.id
                 );
@@ -897,20 +897,20 @@ fn finalize(
         // a write happens to succeed. Retry once (transient SQLITE_BUSY),
         // then log loudly so the failure is at least diagnosable.
         if let Err(e) = record_run(&conn, &automation.id, &status, Some(&prepared.chat_session_id), prepared.source.as_str()) {
-            eprintln!(
+            crate::relay_eprintln!(
                 "[automations] record_run failed for {} ({}), retrying once: {e}",
                 automation.id, automation.name
             );
             std::thread::sleep(Duration::from_millis(250));
             if let Err(e2) = record_run(&conn, &automation.id, &status, Some(&prepared.chat_session_id), prepared.source.as_str()) {
-                eprintln!(
+                crate::relay_eprintln!(
                     "[automations] record_run retry ALSO failed for {} — the scheduler may re-fire this automation: {e2}",
                     automation.id
                 );
             }
         }
         if let Err(e) = finish_run(&conn, &prepared.run_id, &status, &summary) {
-            eprintln!(
+            crate::relay_eprintln!(
                 "[automations] finish_run failed for run {} of {}: {e}",
                 prepared.run_id, automation.id
             );
@@ -964,7 +964,7 @@ fn spawn_notify(app_present: bool, fut: impl std::future::Future<Output = ()> + 
         std::thread::spawn(move || {
             match tokio::runtime::Builder::new_current_thread().enable_all().build() {
                 Ok(rt) => rt.block_on(fut),
-                Err(e) => eprintln!("[automations] notify runtime build failed: {e}"),
+                Err(e) => crate::relay_eprintln!("[automations] notify runtime build failed: {e}"),
             }
         });
     }
@@ -1006,7 +1006,7 @@ fn notify_run_finished(
         let payload = webhook_payload(automation, status, summary, finished_at);
         spawn_notify(app.is_some(), async move {
             if let Err(e) = post_json(&url, &payload).await {
-                eprintln!("[automations] webhook POST failed: {e}");
+                crate::relay_eprintln!("[automations] webhook POST failed: {e}");
             }
         });
     }
@@ -1029,7 +1029,7 @@ fn notify_run_finished(
                     // "not connected" is the normal case for users without the
                     // Gmail connector — don't spam stderr for it.
                     if e != "connector not connected" {
-                        eprintln!("[automations] failure email failed: {e}");
+                        crate::relay_eprintln!("[automations] failure email failed: {e}");
                     }
                 }
             });

@@ -557,11 +557,11 @@ pub async fn attach_filtered(app: &AppHandle, allowed: Option<&[String]>) -> Vec
                         s
                     }
                     Ok(Err(e)) => {
-                        eprintln!("[mcp-gallery] `{}` connect failed: {e} — skipping", def.name);
+                        crate::relay_eprintln!("[mcp-gallery] `{}` connect failed: {e} — skipping", def.name);
                         continue;
                     }
                     Err(_) => {
-                        eprintln!(
+                        crate::relay_eprintln!(
                             "[mcp-gallery] `{}` connect timed out (first-run download?) — skipping",
                             def.name
                         );
@@ -575,7 +575,7 @@ pub async fn attach_filtered(app: &AppHandle, allowed: Option<&[String]>) -> Vec
                 // First wire name wins on cross-server collisions after
                 // prefixing (e.g. two custom servers with the same slug).
                 tools.retain(|t| seen_wire_names.insert(t.wire_name.clone()));
-                eprintln!(
+                crate::relay_eprintln!(
                     "[mcp-gallery] `{}` attached with {} tool(s)",
                     def.name,
                     tools.len()
@@ -583,7 +583,7 @@ pub async fn attach_filtered(app: &AppHandle, allowed: Option<&[String]>) -> Vec
                 entries.extend(tools);
             }
             Err(e) => {
-                eprintln!("[mcp-gallery] `{}` tools/list failed: {e}", def.name);
+                crate::relay_eprintln!("[mcp-gallery] `{}` tools/list failed: {e}", def.name);
             }
         }
     }

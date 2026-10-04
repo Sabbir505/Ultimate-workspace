@@ -1124,7 +1124,7 @@ pub(super) fn read_claude_stream(
                 let _ = crate::db::delete_setting(&conn, &cli_session_key("claude_code", sid));
             }
         }
-        eprintln!(
+        crate::relay_eprintln!(
             "[context] claude_code resume failed (no turn activity); dropping stale CLI              session id — the next send replays the context primer"
         );
         crate::chat::stream_events::emit_status_reason(

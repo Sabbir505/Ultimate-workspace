@@ -243,7 +243,7 @@ fn parse_config_entries(items: &[Value]) -> Vec<HookDef> {
         .filter_map(|item| match serde_json::from_value::<HookDef>(item.clone()) {
             Ok(def) => Some(def),
             Err(e) => {
-                eprintln!("[hooks] skipping invalid hook entry: {e}");
+                crate::relay_eprintln!("[hooks] skipping invalid hook entry: {e}");
                 None
             }
         })

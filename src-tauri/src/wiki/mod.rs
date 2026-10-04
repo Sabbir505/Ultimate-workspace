@@ -2000,12 +2000,12 @@ pub fn install_wiki_git_watcher<R: Runtime>(app: &AppHandle<R>, root: &str) {
     match watcher {
         Ok(mut w) => {
             if let Err(e) = w.watch(&git_dir, notify::RecursiveMode::Recursive) {
-                eprintln!("[wiki] git watch install failed for {root}: {e}");
+                crate::relay_eprintln!("[wiki] git watch install failed for {root}: {e}");
                 return;
             }
             watchers.insert(root.to_string(), w);
         }
-        Err(e) => eprintln!("[wiki] git watcher create failed for {root}: {e}"),
+        Err(e) => crate::relay_eprintln!("[wiki] git watcher create failed for {root}: {e}"),
     }
 }
 
@@ -2024,7 +2024,7 @@ pub fn spawn_freshness_task(app: AppHandle) {
     } else {
         // spawn_freshness_task runs once from lib.rs setup; a second call
         // would orphan the first loop's receiver.
-        eprintln!("[wiki] freshness task spawned twice; keeping existing watch state");
+        crate::relay_eprintln!("[wiki] freshness task spawned twice; keeping existing watch state");
         return;
     }
     for project in {
@@ -2084,7 +2084,7 @@ pub fn spawn_freshness_task(app: AppHandle) {
                 tauri::async_runtime::spawn(async move {
                     if let Err(e) = freshness_check(&app_for_root, &root).await {
                         if e != "cancelled" {
-                            eprintln!("[wiki] freshness check failed for {root}: {e}");
+                            crate::relay_eprintln!("[wiki] freshness check failed for {root}: {e}");
                         }
                     }
                 });
@@ -2142,7 +2142,7 @@ async fn freshness_check<R: Runtime>(app: &AppHandle<R>, root: &str) -> Result<(
         if head.is_some() && stored_head.is_some() && head != stored_head {
             if let Err(e) = run_update(app, Path::new(&path)).await {
                 if e != "cancelled" {
-                    eprintln!("[wiki] auto-update for {path} failed: {e}");
+                    crate::relay_eprintln!("[wiki] auto-update for {path} failed: {e}");
                 }
             }
         }

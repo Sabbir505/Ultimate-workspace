@@ -71,7 +71,7 @@ pub fn sweep(bin_root: &Path) -> usize {
         }
         if process.kill() {
             killed += 1;
-            eprintln!(
+            crate::relay_eprintln!(
                 "[sidecar-sweep] killed orphaned sidecar {} (pid {})",
                 exe_canon.display(),
                 pid.as_u32()

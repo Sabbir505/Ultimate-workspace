@@ -143,7 +143,7 @@ pub fn write_mcp_config(
     let cfg = mcp_config_json(&bin_str, project_id, ws_port, crate::browser_mcp::mcp_auth_token());
     let mcp_dir = data_dir.join("mcp");
     if let Err(e) = std::fs::create_dir_all(&mcp_dir) {
-        eprintln!("[relay:mcp] failed to create mcp dir: {e}");
+        crate::relay_eprintln!("[relay:mcp] failed to create mcp dir: {e}");
         return None;
     }
     // Sanitize project_id into a filesystem-safe filename (project ids are
@@ -154,7 +154,7 @@ pub fn write_mcp_config(
     let path = mcp_dir.join(format!("{safe}.mcp.json"));
     let pretty = serde_json::to_string_pretty(&cfg).unwrap_or_else(|_| "{}".into());
     if let Err(e) = std::fs::write(&path, pretty) {
-        eprintln!("[relay:mcp] failed to write .mcp.json at {}: {e}", path.display());
+        crate::relay_eprintln!("[relay:mcp] failed to write .mcp.json at {}: {e}", path.display());
         return None;
     }
     Some(path)
@@ -173,7 +173,7 @@ pub fn write_opencode_config(
     let cfg = opencode_config_json(&bin_str, project_id, ws_port, crate::browser_mcp::mcp_auth_token());
     let mcp_dir = data_dir.join("mcp");
     if let Err(e) = std::fs::create_dir_all(&mcp_dir) {
-        eprintln!("[relay:mcp] failed to create mcp dir: {e}");
+        crate::relay_eprintln!("[relay:mcp] failed to create mcp dir: {e}");
         return None;
     }
     let safe = project_id.chars().map(|c| {
@@ -182,7 +182,7 @@ pub fn write_opencode_config(
     let path = mcp_dir.join(format!("{safe}.opencode.json"));
     let pretty = serde_json::to_string_pretty(&cfg).unwrap_or_else(|_| "{}".into());
     if let Err(e) = std::fs::write(&path, pretty) {
-        eprintln!("[relay:mcp] failed to write opencode config at {}: {e}", path.display());
+        crate::relay_eprintln!("[relay:mcp] failed to write opencode config at {}: {e}", path.display());
         return None;
     }
     Some(path)
@@ -401,7 +401,7 @@ pub fn ensure_commandcode_bridge(
         cwd,
     );
     if !ok {
-        eprintln!("[relay:mcp] commandcode bridge registration failed — its sessions keep CLI-native tools only");
+        crate::relay_eprintln!("[relay:mcp] commandcode bridge registration failed — its sessions keep CLI-native tools only");
         return false;
     }
     let marker_json = serde_json::to_string(&json!({
@@ -467,7 +467,7 @@ pub fn register_commandcode_connectors(
         ) {
             ok += 1;
         } else {
-            eprintln!(
+            crate::relay_eprintln!(
                 "[relay:mcp] commandcode connector registration failed for {} — its tools stay unavailable there",
                 c.name
             );

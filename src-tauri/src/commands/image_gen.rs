@@ -1337,7 +1337,7 @@ pub async fn start_sidecar_core(
             let _ = std::fs::write(&pid_path, pid.to_string());
         }
     }
-    eprintln!(
+    crate::relay_eprintln!(
         "[image-gen] sd-server up on port {port} ({} {:?}, backend {backend})",
         diffusion.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
         diffusion.layout,
@@ -1364,7 +1364,7 @@ pub async fn start_sidecar_core(
                 let _ = post_generation(port, "warmup", Some(320), Some(320), None, None).await;
             }
             WARMING.store(false, std::sync::atomic::Ordering::Relaxed);
-            eprintln!("[image-gen] sidecar warmup complete");
+            crate::relay_eprintln!("[image-gen] sidecar warmup complete");
         });
     }
     Ok(port)
@@ -1474,7 +1474,7 @@ pub async fn ensure_server_alive(
     warm: bool,
 ) -> CmdResult<()> {
     if server_process_dead(image) {
-        eprintln!("[image-gen] tracked sd-server died — clearing and restarting");
+        crate::relay_eprintln!("[image-gen] tracked sd-server died — clearing and restarting");
         stop_sidecar(image).await;
     }
     if image.0.lock().is_none() {

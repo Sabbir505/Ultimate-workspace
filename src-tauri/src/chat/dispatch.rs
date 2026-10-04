@@ -4375,7 +4375,7 @@ pub(crate) async fn run_search_docs_tool(app: &AppHandle, _name: &str, args: &Va
                     {
                         Ok(v) => v.into_iter().next(),
                         Err(e) => {
-                            eprintln!("[docs] query embedding failed, falling back to keyword-only: {e}");
+                            crate::relay_eprintln!("[docs] query embedding failed, falling back to keyword-only: {e}");
                             None
                         }
                     }
@@ -4482,7 +4482,7 @@ pub(crate) async fn run_search_docs_tool(app: &AppHandle, _name: &str, args: &Va
                 .take(top_k)
                 .collect(),
             Err(e) => {
-                eprintln!("[docs] rerank failed, keeping fused order: {e}");
+                crate::relay_eprintln!("[docs] rerank failed, keeping fused order: {e}");
                 hits
             }
         }

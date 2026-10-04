@@ -185,7 +185,7 @@ pub async fn install_pinned_zip(
     .map_err(|e| format!("extract task failed: {e}"))?;
 
     let extracted = extracted?;
-    eprintln!("[builds] extracted {extracted} files into {}", install_dir.display());
+    crate::relay_eprintln!("[builds] extracted {extracted} files into {}", install_dir.display());
     let _ = std::fs::remove_file(&zip_path);
     Ok(())
 }

@@ -256,7 +256,7 @@ fn eval_retrieval_recall_at_8() {
         if found {
             hits_at_8 += 1;
         } else {
-            eprintln!("[eval] MISS: query={q:?} gold={} got={:?}", qa.gold_id,
+            crate::relay_eprintln!("[eval] MISS: query={q:?} gold={} got={:?}", qa.gold_id,
                       results.iter().map(|s| s.record.id.as_str()).collect::<Vec<_>>());
         }
         // Temporal gate: the superseded deployment fact must never surface.
@@ -266,7 +266,7 @@ fn eval_retrieval_recall_at_8() {
         );
     }
     let recall = hits_at_8 as f64 / queries.len() as f64;
-    eprintln!("[eval] retrieval recall@8 = {recall:.2} ({hits_at_8}/{})", queries.len());
+    crate::relay_eprintln!("[eval] retrieval recall@8 = {recall:.2} ({hits_at_8}/{})", queries.len());
     assert!(recall >= 0.85, "recall@8 {recall:.2} below the 0.85 gate");
 }
 
@@ -311,7 +311,7 @@ Hope that helps."#;
         .filter(|g| kept_lc.iter().any(|k| k.contains(*g)))
         .count();
     let recall = hits as f64 / gold.len() as f64;
-    eprintln!("[eval] extraction recall(imp>=6) = {recall:.2} ({hits}/{})", gold.len());
+    crate::relay_eprintln!("[eval] extraction recall(imp>=6) = {recall:.2} ({hits}/{})", gold.len());
     assert!(recall >= 0.9, "extraction recall {recall:.2} below the 0.9 gate");
 
     // Precision: the filters cannot judge topicality (that's the extractor
@@ -324,7 +324,7 @@ Hope that helps."#;
     // survive (gate), shape garbage never survives, and any surviving
     // low-value entry is down-ranked by its own importance.
     let spurious = report.kept.iter().filter(|c| c.content.contains("main.rs")).count();
-    eprintln!("[eval] extraction spurious kept = {spurious}/{}", report.kept.len());
+    crate::relay_eprintln!("[eval] extraction spurious kept = {spurious}/{}", report.kept.len());
     assert_eq!(report.dropped_secrets, 1, "the credential-shaped candidate must be dropped");
 
     // Injection-level precision (the user-visible gate, ≤10% spurious among
@@ -338,7 +338,7 @@ Hope that helps."#;
         .filter(|c| c.importance >= 6 && c.content.contains("main.rs"))
         .count();
     let rate = spurious_injected_class as f64 / injected_class.max(1) as f64;
-    eprintln!("[eval] injected-class spurious rate = {rate:.2}");
+    crate::relay_eprintln!("[eval] injected-class spurious rate = {rate:.2}");
     assert!(rate <= 0.10 + f64::EPSILON || spurious_injected_class == 0,
         "injected-class spurious rate {rate:.2} above the 0.1 gate");
     // Guard the fixture assumption: with the sloppy slip at importance 6 the

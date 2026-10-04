@@ -132,7 +132,7 @@ fn maybe_apply_extract_override(
                 );
             }
         }
-        eprintln!(
+        crate::relay_eprintln!(
             "[memory] extract-model override local_gguf::{override_model} ignored — no local model is running"
         );
         return (provider, model, api_key, base_url);
@@ -146,7 +146,7 @@ fn maybe_apply_extract_override(
         )
     };
     if override_key.is_empty() {
-        eprintln!(
+        crate::relay_eprintln!(
             "[memory] extract-model override {override_provider}::{override_model} ignored — no API key saved for {override_provider}"
         );
         return (provider, model, api_key, base_url);
@@ -180,7 +180,7 @@ pub fn spawn_turn_extraction(app: &AppHandle, chat_session_id: &str) {
     let sid = chat_session_id.to_string();
     tokio::spawn(async move {
         if let Err(e) = extract_session(&app, &sid).await {
-            eprintln!("[memory] extraction failed for {sid}: {e}");
+            crate::relay_eprintln!("[memory] extraction failed for {sid}: {e}");
         }
     });
 }
@@ -282,7 +282,7 @@ pub async fn extract_session(app: &AppHandle, chat_session_id: &str) -> Result<(
             .filter(|b| !b.is_empty())
             .is_none()
     {
-        eprintln!("[memory] extraction skipped: no local model server is running");
+        crate::relay_eprintln!("[memory] extraction skipped: no local model server is running");
         return Ok(());
     }
 
@@ -496,7 +496,7 @@ pub async fn extract_session(app: &AppHandle, chat_session_id: &str) -> Result<(
             db::upsert_cursor(&conn, chat_session_id, chunk_last_id).map_err(|e| e_tostring(e))?;
         }
     }
-    eprintln!(
+    crate::relay_eprintln!(
         "[memory] extracted {}: {} candidates → {}",
         chat_session_id,
         results.len(),
@@ -532,7 +532,7 @@ pub async fn extract_session(app: &AppHandle, chat_session_id: &str) -> Result<(
         )
         .await
         {
-            eprintln!("[memory] document merge skipped: {e}");
+            crate::relay_eprintln!("[memory] document merge skipped: {e}");
         }
     }
 
@@ -549,7 +549,7 @@ pub async fn extract_session(app: &AppHandle, chat_session_id: &str) -> Result<(
     )
     .await
     {
-        eprintln!("[memory] reflection skipped: {e}");
+        crate::relay_eprintln!("[memory] reflection skipped: {e}");
     }
     Ok(())
 }
@@ -645,7 +645,7 @@ async fn maybe_reflect(
         .map_err(|e| e_tostring(e))?;
         (n, input.sample.len())
     };
-    eprintln!(
+    crate::relay_eprintln!(
         "[memory] reflection: {sample_len} facts → {applied} insights ({} questions)",
         questions.len()
     );
@@ -660,7 +660,7 @@ async fn maybe_reflect(
         if let Err(e) =
             merge_document(app, provider, api_key, base_url, model, None, &changes).await
         {
-            eprintln!("[memory] document merge (reflection) skipped: {e}");
+            crate::relay_eprintln!("[memory] document merge (reflection) skipped: {e}");
         }
     }
     Ok(())
@@ -921,7 +921,7 @@ pub async fn save_memory(
         )
         .await
         {
-            eprintln!("[memory] document merge skipped: {e}");
+            crate::relay_eprintln!("[memory] document merge skipped: {e}");
         }
     }
     Ok(format!(
@@ -1030,7 +1030,7 @@ pub async fn merge_document(
             "trimmed": trimmed,
         }),
     );
-    eprintln!(
+    crate::relay_eprintln!(
         "[memory-audit] document_merge_chars={} trimmed={trimmed}",
         doc.len()
     );
@@ -1104,7 +1104,7 @@ async fn maybe_backfill_embeddings(app: &AppHandle) -> usize {
         }
     }
     if n > 0 {
-        eprintln!("[memory] backfilled {n} embedding(s)");
+        crate::relay_eprintln!("[memory] backfilled {n} embedding(s)");
         let conn = db.0.lock();
         let _ = db::log_memory_op(
             &conn,

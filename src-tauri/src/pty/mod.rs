@@ -48,7 +48,7 @@ fn panic_payload_message(panic: &(dyn std::any::Any + Send)) -> String {
 /// The pane's process itself is untouched — Resume on the crashed pane
 /// respawns it — but until then every IO path for the pane is dead.
 fn emit_pane_crashed(app: &AppHandle, pane_id: &str, thread: &str, reason: &str) {
-    eprintln!("pty pane {pane_id} {thread} thread panicked: {reason}");
+    crate::relay_eprintln!("pty pane {pane_id} {thread} thread panicked: {reason}");
     let _ = app.emit(
         "pty:crashed",
         PtyCrashedEvent {

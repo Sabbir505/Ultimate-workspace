@@ -636,7 +636,7 @@ fn load_engine(model_dir: &Path, model_id: &str) -> CmdResult<TtsEngine> {
         )
     })?;
     let voices = voices_for_model(model_dir);
-    eprintln!(
+    crate::relay_eprintln!(
         "[tts] Kokoro loaded ({model_id} from {}, {} speakers, {} Hz)",
         model_dir.display(),
         tts.num_speakers(),
@@ -730,7 +730,7 @@ async fn ensure_engine(db: &DbState, tts: &TtsState) -> CmdResult<Arc<TtsEngine>
 pub fn unload(tts: &TtsState) {
     let taken = tts.0.lock().take();
     if let Some(engine) = taken {
-        eprintln!("[tts] Kokoro unloaded ({})", engine.model_id);
+        crate::relay_eprintln!("[tts] Kokoro unloaded ({})", engine.model_id);
     }
 }
 
@@ -1123,8 +1123,8 @@ pub fn maybe_preload(app: &tauri::AppHandle, db: &DbState) {
         let db = app.state::<DbState>();
         let tts = app.state::<TtsState>();
         match ensure_engine(&db, &tts).await {
-            Ok(_) => eprintln!("[tts] model loaded at startup (keep-loaded is on)"),
-            Err(e) => eprintln!("[tts] startup preload skipped: {e}"),
+            Ok(_) => crate::relay_eprintln!("[tts] model loaded at startup (keep-loaded is on)"),
+            Err(e) => crate::relay_eprintln!("[tts] startup preload skipped: {e}"),
         }
     });
 }
@@ -1519,7 +1519,7 @@ fn existing_file_is_complete(
     match sha256_file(dest) {
         Ok(actual) if actual.eq_ignore_ascii_case(expected_hex) => Ok(Some(expected_len)),
         Ok(actual) => {
-            eprintln!(
+            crate::relay_eprintln!(
                 "[tts] {} is present but its sha256 does not match (expected {expected_hex}, \
                  got {actual}) — downloading it again",
                 dest.display()
@@ -1565,7 +1565,7 @@ async fn hf_download_file(
     let expected = entry.size.unwrap_or(0);
     let expected_sha256 = entry.lfs_sha256();
     if expected_sha256.is_none() && expected >= NO_HASH_WARN_BYTES {
-        eprintln!(
+        crate::relay_eprintln!(
             "[tts] {}: the listing carries no sha256 — falling back to a size-only check \
              ({expected} bytes)",
             entry.path

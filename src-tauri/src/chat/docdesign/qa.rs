@@ -140,7 +140,7 @@ pub async fn run_render_probes(app: &AppHandle, path: &Path, format: &str) -> Op
     );
     if let Err(e) = emit {
         PENDING.lock().remove(&request_id);
-        eprintln!("docdesign qa: could not reach the frontend: {e}");
+        crate::relay_eprintln!("docdesign qa: could not reach the frontend: {e}");
         return None;
     }
 

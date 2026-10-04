@@ -675,12 +675,12 @@ impl LocalModelRegistry {
             .map(|r| r.status().is_success())
             .unwrap_or(false);
         if !healthy {
-            eprintln!(
+            crate::relay_eprintln!(
                 "[local-models] sidecar for model_id={model_id} (port {port}) is not answering /health; respawning"
             );
             return None;
         }
-        eprintln!("[local-models] reusing running chat sidecar for {model_id} (port {port})");
+        crate::relay_eprintln!("[local-models] reusing running chat sidecar for {model_id} (port {port})");
         Some(StartedModel {
             model_id: model_id.to_string(),
             port,
@@ -875,7 +875,7 @@ pub fn save_last_good_ngl(conn: &rusqlite::Connection, model_id: &str, ngl: i32)
     entry.last_good_ngl = Some(ngl);
     if let Ok(json) = serde_json::to_string(&map) {
         if let Err(e) = crate::db::set_setting(conn, OVERRIDES_KEY, &json) {
-            eprintln!("[local-models] failed to persist last-good ngl: {e:?}");
+            crate::relay_eprintln!("[local-models] failed to persist last-good ngl: {e:?}");
         }
     }
 }
@@ -1013,7 +1013,7 @@ impl LocalModelRegistry {
 
         for (attempt_idx, try_ngl) in attempt_ngls.iter().enumerate() {
             let try_ngl = *try_ngl;
-            eprintln!(
+            crate::relay_eprintln!(
                 "[local-models] Attempt {}/{}: --n-gpu-layers={} (gguf={})",
                 attempt_idx + 1,
                 attempt_ngls.len(),
@@ -1056,7 +1056,7 @@ impl LocalModelRegistry {
                 Err(e) => {
                     if attempt_idx + 1 < attempt_ngls.len() {
                         // Try the next ngl value in the ladder.
-                        eprintln!(
+                        crate::relay_eprintln!(
                             "[local-models] spawn failed with n-gpu-layers={}: {}; trying next step.",
                             try_ngl, e
                         );
@@ -1124,9 +1124,9 @@ impl LocalModelRegistry {
                 };
                 self.handles.lock().insert(model_id.clone(), handle);
                 if try_ngl == 0 {
-                    eprintln!("[local-models] Model loaded on CPU only (--n-gpu-layers=0).");
+                    crate::relay_eprintln!("[local-models] Model loaded on CPU only (--n-gpu-layers=0).");
                 } else {
-                    eprintln!(
+                    crate::relay_eprintln!(
                         "[local-models] Model loaded successfully with --n-gpu-layers={}.",
                         try_ngl
                     );
@@ -1164,7 +1164,7 @@ impl LocalModelRegistry {
                     .take(3)
                     .collect::<Vec<_>>()
                     .join(" | ");
-                eprintln!(
+                crate::relay_eprintln!(
                     "[local-models] n-gpu-layers={} hit OOM; stepping down. Snippet: {}",
                     try_ngl, snippet
                 );
@@ -1179,7 +1179,7 @@ impl LocalModelRegistry {
                 let no_jinja = stderr.contains("unrecognized argument")
                     || stderr.contains("invalid option flag");
                 if no_jinja && args_template.contains(&"--jinja".to_string()) {
-                    eprintln!(
+                    crate::relay_eprintln!(
                         "[local-models] --jinja rejected; retrying without it. Snippet: {}",
                         stderr.lines().take(1).collect::<String>()
                     );
@@ -1216,7 +1216,7 @@ impl LocalModelRegistry {
         if let Some(mut h) = handle {
             let _ = h.child.kill().await;
             let _ = h.child.wait().await;
-            eprintln!(
+            crate::relay_eprintln!(
                 "[local-models] ejected model_id={} port={}; VRAM released",
                 model_id, h.port
             );
@@ -1273,7 +1273,7 @@ impl LocalModelRegistry {
         }
         for k in dead {
             if let Some(h) = handles.remove(&k) {
-                eprintln!(
+                crate::relay_eprintln!(
                     "[local-models] sidecar for model_id={} (port {}) has exited; pruning",
                     k, h.port
                 );
@@ -1378,7 +1378,7 @@ impl LocalModelRegistry {
                 Ok(c) => c,
                 Err(e) => {
                     if try_ngl != 0 {
-                        eprintln!("[local-models] embedding sidecar spawn failed (ngl={try_ngl}): {e}; retrying on CPU");
+                        crate::relay_eprintln!("[local-models] embedding sidecar spawn failed (ngl={try_ngl}): {e}; retrying on CPU");
                         continue;
                     }
                     return Err(format!("failed to spawn llama-server for embeddings: {e}"));
@@ -1423,7 +1423,7 @@ impl LocalModelRegistry {
                         overrides_sig: String::new(),
                     },
                 );
-                eprintln!("[local-models] embedding sidecar up on port {port} (ngl={try_ngl})");
+                crate::relay_eprintln!("[local-models] embedding sidecar up on port {port} (ngl={try_ngl})");
                 return Ok(StartedModel {
                     model_id: EMBEDDING_MODEL_KEY.to_string(),
                     port,
@@ -1497,7 +1497,7 @@ impl LocalModelRegistry {
                 Ok(c) => c,
                 Err(e) => {
                     if try_ngl != 0 {
-                        eprintln!("[local-models] reranker sidecar spawn failed (ngl={try_ngl}): {e}; retrying on CPU");
+                        crate::relay_eprintln!("[local-models] reranker sidecar spawn failed (ngl={try_ngl}): {e}; retrying on CPU");
                         continue;
                     }
                     return Err(format!("failed to spawn llama-server for reranking: {e}"));
@@ -1556,7 +1556,7 @@ impl LocalModelRegistry {
                         overrides_sig: String::new(),
                     },
                 );
-                eprintln!("[local-models] reranker sidecar up on port {port} (ngl={try_ngl})");
+                crate::relay_eprintln!("[local-models] reranker sidecar up on port {port} (ngl={try_ngl})");
                 return Ok(StartedModel {
                     model_id: RERANKER_MODEL_KEY.to_string(),
                     port,
@@ -2150,7 +2150,7 @@ fn auto_ngl(gguf_path: &str) -> i32 {
     let gguf_bytes = match fs::metadata(gguf_path).map(|m| m.len()) {
         Ok(b) if b > 0 => b,
         _ => {
-            eprintln!("[local-models] auto_ngl: cannot stat {gguf_path}; using CPU-only.");
+            crate::relay_eprintln!("[local-models] auto_ngl: cannot stat {gguf_path}; using CPU-only.");
             return 0;
         }
     };
@@ -2159,13 +2159,13 @@ fn auto_ngl(gguf_path: &str) -> i32 {
     let free_vram_bytes = query_free_vram_bytes().unwrap_or(0);
 
     if free_vram_bytes > 0 {
-        eprintln!(
+        crate::relay_eprintln!(
             "[local-models] auto_ngl: GGUF={} MiB, free VRAM={} MiB, trying full offload (999).",
             gguf_bytes / (1024 * 1024),
             free_vram_bytes / (1024 * 1024)
         );
     } else {
-        eprintln!(
+        crate::relay_eprintln!(
             "[local-models] auto_ngl: GGUF={} MiB, no VRAM probe, trying full offload (999).",
             gguf_bytes / (1024 * 1024)
         );
@@ -2226,7 +2226,7 @@ pub(crate) fn query_free_vram_bytes() -> Option<u64> {
         let lib_name: [u8; 9] = *b"nvml.dll\0";
         let lib: HMODULE = LoadLibraryA(lib_name.as_ptr());
         if lib.is_null() {
-            eprintln!("[local-models] nvml.dll not found (no NVIDIA driver?).");
+            crate::relay_eprintln!("[local-models] nvml.dll not found (no NVIDIA driver?).");
             return None;
         }
 
@@ -2241,7 +2241,7 @@ pub(crate) fn query_free_vram_bytes() -> Option<u64> {
             cstr[..name.len()].copy_from_slice(name);
             let p = GetProcAddress(lib, cstr.as_ptr());
             if p.is_none() {
-                eprintln!(
+                crate::relay_eprintln!(
                     "[local-models] nvml: GetProcAddress failed for {}",
                     std::str::from_utf8(name).unwrap_or("?")
                 );

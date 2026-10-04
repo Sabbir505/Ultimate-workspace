@@ -1009,7 +1009,7 @@ pub fn migrate_cost_v2(conn: &Connection) -> DbResult<()> {
         .unwrap_or(false);
     if has_old_col {
         if let Err(e) = conn.execute("ALTER TABLE cost_events DROP COLUMN estimated_cost_usd", []) {
-            eprintln!("[relay] cost_v2: DROP COLUMN failed ({e}); column will be unused");
+            crate::relay_eprintln!("[relay] cost_v2: DROP COLUMN failed ({e}); column will be unused");
         }
     }
     Ok(())

@@ -97,12 +97,12 @@ pub fn install(
     ) {
         Ok(w) => w,
         Err(e) => {
-            eprintln!("[docs_watcher] watcher create failed for {}: {e}", canon.display());
+            crate::relay_eprintln!("[docs_watcher] watcher create failed for {}: {e}", canon.display());
             return;
         }
     };
     if let Err(e) = watcher.watch(&canon, RecursiveMode::Recursive) {
-        eprintln!("[docs_watcher] watch install failed for {}: {e}", canon.display());
+        crate::relay_eprintln!("[docs_watcher] watch install failed for {}: {e}", canon.display());
         return;
     }
     let app_for_thread = app.clone();
@@ -183,7 +183,7 @@ fn reindex_corpora_at(
                 })
                 .collect(),
             Err(e) => {
-                eprintln!("[docs_watcher] corpus lookup failed: {e}");
+                crate::relay_eprintln!("[docs_watcher] corpus lookup failed: {e}");
                 return;
             }
         }
@@ -196,7 +196,7 @@ fn reindex_corpora_at(
     // its auto-start (deliberate user intent); the watcher only rides along
     // when the sidecar is already up, and otherwise logs and waits.
     if local.embedding_status().is_none() {
-        eprintln!(
+        crate::relay_eprintln!(
             "[docs_watcher] embedding sidecar is down — skipping re-index of {} (press Index to run it manually)",
             canon.display()
         );
@@ -211,7 +211,7 @@ fn reindex_corpora_at(
             corpus.id.clone(),
         ) {
             Ok(()) => {
-                eprintln!(
+                crate::relay_eprintln!(
                     "[docs_watcher] re-indexing corpus {} after fs change in {}",
                     corpus.id,
                     canon.display()
@@ -220,7 +220,7 @@ fn reindex_corpora_at(
             Err(e) => {
                 // "already in progress" is the normal burst case; a missing
                 // embedding model is a config gap. Neither is worth noise.
-                eprintln!("[docs_watcher] skip corpus {}: {e}", corpus.id);
+                crate::relay_eprintln!("[docs_watcher] skip corpus {}: {e}", corpus.id);
             }
         }
     }

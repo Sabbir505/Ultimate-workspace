@@ -1367,7 +1367,7 @@ mod tests {
         if std::env::temp_dir().join(".git").exists()
             || is_git_repo(&std::env::temp_dir())
         {
-            eprintln!("skipping: temp dir itself is inside a git repo on this machine");
+            crate::relay_eprintln!("skipping: temp dir itself is inside a git repo on this machine");
             return;
         }
         // Sanity: a fresh temp dir is not a git repo.
@@ -1425,7 +1425,7 @@ mod tests {
         // HOME) — the "non-repo" premise can't hold there. See
         // git_init_makes_a_repo.
         if is_git_repo(dir.path()) {
-            eprintln!("skipping: temp dir itself is inside a git repo on this machine");
+            crate::relay_eprintln!("skipping: temp dir itself is inside a git repo on this machine");
             return;
         }
         let files = get_changed_files(dir.path());

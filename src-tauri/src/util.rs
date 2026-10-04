@@ -313,6 +313,56 @@ pub fn no_console_window_tokio(cmd: &mut tokio::process::Command) {
     }
 }
 
+/// Body of [`relay_eprintln!`]. `eprintln!` PANICS when the write fails
+/// ("failed printing to stderr: …"), and stderr dies out from under a
+/// long-running dev session the moment the pipe's reader goes away
+/// (`cargo run` output piped into a terminal panel the user then closes —
+/// Windows os error 232, "The pipe is being closed"). One dead pipe then
+/// panicked every turn-completion thread mid-`finish_turn`: the reply never
+/// persisted, `chat:done` never fired, and every harness chat wedged with
+/// its reply fully rendered. Writes are best-effort; a failed stderr write
+/// falls back to `<app-data>/logs/relay-stderr.log` so the diagnostics
+/// survive the terminal they were piped into.
+pub fn log_stderr_line(args: std::fmt::Arguments<'_>) {
+    use std::io::Write as _;
+    let stderr = std::io::stderr();
+    {
+        let mut lock = stderr.lock();
+        if lock.write_fmt(args).is_ok() && lock.flush().is_ok() {
+            return;
+        }
+    }
+    let mut fallback = FALLBACK_STDERR.lock();
+    if fallback.is_none() {
+        let dir = crate::user_dirs::app_data_dir_default().join("logs");
+        let _ = std::fs::create_dir_all(&dir);
+        *fallback = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("relay-stderr.log"))
+            .ok();
+    }
+    if let Some(f) = fallback.as_mut() {
+        let _ = writeln!(f, "{args}");
+        let _ = f.flush();
+    }
+}
+
+static FALLBACK_STDERR: once_cell::sync::Lazy<parking_lot::Mutex<Option<std::fs::File>>> =
+    once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(None));
+
+/// Panic-proof [`eprintln!`] replacement — see [`log_stderr_line`]. Mirrors
+/// `eprintln!`'s syntax exactly, so call sites only swap the macro name.
+#[macro_export]
+macro_rules! relay_eprintln {
+    () => {
+        $crate::util::log_stderr_line(format_args!(""))
+    };
+    ($($arg:tt)*) => {
+        $crate::util::log_stderr_line(format_args!($($arg)*))
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

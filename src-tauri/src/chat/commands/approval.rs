@@ -304,7 +304,7 @@ pub fn resolve_agent_question(
                     ) {
                         // The card is already dismissed — a failed POST must
                         // not read as "answered and ignored" in the UI.
-                        eprintln!("[agent] opencode question answer failed: {e}");
+                        crate::relay_eprintln!("[agent] opencode question answer failed: {e}");
                         crate::agent_sessions::emit_error(
                             Some(&app2),
                             &sid2,
@@ -335,7 +335,7 @@ pub fn resolve_agent_question(
                     let idle =
                         manager.wait_for_turn_idle(&sid, std::time::Duration::from_secs(300));
                     if !idle {
-                        eprintln!("[agent] question follow-up: asking turn never went idle");
+                        crate::relay_eprintln!("[agent] question follow-up: asking turn never went idle");
                         crate::agent_sessions::emit_error(
                             Some(&app2),
                             &sid,
@@ -368,7 +368,7 @@ pub fn resolve_agent_question(
                         &display,
                         &format!("\n\n{content}"),
                     ) {
-                        eprintln!("[agent] question follow-up failed: {e}");
+                        crate::relay_eprintln!("[agent] question follow-up failed: {e}");
                         crate::agent_sessions::emit_error(
                             Some(&app2),
                             &sid,

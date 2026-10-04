@@ -106,7 +106,7 @@ pub fn wiki_build_start(
     tauri::async_runtime::spawn(async move {
         if let Err(e) = super::run_build(&app, &root).await {
             if e != "cancelled" {
-                eprintln!("[wiki] build failed: {e}");
+                crate::relay_eprintln!("[wiki] build failed: {e}");
             }
         }
     });

@@ -600,7 +600,7 @@ fn handle_send_chat_message(
                 // queued follow-ups silently died). Emit the canonical
                 // chat:error — the relay forwarder ships SessionChatError to
                 // the phone and the desktop composer surfaces it too.
-                eprintln!("[mobile-relay] agent turn failed: {e}");
+                crate::relay_eprintln!("[mobile-relay] agent turn failed: {e}");
                 crate::chat::stream_events::emit_error(Some(&state_probe), &cid_err, &e);
             }
         });
@@ -825,7 +825,7 @@ fn handle_cancel_session_stream(
             tauri::async_runtime::spawn_blocking(move || {
                 let state = app.state::<crate::agent_sessions::AgentSessionState>();
                 if let Err(e) = state.0.cancel(&app, &id) {
-                    eprintln!("[mobile-relay] agent turn cancel failed: {e}");
+                    crate::relay_eprintln!("[mobile-relay] agent turn cancel failed: {e}");
                 }
             });
         }
@@ -1388,7 +1388,7 @@ fn handle_edit_user_message(
     if sent.is_err() {
         let conn = db.lock();
         if let Err(e) = db::un_mark_branch_superseded(&conn, &chat_session_id, message_id) {
-            eprintln!("[mobile-relay] failed to restore superseded branch after failed edit: {e}");
+            crate::relay_eprintln!("[mobile-relay] failed to restore superseded branch after failed edit: {e}");
         }
     }
     sent
@@ -1425,7 +1425,7 @@ fn handle_regenerate_message(
     if sent.is_err() {
         let conn = db.lock();
         if let Err(e) = db::un_mark_branch_superseded(&conn, &chat_session_id, last_user_id) {
-            eprintln!("[mobile-relay] failed to restore superseded branch after failed regenerate: {e}");
+            crate::relay_eprintln!("[mobile-relay] failed to restore superseded branch after failed regenerate: {e}");
         }
     }
     sent

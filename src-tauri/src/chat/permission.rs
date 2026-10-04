@@ -1081,7 +1081,7 @@ mod tests {
         #[cfg(not(windows))]
         let linked = std::os::unix::fs::symlink(&outside, &link).is_ok();
         if !linked {
-            eprintln!(
+            crate::relay_eprintln!(
                 "skipping: could not create link in {}",
                 tmp.path().display()
             );

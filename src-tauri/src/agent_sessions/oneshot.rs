@@ -53,7 +53,7 @@ pub fn run_one_shot(
     let drop_orphan_user_row = || {
         let conn = db.lock();
         if let Err(e) = crate::db::delete_chat_message(&conn, user_message_id) {
-            eprintln!(
+            crate::relay_eprintln!(
                 "[agent] failed to remove the user message of a failed one-shot spawn \
                  (session {chat_session_id}): {e}"
             );

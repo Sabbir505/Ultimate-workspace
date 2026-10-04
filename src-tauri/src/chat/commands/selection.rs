@@ -109,7 +109,7 @@ pub async fn fetch_provider_model_windows(
                 let body = resp.text().await.unwrap_or_default();
                 // Stale cache beats a live failure.
                 if let Some((_, table)) = cache.lock().get(&cache_key) {
-                    eprintln!(
+                    crate::relay_eprintln!(
                         "[context-windows] anthropic fetch failed ({status}); using stale cache"
                     );
                     return Ok(table.clone());
@@ -137,7 +137,7 @@ pub async fn fetch_provider_model_windows(
                     table.insert(id.to_ascii_lowercase(), w as u32);
                 }
             }
-            eprintln!(
+            crate::relay_eprintln!(
                 "[context-windows] anthropic live table: {} model(s) with context_window",
                 table.len()
             );
@@ -963,7 +963,7 @@ pub async fn count_context_tokens(
             // snapped the context ring to 0% exactly when the number was
             // untrustworthy (tokenizer down / model unloaded). Contract:
             // report null and let the UI keep the last known value.
-            eprintln!("[context-meter] /tokenize failed: {e}");
+            crate::relay_eprintln!("[context-meter] /tokenize failed: {e}");
             return Ok(crate::types::ContextUsagePayload {
                 used_tokens: None,
                 max_tokens: status.n_ctx,
@@ -1496,7 +1496,7 @@ pub async fn chat_compact_now(
         } else {
             0
         };
-        eprintln!("[compact-now] tool schema reserves {reserved_tokens} tokens");
+        crate::relay_eprintln!("[compact-now] tool schema reserves {reserved_tokens} tokens");
         let outcome = crate::chat::compaction::maybe_compact(
             &chat_state.0.client,
             &status.base_url,
@@ -1590,7 +1590,7 @@ pub async fn chat_compact_now(
         crate::chat::cloud_compact::persist_summary_row(&conn, &chat_session_id, &run)
             .map_err(|e| e.to_string())?
     };
-    eprintln!(
+    crate::relay_eprintln!(
         "[compact-now] compacted {} exchange(s) into summary row {}",
         run.compacted_exchange_count, summary_id,
     );

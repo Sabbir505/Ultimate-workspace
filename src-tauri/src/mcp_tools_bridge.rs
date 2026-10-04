@@ -511,14 +511,14 @@ fn generate_image_background(app: &tauri::AppHandle, args: &Value) -> Value {
                         "png",
                     );
                 }
-                eprintln!(
+                crate::relay_eprintln!(
                     "[image-gen] background render done: {}",
                     img.path.unwrap_or_else(|| out_path.display().to_string())
                 );
             }
             Err(e) => {
                 // generate_via_app already emitted the error event.
-                eprintln!("[image-gen] background render failed: {e}");
+                crate::relay_eprintln!("[image-gen] background render failed: {e}");
             }
         }
     });

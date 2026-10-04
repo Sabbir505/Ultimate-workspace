@@ -575,7 +575,7 @@ impl AgentSessionManager {
             if turn_actually_running(&mut entry) {
                 return Err("a turn is already running for this chat".to_string());
             }
-            eprintln!(
+            crate::relay_eprintln!(
                 "[agent_sessions] chat {chat_session_id}: turn_in_flight stuck with no live \
                  reader/child — clearing and proceeding"
             );
@@ -613,7 +613,7 @@ impl AgentSessionManager {
                 send_ctx.as_ref(),
                 cwd,
             ) {
-                eprintln!(
+                crate::relay_eprintln!(
                     "[context] working folder changed for session={chat_session_id}; \
                      dropping CLI session id — this send replays the context primer"
                 );
@@ -650,7 +650,7 @@ impl AgentSessionManager {
                 primer_summary.filter(|s| !s.trim().is_empty()),
             );
             if !primer.is_empty() {
-                eprintln!(
+                crate::relay_eprintln!(
                     "[context] harness primer: session={} chars={} (fresh CLI session — replaying DB history)",
                     chat_session_id,
                     primer.len()
@@ -951,7 +951,7 @@ impl AgentSessionManager {
             // (the invariant stated at the turn-in-flight check above).
             let conn = db.0.lock();
             if let Err(e) = crate::db::delete_chat_message(&conn, user_message_id) {
-                eprintln!(
+                crate::relay_eprintln!(
                     "[agent] failed to remove the user message of a failed spawn \
                      (session {chat_session_id}): {e}"
                 );
@@ -1364,7 +1364,7 @@ fn finish_turn(
     // actually ran and the prompt size it counted, which the frontend meter
     // renders as "used" against its cap (lib/contextWindow.ts). No context
     // limit crosses this boundary; the CLI enforces its own window.
-    eprintln!(
+    crate::relay_eprintln!(
         "[context] harness turn: session={} model='{}' in={} out={} cache_write={} cache_read={}",
         sid,
         model_key.unwrap_or("—"),
@@ -1509,7 +1509,7 @@ fn finish_turn(
                 match crate::db::artifact_claimed_by_other_since(&conn, &path, sid, started_at) {
                     Ok(true) => continue,
                     Err(e) => {
-                        eprintln!("[artifacts] ownership check failed, skipping {path}: {e}");
+                        crate::relay_eprintln!("[artifacts] ownership check failed, skipping {path}: {e}");
                         continue;
                     }
                     Ok(false) => {}

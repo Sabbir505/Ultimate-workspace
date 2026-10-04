@@ -130,7 +130,7 @@ pub fn remember(conn: &Connection, kind: &str, ident: &str) {
     if let Some(sealed) = seal_value(conn, kind, ident) {
         let _ = db::set_setting(conn, &allow_key(kind, ident), &sealed);
     } else {
-        eprintln!(
+        crate::relay_eprintln!(
             "[exec-gate] keychain unavailable — approval for {kind} not remembered (will re-ask)"
         );
     }
@@ -154,7 +154,7 @@ pub fn migrate_legacy(conn: &Connection) {
     {
         Ok(keys) => keys,
         Err(e) => {
-            eprintln!("[exec-gate] legacy migration scan failed: {e}");
+            crate::relay_eprintln!("[exec-gate] legacy migration scan failed: {e}");
             return;
         }
     };

@@ -1548,7 +1548,7 @@ async fn mesh_spawn_session(app: &AppHandle, caller_sid: Option<&str>, args: &Va
         if running {
             Some(p)
         } else {
-            eprintln!(
+            crate::relay_eprintln!(
                 "[subagent-model] local_gguf::{} ignored — sidecar not running it",
                 p.model
             );
@@ -1885,7 +1885,7 @@ async fn validate_harness_child_model(agent: &str, model: &str) -> (String, Opti
         return (model, None);
     }
     let fallback = cfg.default_model.clone().unwrap_or_default();
-    eprintln!(
+    crate::relay_eprintln!(
         "[mesh-spawn] model {model:?} not found in {harness}'s catalog — using its \
          configured default instead"
     );
@@ -1999,7 +1999,7 @@ pub(crate) fn record_subagent_run_start(
     match crate::db::record_subagent_run(conn, &run) {
         Ok(()) => Some(run.id),
         Err(e) => {
-            eprintln!("[subagent] run-history write failed (non-fatal): {e}");
+            crate::relay_eprintln!("[subagent] run-history write failed (non-fatal): {e}");
             None
         }
     }

@@ -279,7 +279,7 @@ pub async fn serve_with(db: Arc<AsyncMutex<Connection>>, on_logged: OnLogged) {
         Some(p) => match TcpListener::bind(("127.0.0.1", p)).await {
             Ok(l) => Some(l),
             Err(e) => {
-                eprintln!("[relay:llm-gateway] persisted port {p} unavailable ({e}); picking a new one");
+                crate::relay_eprintln!("[relay:llm-gateway] persisted port {p} unavailable ({e}); picking a new one");
                 None
             }
         },
@@ -289,7 +289,7 @@ pub async fn serve_with(db: Arc<AsyncMutex<Connection>>, on_logged: OnLogged) {
         None => match TcpListener::bind("127.0.0.1:0").await {
             Ok(l) => l,
             Err(e) => {
-                eprintln!("[relay:llm-gateway] FAILED to bind 127.0.0.1:0: {e} — gateway unavailable");
+                crate::relay_eprintln!("[relay:llm-gateway] FAILED to bind 127.0.0.1:0: {e} — gateway unavailable");
                 return;
             }
         },
@@ -303,7 +303,7 @@ pub async fn serve_with(db: Arc<AsyncMutex<Connection>>, on_logged: OnLogged) {
         // Publish the token where the Logs view can show it with a copy button.
         let _ = crate::db::set_setting(&conn, "gateway.token", &token);
     }
-    eprintln!(
+    crate::relay_eprintln!(
         "[relay:llm-gateway] listening on http://127.0.0.1:{port} \
          (token required; external apps set base_url to http://127.0.0.1:{port})"
     );
@@ -319,7 +319,7 @@ pub async fn serve_with(db: Arc<AsyncMutex<Connection>>, on_logged: OnLogged) {
                 });
             }
             Err(e) => {
-                eprintln!("[relay:llm-gateway] accept error: {e}");
+                crate::relay_eprintln!("[relay:llm-gateway] accept error: {e}");
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }
         }

@@ -114,7 +114,7 @@ fn create_checkpoint_inner(
     let ckpt = match db::get_checkpoint(conn, id)? {
         Some(c) => c,
         None => {
-            eprintln!(
+            crate::relay_eprintln!(
                 "[checkpoints] row {id} unreadable right after insert (session \
                  {chat_session_id}) — returning the pre-insert stub"
             );
@@ -174,7 +174,7 @@ fn delete_checkpoint_with_ref(conn: &Connection, ckpt: &ChatCheckpoint) -> bool 
         let dir = PathBuf::from(&ckpt.repo_path);
         if git::is_git_repo(&dir) {
             if let Err(e) = git::delete_checkpoint_ref(&dir, &ckpt.ref_name) {
-                eprintln!("[checkpoints] prune ref {} failed: {e}", ckpt.ref_name);
+                crate::relay_eprintln!("[checkpoints] prune ref {} failed: {e}", ckpt.ref_name);
                 return false;
             }
         }
@@ -289,7 +289,7 @@ fn insert_baseline(
     }
     match create_checkpoint(conn, app, chat_session_id, None, dir, snapshot) {
         Ok(_) => {}
-        Err(e) => eprintln!("[checkpoints] baseline failed for {chat_session_id}: {e:?}"),
+        Err(e) => crate::relay_eprintln!("[checkpoints] baseline failed for {chat_session_id}: {e:?}"),
     }
 }
 
@@ -309,7 +309,7 @@ pub fn maybe_baseline(
     }
     match git::snapshot_working_tree(dir) {
         Ok(snap) => insert_baseline(app, conn, chat_session_id, dir, snap),
-        Err(e) => eprintln!("[checkpoints] baseline snapshot failed for {chat_session_id}: {e}"),
+        Err(e) => crate::relay_eprintln!("[checkpoints] baseline snapshot failed for {chat_session_id}: {e}"),
     }
 }
 
@@ -365,7 +365,7 @@ pub fn maybe_baseline_detached_in_dir(
     let snap = match git::snapshot_working_tree(&dir) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("[checkpoints] baseline snapshot failed for {chat_session_id}: {e}");
+            crate::relay_eprintln!("[checkpoints] baseline snapshot failed for {chat_session_id}: {e}");
             return;
         }
     };
@@ -388,7 +388,7 @@ pub fn after_turn(
     let snap = match git::snapshot_working_tree(&dir) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("[checkpoints] turn snapshot failed for {chat_session_id}: {e}");
+            crate::relay_eprintln!("[checkpoints] turn snapshot failed for {chat_session_id}: {e}");
             return;
         }
     };
@@ -410,7 +410,7 @@ fn after_turn_insert(
         }
     }
     if let Err(e) = create_checkpoint(conn, app, chat_session_id, message_id, dir, snap) {
-        eprintln!("[checkpoints] turn checkpoint failed for {chat_session_id}: {e:?}");
+        crate::relay_eprintln!("[checkpoints] turn checkpoint failed for {chat_session_id}: {e:?}");
     }
 }
 
@@ -435,7 +435,7 @@ pub fn after_turn_detached(
     let snap = match git::snapshot_working_tree(&dir) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("[checkpoints] turn snapshot failed for {chat_session_id}: {e}");
+            crate::relay_eprintln!("[checkpoints] turn snapshot failed for {chat_session_id}: {e}");
             return;
         }
     };
@@ -513,7 +513,7 @@ pub fn restore(
         match rollback_conversation(&conn, &ckpt) {
             Ok(n) => n,
             Err(e) => {
-                eprintln!(
+                crate::relay_eprintln!(
                     "[checkpoints] conversation rollback failed for {}: {e:?}",
                     ckpt.chat_session_id
                 );
@@ -583,7 +583,7 @@ pub fn prune_ref_groups(by_repo: std::collections::BTreeMap<String, Vec<String>>
         }
         for r in refs {
             if let Err(e) = git::delete_checkpoint_ref(&dir, &r) {
-                eprintln!("[checkpoints] prune {r} in {repo} failed: {e}");
+                crate::relay_eprintln!("[checkpoints] prune {r} in {repo} failed: {e}");
             }
         }
     }
@@ -656,7 +656,7 @@ mod tests {
         // HOME): the "non-repo dir" premise can't hold there — see
         // git::tests::git_init_makes_a_repo.
         if git::is_git_repo(dir.path()) {
-            eprintln!("skipping: temp dir itself is inside a git repo on this machine");
+            crate::relay_eprintln!("skipping: temp dir itself is inside a git repo on this machine");
             return;
         }
 

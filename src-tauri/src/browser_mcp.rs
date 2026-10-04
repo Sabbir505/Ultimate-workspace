@@ -154,11 +154,11 @@ pub async fn serve(browser: Arc<BrowserManager>, app: AppHandle) {
                 .unwrap_or(BROWSER_MCP_PORT);
             BOUND_PORT.store(port, Ordering::SeqCst);
             write_handshake_file(&app, port);
-            eprintln!("[relay:browser-mcp] WebSocket server listening on ws://127.0.0.1:{port}");
+            crate::relay_eprintln!("[relay:browser-mcp] WebSocket server listening on ws://127.0.0.1:{port}");
             l
         }
         Err(e) => {
-            eprintln!(
+            crate::relay_eprintln!(
                 "[relay:browser-mcp] FAILED to bind 127.0.0.1:0: {e} — agent browser tools will be unavailable"
             );
             return;
@@ -173,12 +173,12 @@ pub async fn serve(browser: Arc<BrowserManager>, app: AppHandle) {
                 let expected_token = token.to_string();
                 tokio::spawn(async move {
                     if let Err(e) = handle_connection(stream, browser, app, &expected_token).await {
-                        eprintln!("[relay:browser-mcp] connection error: {e}");
+                        crate::relay_eprintln!("[relay:browser-mcp] connection error: {e}");
                     }
                 });
             }
             Err(e) => {
-                eprintln!("[relay:browser-mcp] accept error: {e}");
+                crate::relay_eprintln!("[relay:browser-mcp] accept error: {e}");
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             }
         }
@@ -356,7 +356,7 @@ fn map_resolve_result(res: Result<String, String>) -> Result<Option<String>, Mcp
         Err(e) if e == "pane_not_found" => Ok(None),
         Err(e) if e.starts_with("No page is open") => Ok(None),
         Err(e) => {
-            eprintln!("[relay:browser-mcp] pane resolution failed: {e}");
+            crate::relay_eprintln!("[relay:browser-mcp] pane resolution failed: {e}");
             Err(McpError { code: "pane_not_found", message: e })
         }
     }
@@ -783,7 +783,7 @@ async fn op_screenshot(
         })?;
     let dir = crate::chat::dispatch::artifacts_dir(app);
     if let Err(e) = std::fs::create_dir_all(&dir) {
-        eprintln!("[relay:browser-mcp] artifacts dir create failed: {e}");
+        crate::relay_eprintln!("[relay:browser-mcp] artifacts dir create failed: {e}");
     }
     let millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1150,7 +1150,7 @@ async fn op_wait_for(
             Err(e) => {
                 // A mid-navigation eval may fail transiently; keep polling
                 // unless we've blown the deadline.
-                eprintln!("[relay:browser-mcp] wait_for poll error: {e}");
+                crate::relay_eprintln!("[relay:browser-mcp] wait_for poll error: {e}");
             }
         }
         let step = if condition == "selector" || condition == "stable" { 200 } else { 300 };
@@ -1320,7 +1320,7 @@ async fn op_click_and_wait(
             Ok(u) if !u.trim().is_empty() => Some(u),
             Ok(_) => None, // empty eval result — treat as a failed snapshot
             Err(e) => {
-                eprintln!("[relay:browser-mcp] click_and_wait URL snapshot failed: {e}");
+                crate::relay_eprintln!("[relay:browser-mcp] click_and_wait URL snapshot failed: {e}");
                 None
             }
         },
@@ -1417,7 +1417,7 @@ async fn op_click_and_wait(
             }
             Err(e) => {
                 // A mid-navigation eval may fail transiently; keep polling.
-                eprintln!("[relay:browser-mcp] click_and_wait poll error: {e}");
+                crate::relay_eprintln!("[relay:browser-mcp] click_and_wait poll error: {e}");
             }
         }
         let step = if condition == "selector" { 200 } else { 300 };

@@ -536,7 +536,7 @@ pub async fn start_sidecar_core(db: &DbState, stt: &SttState) -> CmdResult<u16> 
         model_path: model_path.to_string_lossy().into_owned(),
         child,
     });
-    eprintln!("[stt] whisper-server up on port {port} (model {})", model_path.display());
+    crate::relay_eprintln!("[stt] whisper-server up on port {port} (model {})", model_path.display());
 
     // GPU servers JIT-compile their kernels on the FIRST inference (~30-60s
     // on Turing) — fire a tiny silent clip in the background so that cost
@@ -576,7 +576,7 @@ pub async fn start_sidecar_core(db: &DbState, stt: &SttState) -> CmdResult<u16> 
             Err(_) => return,
         };
         let _ = warm_client.post(&warm_url).multipart(form).send().await;
-        eprintln!("[stt] sidecar warmup complete");
+        crate::relay_eprintln!("[stt] sidecar warmup complete");
     });
     Ok(port)
 }
@@ -817,11 +817,11 @@ pub fn maybe_autostart(app: &tauri::AppHandle, db: &DbState) {
         return;
     }
     let (Some(dir), Some(_binary)) = (dir, binary) else {
-        eprintln!("[stt] auto-start skipped: no models dir or whisper-server binary");
+        crate::relay_eprintln!("[stt] auto-start skipped: no models dir or whisper-server binary");
         return;
     };
     if resolve_default_model_path(&dir, default_model.as_deref()).is_none() {
-        eprintln!("[stt] auto-start skipped: default model file missing");
+        crate::relay_eprintln!("[stt] auto-start skipped: default model file missing");
         return;
     }
     let app = app.clone();
@@ -829,9 +829,9 @@ pub fn maybe_autostart(app: &tauri::AppHandle, db: &DbState) {
         let db = app.state::<DbState>();
         let stt = app.state::<SttState>();
         match stt_start(app.clone(), db, stt).await {
-            Ok(s) if s.running => eprintln!("[stt] auto-started on port {:?}", s.port),
+            Ok(s) if s.running => crate::relay_eprintln!("[stt] auto-started on port {:?}", s.port),
             Ok(_) => {}
-            Err(e) => eprintln!("[stt] auto-start failed: {e}"),
+            Err(e) => crate::relay_eprintln!("[stt] auto-start failed: {e}"),
         }
     });
 }

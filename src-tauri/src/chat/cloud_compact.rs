@@ -241,7 +241,7 @@ pub(crate) async fn summarize_via_provider(
     if !resp.status().is_success() {
         let status = resp.status();
         let err_body = resp.text().await.unwrap_or_default();
-        eprintln!("[cloud-compaction] summarize FAILED status={status} body={err_body}");
+        crate::relay_eprintln!("[cloud-compaction] summarize FAILED status={status} body={err_body}");
         return Err(format!("summarize returned {status}: {err_body}"));
     }
     let v: Value = resp

@@ -199,7 +199,7 @@ pub async fn transcribe_audio(
                 if let Some(t) = tag.as_deref() {
                     unregister_cancel_slot(t);
                 }
-                eprintln!(
+                crate::relay_eprintln!(
                     "[stt] transcribe tag={} CANCELLED after {}ms ({}KB) {}",
                     tag.as_deref().unwrap_or("-"),
                     t_start.elapsed().as_millis(),
@@ -220,7 +220,7 @@ pub async fn transcribe_audio(
     if let Some(t) = tag.as_deref() {
         unregister_cancel_slot(t);
     }
-    eprintln!(
+    crate::relay_eprintln!(
         "[stt] transcribe tag={} lag={}ms setup={}ms http={}ms total={}ms ({}KB) {}",
         tag.as_deref().unwrap_or("-"),
         ipc_lag_ms,

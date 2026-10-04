@@ -355,7 +355,7 @@ impl OAuthFlows {
         let client = match resolve_oauth_client(app, &connector).await {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("[relay:oauth] {connector_id} client resolution failed: {e}");
+                crate::relay_eprintln!("[relay:oauth] {connector_id} client resolution failed: {e}");
                 let _ = app.emit("oauth:callback", OAuthCallbackEvent {
                     flow_id,
                     connector_id: connector.id.to_string(),
@@ -408,7 +408,7 @@ impl OAuthFlows {
         let client = match resolve_oauth_client(app, head).await {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("[relay:oauth] {family} client resolution failed: {e}");
+                crate::relay_eprintln!("[relay:oauth] {family} client resolution failed: {e}");
                 let _ = app.emit("oauth:callback", OAuthCallbackEvent {
                     flow_id,
                     connector_id: family.to_string(),
@@ -497,7 +497,7 @@ impl OAuthFlows {
         let code_verifier = random_pkce_verifier();
         let code_challenge = pkce_challenge(&code_verifier);
         let state = format!("flow-{flow_id}-{:016x}", rand::random::<u64>());
-        eprintln!(
+        crate::relay_eprintln!(
             "[relay:oauth] flow {flow_id} start key={key} client_id={} method={}",
             client.client_id, client.token_endpoint_auth_method
         );
@@ -561,7 +561,7 @@ impl OAuthFlows {
             }
         }
         let Some(listener) = listener else {
-            eprintln!("[relay:oauth] flow {flow_id} bind failed on 127.0.0.1:{port}: {last_err}");
+            crate::relay_eprintln!("[relay:oauth] flow {flow_id} bind failed on 127.0.0.1:{port}: {last_err}");
             let msg = format!(
                 "failed to bind OAuth callback server on 127.0.0.1:{port} \
                  (redirect_uri `{redirect_uri}`) — close the app holding the port and retry: {last_err}"
@@ -584,12 +584,12 @@ impl OAuthFlows {
             redirect_uri,
             scopes,
         );
-        eprintln!(
+        crate::relay_eprintln!(
             "[relay:oauth] flow {flow_id} listener bound on 127.0.0.1:{port}; opening browser"
         );
 
         if let Err(e) = open::that(&authorize_url) {
-            eprintln!("[relay:oauth] flow {flow_id} open::that failed: {e}");
+            crate::relay_eprintln!("[relay:oauth] flow {flow_id} open::that failed: {e}");
             self.cancel(flow_id);
             let _ = app.emit("oauth:callback", OAuthCallbackEvent {
                 flow_id,
@@ -615,11 +615,11 @@ impl OAuthFlows {
 
         let code = match result {
             Ok(Ok(Ok(c))) => {
-                eprintln!("[relay:oauth] flow {flow_id} callback received (code len {})", c.len());
+                crate::relay_eprintln!("[relay:oauth] flow {flow_id} callback received (code len {})", c.len());
                 c
             }
             Ok(Ok(Err(msg))) => {
-                eprintln!("[relay:oauth] flow {flow_id} callback error: {msg}");
+                crate::relay_eprintln!("[relay:oauth] flow {flow_id} callback error: {msg}");
                 let _ = app.emit("oauth:callback", OAuthCallbackEvent {
                     flow_id,
                     connector_id: key.to_string(),
@@ -641,7 +641,7 @@ impl OAuthFlows {
                 return Err(msg);
             }
             Err(_elapsed) => {
-                eprintln!("[relay:oauth] flow {flow_id} timed out waiting for callback (5 min)");
+                crate::relay_eprintln!("[relay:oauth] flow {flow_id} timed out waiting for callback (5 min)");
                 // The spawn_blocking acceptor can't be cancelled and still
                 // owns the listener — without a nudge it blocks in accept()
                 // until app exit, holding the port so every later Connect
@@ -700,7 +700,7 @@ impl OAuthFlows {
         .await;
         match exchanged {
             Ok(account_display) => {
-                eprintln!("[relay:oauth] flow {flow_id} exchange OK, account={account_display:?}");
+                crate::relay_eprintln!("[relay:oauth] flow {flow_id} exchange OK, account={account_display:?}");
                 let _ = app.emit("oauth:callback", OAuthCallbackEvent {
                     flow_id,
                     connector_id: key.to_string(),
@@ -711,7 +711,7 @@ impl OAuthFlows {
                 Ok(flow_id)
             }
             Err(e) => {
-                eprintln!("[relay:oauth] flow {flow_id} exchange FAILED: {e}");
+                crate::relay_eprintln!("[relay:oauth] flow {flow_id} exchange FAILED: {e}");
                 let _ = app.emit("oauth:callback", OAuthCallbackEvent {
                     flow_id,
                     connector_id: key.to_string(),
@@ -812,7 +812,7 @@ fn accept_one_callback(listener: &TcpListener, expected_state: &str) -> Result<S
     // Log the path WITHOUT the query string — it carries the fresh
     // authorization code (and state), which must never land in stderr logs.
     let log_path = path.split('?').next().unwrap_or("/");
-    eprintln!("[relay:oauth] callback request: {log_path}");
+    crate::relay_eprintln!("[relay:oauth] callback request: {log_path}");
 
     let query: HashMap<String, String> = url::form_urlencoded::parse(query_str.as_bytes())
         .map(|(k, v)| (k.into_owned(), v.into_owned()))
@@ -1069,7 +1069,7 @@ async fn exchange_token(
     let body = resp.text().await.map_err(|e| format!("token response read failed: {e}"))?;
     // Never log the response body: on success it contains live access/refresh
     // tokens. Log only the connector id and status code.
-    eprintln!("[relay:oauth] token exchange {} {status}", connector.id);
+    crate::relay_eprintln!("[relay:oauth] token exchange {} {status}", connector.id);
     if !status.is_success() {
         return Err(format!("token exchange HTTP {status}: {body}"));
     }
@@ -1147,10 +1147,10 @@ fn store_exchanged(
     let conn = db.0.lock();
     let now = crate::db::now_ts();
 
-    eprintln!("[relay:oauth] store_exchanged {connector_id}: keychain access_token");
+    crate::relay_eprintln!("[relay:oauth] store_exchanged {connector_id}: keychain access_token");
     secrets::set_connector_token(&conn, connector_id, "access_token", &token.access_token)?;
     if let Some(ref rt) = token.refresh_token {
-        eprintln!("[relay:oauth] store_exchanged {connector_id}: keychain refresh_token");
+        crate::relay_eprintln!("[relay:oauth] store_exchanged {connector_id}: keychain refresh_token");
         secrets::set_connector_token(&conn, connector_id, "refresh_token", rt)?;
     } else {
         // No refresh token — clear BOTH tokens first so we never refresh with
@@ -1159,11 +1159,11 @@ fn store_exchanged(
         // left a stale refresh token behind and later spurious invalid_grant
         // disconnects; the failure was also invisible).
         if let Err(e) = secrets::delete_connector_tokens(&conn, connector_id) {
-            eprintln!("[relay:oauth] store_exchanged {connector_id}: token delete failed: {e}");
+            crate::relay_eprintln!("[relay:oauth] store_exchanged {connector_id}: token delete failed: {e}");
         }
         secrets::set_connector_token(&conn, connector_id, "access_token", &token.access_token)?;
     }
-    eprintln!("[relay:oauth] store_exchanged {connector_id}: credential row");
+    crate::relay_eprintln!("[relay:oauth] store_exchanged {connector_id}: credential row");
     db::upsert_connector_credential_row(
         &conn,
         connector_id,
@@ -1173,7 +1173,7 @@ fn store_exchanged(
         now,
     )
     .map_err(|e| e.to_string())?;
-    eprintln!("[relay:oauth] store_exchanged {connector_id}: done");
+    crate::relay_eprintln!("[relay:oauth] store_exchanged {connector_id}: done");
 
     Ok(())
 }

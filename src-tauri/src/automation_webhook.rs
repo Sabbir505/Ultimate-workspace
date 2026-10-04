@@ -58,7 +58,7 @@ pub async fn serve(app: AppHandle, db: Arc<Mutex<Connection>>) {
     let listener = match TcpListener::bind("127.0.0.1:0").await {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("[relay:automation-webhook] FAILED to bind 127.0.0.1:0: {e} — webhook triggers are unavailable");
+            crate::relay_eprintln!("[relay:automation-webhook] FAILED to bind 127.0.0.1:0: {e} — webhook triggers are unavailable");
             return;
         }
     };
@@ -68,7 +68,7 @@ pub async fn serve(app: AppHandle, db: Arc<Mutex<Connection>>) {
         let conn = db.lock();
         let _ = db::set_setting(&conn, TRIGGER_PORT_SETTING, &port.to_string());
     }
-    eprintln!(
+    crate::relay_eprintln!(
         "[relay:automation-webhook] trigger listener on http://127.0.0.1:{port}/trigger/<id>/<secret> (app-open only)"
     );
 
@@ -82,7 +82,7 @@ pub async fn serve(app: AppHandle, db: Arc<Mutex<Connection>>) {
                 });
             }
             Err(e) => {
-                eprintln!("[relay:automation-webhook] accept error: {e}");
+                crate::relay_eprintln!("[relay:automation-webhook] accept error: {e}");
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }
         }
@@ -154,7 +154,7 @@ async fn handle_connection(mut stream: TcpStream, app: AppHandle, db: Arc<Mutex<
     match launch_run(Some(&app), &db, &automation, RunSource::Webhook) {
         Ok(()) => respond(&mut stream, 200, "OK", r#"{"ok":true}"#).await,
         Err(e) => {
-            eprintln!("[relay:automation-webhook] launch failed for {}: {e}", automation.id);
+            crate::relay_eprintln!("[relay:automation-webhook] launch failed for {}: {e}", automation.id);
             respond(
                 &mut stream,
                 500,

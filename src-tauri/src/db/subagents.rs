@@ -498,7 +498,7 @@ pub fn sweep_stale_subagent_runs(conn: &Connection, max_age_secs: i64) {
         .map(|n| n as i64)
         .unwrap_or(0);
     if settled > 0 {
-        eprintln!("[subagent] settled {settled} stale running row(s) left by a previous process");
+        crate::relay_eprintln!("[subagent] settled {settled} stale running row(s) left by a previous process");
     }
 }
 

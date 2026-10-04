@@ -168,7 +168,7 @@ pub fn sweep(db: &Arc<parking_lot::Mutex<Connection>>) -> EngResult<Vec<ImproveP
         match propose_for_artifact(db, &artifact) {
             Ok(Some(p)) => created.push(p),
             Ok(None) => {}
-            Err(e) => eprintln!("[improve] proposal for {} ({}) failed: {e}", artifact.ref_key, artifact.kind),
+            Err(e) => crate::relay_eprintln!("[improve] proposal for {} ({}) failed: {e}", artifact.ref_key, artifact.kind),
         }
     }
     Ok(created)
@@ -376,7 +376,7 @@ pub fn evaluate_proposal(db: &Arc<parking_lot::Mutex<Connection>>, proposal_id: 
         .into_iter()
         .filter(|c| {
             if c.quarantined {
-                eprintln!(
+                crate::relay_eprintln!(
                     "[improve] skipping quarantined eval case {} for {}",
                     &c.id[..c.id.len().min(8)],
                     artifact.name

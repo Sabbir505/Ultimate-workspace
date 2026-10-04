@@ -103,7 +103,7 @@ pub(super) fn send_opencode_turn(
             }
             Err(e) => {
                 // Degraded mode: legacy one-shot `opencode run` per turn.
-                eprintln!(
+                crate::relay_eprintln!(
                     "[agent] opencode server unavailable ({e}); falling back to per-turn run"
                 );
                 fell_back = true;

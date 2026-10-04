@@ -380,7 +380,7 @@ async fn openai_stream_round<R: tauri::Runtime>(
         // The 400 body from llama-server names the exact rejected field
         // ("unknown field", "tool not supported", "content is empty", …) —
         // surface it in the dev log, not just the UI banner.
-        eprintln!(
+        crate::relay_eprintln!(
             "[chat:stream] HTTP {status} from {url} body={}",
             crate::util::truncate_chars(&b, 2000)
         );
@@ -1426,7 +1426,7 @@ pub(crate) async fn run_openai_tool_loop(
         let tools_json = serde_json::to_string(&tool_specs).unwrap_or_default();
         let hist_chars: usize = req.messages.iter().map(|m| m.content.len()).sum();
         let retrieval_chars: usize = req.local_docs_retrieval.iter().map(|s| s.len()).sum();
-        eprintln!(
+        crate::relay_eprintln!(
             "[prompt-audit] request: {} tool specs/{} chars JSON, system={} chars, \
              history={} msgs/{} chars, retrieval={} chars",
             tool_specs.len(),
@@ -1453,7 +1453,7 @@ pub(crate) async fn run_openai_tool_loop(
             .take(6)
             .map(|(chars, name)| format!("{name}({chars})"))
             .collect();
-        eprintln!(
+        crate::relay_eprintln!(
             "[prompt-audit] largest tool descriptions: {}",
             top.join(", ")
         );
@@ -1486,7 +1486,7 @@ pub(crate) async fn run_openai_tool_loop(
             };
         perf.end_gen();
         if round_usage.have {
-            eprintln!(
+            crate::relay_eprintln!(
                 "[prompt-audit] round {round}: server prompt_tokens={} completion_tokens={}",
                 round_usage.input, round_usage.output
             );
@@ -1631,7 +1631,7 @@ pub(crate) async fn run_openai_tool_loop(
                 || refresh_browser_caps(mgr, sid, &mut live_caps)
             {
                 tool_specs = tools::openai_tool_specs(&live_caps, sandbox);
-                eprintln!(
+                crate::relay_eprintln!(
                     "[prompt-audit] late-attach: specs now {} ({} chars JSON)",
                     tool_specs.len(),
                     serde_json::to_string(&tool_specs)

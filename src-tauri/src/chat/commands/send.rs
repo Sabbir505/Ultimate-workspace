@@ -208,8 +208,8 @@ pub(crate) async fn fetch_models_list(
         Ok(v) => v,
         Err(e) => {
             // Log the raw response for debugging
-            eprintln!("[list_chat_models] Failed to parse JSON: {e}");
-            eprintln!(
+            crate::relay_eprintln!("[list_chat_models] Failed to parse JSON: {e}");
+            crate::relay_eprintln!(
                 "[list_chat_models] Raw response (first 500 chars): {}",
                 &body_text.chars().take(500).collect::<String>()
             );
@@ -836,7 +836,7 @@ pub async fn send_chat_message(
                 // through silently if the model file can't be found — the send
                 // then surfaces the real connection error to the user.
                 let want = model_str.trim();
-                eprintln!(
+                crate::relay_eprintln!(
                     "[local-warmup] provider=local_gguf, session model name = {:?}",
                     want
                 );
@@ -863,12 +863,12 @@ pub async fn send_chat_message(
                             }
                         }
                     }
-                    eprintln!(
+                    crate::relay_eprintln!(
                         "[local-warmup] scanned {} gguf files; candidates:",
                         files.len()
                     );
                     for f in &files {
-                        eprintln!(
+                        crate::relay_eprintln!(
                             "  - name={:?} filename={:?} path={:?}",
                             f.meta.name, f.filename, f.path
                         );
@@ -900,7 +900,7 @@ pub async fn send_chat_message(
                             || strip(&f.filename).to_lowercase() == want_lower
                     });
                     if let Some(g) = matched {
-                        eprintln!(
+                        crate::relay_eprintln!(
                             "[local-warmup] matched — starting sidecar for path={:?}",
                             g.path
                         );
@@ -958,7 +958,7 @@ pub async fn send_chat_message(
                                     &started.model_id,
                                     started.n_gpu_layers,
                                 );
-                                eprintln!(
+                                crate::relay_eprintln!(
                                     "[local-warmup] sidecar started OK, persisted base_url={:?}",
                                     started.base_url
                                 );
@@ -977,7 +977,7 @@ pub async fn send_chat_message(
                                 );
                             }
                             Err(e) => {
-                                eprintln!("[local-warmup] start FAILED: {e}");
+                                crate::relay_eprintln!("[local-warmup] start FAILED: {e}");
                                 // E-9a: paired clear for the "local_model_loading" status — the
                                 // warmup finished (one way or another) and the first token may be
                                 // seconds away or never come if the turn fails elsewhere; the
@@ -989,7 +989,7 @@ pub async fn send_chat_message(
                             }
                         }
                     } else {
-                        eprintln!(
+                        crate::relay_eprintln!(
                             "[local-warmup] NO MATCH for {:?} — send will hit the stale URL",
                             want
                         );
@@ -1024,7 +1024,7 @@ pub async fn send_chat_message(
         (base, mo)
     };
     if provider_str == "local_gguf" {
-        eprintln!(
+        crate::relay_eprintln!(
             "[local-warmup] send using base_url={:?} model_override={:?}",
             base_url, model_override
         );
@@ -1219,7 +1219,7 @@ pub async fn send_chat_message(
             .as_ref()
             .and_then(|s| s.find("## About this user").map(|i| s.len() - i))
             .unwrap_or(0);
-        eprintln!("[memory-audit] document_chars={profile_chars}");
+        crate::relay_eprintln!("[memory-audit] document_chars={profile_chars}");
     }
     // [prompt-audit]: attribute the system prompt's size on every send. The
     // catalog is re-derived (cheap dir scan) because build_system_prompt fuses
@@ -1231,7 +1231,7 @@ pub async fn send_chat_message(
             .unwrap_or(0);
         let manifest_chars = manifest.map(|m| m.len()).unwrap_or(0);
         let total_chars = system.as_ref().map(|s| s.len()).unwrap_or(0);
-        eprintln!(
+        crate::relay_eprintln!(
             "[prompt-audit] system prompt: {total_chars} chars (tools_on={tools_on}, \
              research={research_mode}, skills_catalog={catalog_chars}, manifest={manifest_chars}, \
              custom={custom_chars}, invoked_skill_bodies={invoked_chars}, \
@@ -1316,7 +1316,7 @@ pub async fn send_chat_message(
                 )
                 .await
                 .unwrap_or(0);
-                eprintln!("[local-compaction] tool schema reserves {n} tokens");
+                crate::relay_eprintln!("[local-compaction] tool schema reserves {n} tokens");
                 n
             } else {
                 0
@@ -1382,7 +1382,7 @@ pub async fn send_chat_message(
                         resolve_cloud_summarizer(&conn)
                     } {
                         Some((provider_id, base, api_key, cloud_model)) => {
-                            eprintln!(
+                            crate::relay_eprintln!(
                                 "[local-compaction] summarizer override: cloud {} model={}",
                                 provider_id.as_str(),
                                 cloud_model
@@ -1395,7 +1395,7 @@ pub async fn send_chat_message(
                             }
                         }
                         None => {
-                            eprintln!(
+                            crate::relay_eprintln!(
                                 "[local-compaction] summarizer override 'cloud' requested but no provider configured; using sidecar"
                             );
                             crate::chat::compaction::SummarizerRoute::Sidecar
@@ -1442,7 +1442,7 @@ pub async fn send_chat_message(
                         .collect();
                     if !raw_entries.is_empty() && raw_chars < 200_000 {
                         injected_raw = true;
-                        eprintln!(
+                        crate::relay_eprintln!(
                             "[local-compaction] rebuild-from-raw: re-fed {} raw row(s) ({} chars)",
                             raw_entries.len(),
                             raw_chars
@@ -1532,7 +1532,7 @@ pub async fn send_chat_message(
                         pre_compact_tokens.saturating_sub(o.summary_input_tokens as u32)
                     });
 
-                    eprintln!(
+                    crate::relay_eprintln!(
                         "[local-compaction] compacted {} exchange(s) into summary row {} ({}→{} tokens); {} messages now active",
                         o.compacted_exchange_count,
                         summary_id,
@@ -1564,7 +1564,7 @@ pub async fn send_chat_message(
                 // Unreachable in practice (maybe_compact never returns Err),
                 // but rebuild from the caller's messages if it ever does.
                 Err(e) => {
-                    eprintln!("[local-compaction] gave up, passing history through: {e}");
+                    crate::relay_eprintln!("[local-compaction] gave up, passing history through: {e}");
                     if will_compact {
                         crate::chat::stream_events::emit_status_clear(Some(&app), &chat_session_id);
                     }
@@ -1666,7 +1666,7 @@ pub async fn send_chat_message(
                         })
                         .collect();
                     if !raw_entries.is_empty() && raw_chars < 200_000 {
-                        eprintln!(
+                        crate::relay_eprintln!(
                             "[cloud-compaction] rebuild-from-raw: re-fed {} raw row(s) ({} chars)",
                             raw_entries.len(),
                             raw_chars
@@ -1696,11 +1696,11 @@ pub async fn send_chat_message(
                             &run,
                         )
                         .unwrap_or_else(|e| {
-                            eprintln!("[cloud-compaction] persist failed: {e}");
+                            crate::relay_eprintln!("[cloud-compaction] persist failed: {e}");
                             0
                         })
                     };
-                    eprintln!(
+                    crate::relay_eprintln!(
                         "[cloud-compaction] compacted {} exchange(s) into summary row {} (~{}→{} est. tokens)",
                         run.compacted_exchange_count,
                         summary_id,
@@ -1718,7 +1718,7 @@ pub async fn send_chat_message(
                     run.messages
                 }
                 Err(e) => {
-                    eprintln!("[cloud-compaction] failed ({e}); sending history unchanged");
+                    crate::relay_eprintln!("[cloud-compaction] failed ({e}); sending history unchanged");
                     crate::chat::stream_events::emit_status_clear(Some(&app), &chat_session_id);
                     messages.into_iter().map(|e| e.message).collect()
                 }
@@ -2035,12 +2035,12 @@ pub(crate) async fn run_prompt_warmup(
         .map(|r| r.trim().to_string())
         .filter(|r| !r.is_empty())
     {
-        eprintln!("[prompt-warmup] matching working directory: {root:?}");
+        crate::relay_eprintln!("[prompt-warmup] matching working directory: {root:?}");
         system.push_str(&working_directory_section(&root));
     } else {
         let root =
             crate::chat::dispatch::artifacts_dir(app).to_string_lossy().to_string();
-        eprintln!(
+        crate::relay_eprintln!(
             "[prompt-warmup] no working dir picked — matching the artifacts fallback: {root:?}"
         );
         system.push_str(&working_directory_section(&root));
@@ -2141,7 +2141,7 @@ pub(crate) async fn run_prompt_warmup(
     .await;
     match res {
         Ok(Ok(resp)) if resp.status().is_success() => {
-            eprintln!(
+            crate::relay_eprintln!(
                 "[prompt-warmup] ok in {}ms — first user message skips CUDA init + \
                  prompt eval of system+tools",
                 started.elapsed().as_millis()
@@ -2150,13 +2150,13 @@ pub(crate) async fn run_prompt_warmup(
         Ok(Ok(resp)) => {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            eprintln!(
+            crate::relay_eprintln!(
                 "[prompt-warmup] HTTP {status}: {}",
                 crate::util::truncate_chars(&body, 300)
             );
         }
-        Ok(Err(e)) => eprintln!("[prompt-warmup] request failed: {e}"),
-        Err(_) => eprintln!("[prompt-warmup] timed out after 90s — continuing anyway"),
+        Ok(Err(e)) => crate::relay_eprintln!("[prompt-warmup] request failed: {e}"),
+        Err(_) => crate::relay_eprintln!("[prompt-warmup] timed out after 90s — continuing anyway"),
     }
 }
 

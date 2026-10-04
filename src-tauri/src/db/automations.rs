@@ -352,7 +352,7 @@ pub fn start_run(
             "UPDATE automation_runs SET improve_run_id = ?2 WHERE id = ?1",
             params![id, improve_run_id],
         ) {
-            eprintln!("[automations] could not link run {id} to improve run {improve_run_id}: {e}");
+            crate::relay_eprintln!("[automations] could not link run {id} to improve run {improve_run_id}: {e}");
         }
     }
     Ok(id)
@@ -463,13 +463,13 @@ pub fn sweep_stale_automation_runs(conn: &Connection, max_age_secs: i64) {
                                      AND still_open.finished_at IS NULL)) )",
             params![now],
         ) {
-            Ok(n) => eprintln!(
+            Ok(n) => crate::relay_eprintln!(
                 "[automations] settled {settled} stale running row(s) left by a previous \
                  process (and {n} mirrored improve run(s))"
             ),
             // Not swallowed: a failure here is what left mirrored rows open
             // and invisible to `improve::run_health`.
-            Err(e) => eprintln!(
+            Err(e) => crate::relay_eprintln!(
                 "[automations] settled {settled} stale running row(s), but closing the \
                  mirrored improve runs failed: {e}"
             ),

@@ -265,7 +265,7 @@ async fn download_pinned<R: tauri::Runtime>(
         // Satisfiable" on the next request, which is worse than useless: the
         // range is genuinely unsatisfiable. Discard and refetch instead.
         if !partial_is_resumable(have, expected_size) {
-            eprintln!(
+            crate::relay_eprintln!(
                 "[tts] {label}: discarding a {have}-byte partial (expected {expected_size}) and starting over"
             );
             let _ = std::fs::remove_file(&part);
@@ -291,7 +291,7 @@ async fn download_pinned<R: tauri::Runtime>(
             Ok(r) => r,
             Err(e) => {
                 last_error = format!("{label}: {e}");
-                eprintln!("[tts] {label} attempt {attempt}/{DOWNLOAD_ATTEMPTS} failed to send: {e}");
+                crate::relay_eprintln!("[tts] {label} attempt {attempt}/{DOWNLOAD_ATTEMPTS} failed to send: {e}");
                 if attempt < DOWNLOAD_ATTEMPTS {
                     download_backoff(attempt).await;
                     continue;
@@ -303,7 +303,7 @@ async fn download_pinned<R: tauri::Runtime>(
         // partial is unusable. That is recoverable — drop it and ask for the
         // whole file, which cannot itself 416.
         if resp.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE && have > 0 {
-            eprintln!("[tts] {label}: server rejected the resume range; restarting the download");
+            crate::relay_eprintln!("[tts] {label}: server rejected the resume range; restarting the download");
             let _ = std::fs::remove_file(&part);
             last_error = format!("{label}: the resume range was rejected");
             if attempt < DOWNLOAD_ATTEMPTS {
@@ -342,7 +342,7 @@ async fn download_pinned<R: tauri::Runtime>(
             && resp.status() == reqwest::StatusCode::PARTIAL_CONTENT
             && confirmed_offset == Some(have);
         if have > 0 && !resuming {
-            eprintln!(
+            crate::relay_eprintln!(
                 "[tts] {label}: range start unconfirmed (got {confirmed_offset:?}, wanted {have}); restarting the download"
             );
         }
@@ -386,7 +386,7 @@ async fn download_pinned<R: tauri::Runtime>(
                 if !length_is_expected(written, expected_size) {
                     last_error =
                         format!("{label}: got {written} bytes, expected {expected_size}");
-                    eprintln!("[tts] {label} attempt {attempt}/{DOWNLOAD_ATTEMPTS}: {last_error}");
+                    crate::relay_eprintln!("[tts] {label} attempt {attempt}/{DOWNLOAD_ATTEMPTS}: {last_error}");
                     let _ = std::fs::remove_file(&part);
                     if attempt < DOWNLOAD_ATTEMPTS {
                         download_backoff(attempt).await;
@@ -420,7 +420,7 @@ async fn download_pinned<R: tauri::Runtime>(
                         _ => "transfer interrupted".to_string(),
                     }
                 );
-                eprintln!("[tts] {label} attempt {attempt}/{DOWNLOAD_ATTEMPTS}: {last_error}");
+                crate::relay_eprintln!("[tts] {label} attempt {attempt}/{DOWNLOAD_ATTEMPTS}: {last_error}");
                 if attempt < DOWNLOAD_ATTEMPTS {
                     download_backoff(attempt).await;
                     continue;
@@ -574,7 +574,7 @@ pub async fn tts_install_gpu(
             })
             .await
             .map_err(|e| format!("cudnn extract task failed: {e}"))??;
-            eprintln!("[tts] extracted {count} cuDNN DLLs");
+            crate::relay_eprintln!("[tts] extracted {count} cuDNN DLLs");
             let _ = std::fs::remove_file(&wheel);
         }
 
@@ -714,7 +714,7 @@ pub async fn synthesize_gpu(
         format!("the GPU engine reported success but wrote no audio: {e}")
     })?;
     let _ = std::fs::remove_file(&out);
-    eprintln!(
+    crate::relay_eprintln!(
         "[tts] gpu synthesized {} chars -> {} KB in {} ms",
         text.chars().count(),
         bytes.len() / 1024,

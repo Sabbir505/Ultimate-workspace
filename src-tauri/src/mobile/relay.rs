@@ -255,7 +255,7 @@ pub async fn start_relay(
             {
                 Ok(rt) => rt,
                 Err(e) => {
-                    eprintln!("[mobile-relay] failed to build relay runtime: {e}");
+                    crate::relay_eprintln!("[mobile-relay] failed to build relay runtime: {e}");
                     return;
                 }
             };
@@ -285,7 +285,7 @@ pub async fn start_relay(
                             None => match TcpListener::bind("127.0.0.1:0").await {
                                 Ok(b) => b,
                                 Err(e) => {
-                                    eprintln!("[mobile-relay] failed to bind relay: {e}");
+                                    crate::relay_eprintln!("[mobile-relay] failed to bind relay: {e}");
                                     return;
                                 }
                             },
@@ -295,7 +295,7 @@ pub async fn start_relay(
                 let port = match listener.local_addr() {
                     Ok(a) => a.port(),
                     Err(e) => {
-                        eprintln!("[mobile-relay] local_addr: {e}");
+                        crate::relay_eprintln!("[mobile-relay] local_addr: {e}");
                         return;
                     }
                 };
@@ -314,9 +314,9 @@ pub async fn start_relay(
 let tailnet_addr = tailnet_listener
     .as_ref()
     .and_then(|l| l.local_addr().ok().map(|a| a.to_string()));
-eprintln!("[mobile-relay] listening on ws://127.0.0.1:{port} (pairing required)");
+crate::relay_eprintln!("[mobile-relay] listening on ws://127.0.0.1:{port} (pairing required)");
 if let Some(ref addr) = tailnet_addr {
-    eprintln!("[mobile-relay] also on ws://{addr} (tailnet, pairing required)");
+    crate::relay_eprintln!("[mobile-relay] also on ws://{addr} (tailnet, pairing required)");
 }
 
 // The tailnet listener runs in its own task and forwards accepted
@@ -360,7 +360,7 @@ loop {
     tokio::select! {
         biased;
         _ = &mut abort_rx => {
-            eprintln!("[mobile-relay] shutting down");
+            crate::relay_eprintln!("[mobile-relay] shutting down");
             shutdown.store(true, Ordering::Relaxed);
             break;
         }
@@ -378,7 +378,7 @@ loop {
                     .await;
                 }
                 Err(e) => {
-                    eprintln!("[mobile-relay] accept error: {e}");
+                    crate::relay_eprintln!("[mobile-relay] accept error: {e}");
                     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                 }
             }
@@ -424,7 +424,7 @@ loop {
         let conn = db.lock();
         match crate::secrets::generic_load(&conn, "mobile", "pairing-token") {
             Some(t) if t.len() >= 32 => {
-                eprintln!(
+                crate::relay_eprintln!(
                     "[mobile-relay] pairing token loaded from keychain ({} chars, fp {})",
                     t.len(),
                     &t.chars().take(6).collect::<String>()
@@ -434,7 +434,7 @@ loop {
             other => {
                 let t = new_pairing_token();
                 let stored = crate::secrets::generic_store(&conn, "mobile", "pairing-token", &t);
-                eprintln!(
+                crate::relay_eprintln!(
                     "[mobile-relay] pairing token CREATED (load returned {}; store ok={:?}) fp {}",
                     match &other { Some(v) => format!("short({})", v.len()), None => "None".into() },
                     stored.is_ok(),
@@ -541,7 +541,7 @@ async fn spawn_connection_handler(
         if let Err(e) =
             handle_connection(stream, peer, app, db, chat_mgr, owner_map, registry).await
         {
-            eprintln!("[mobile-relay] connection error: {e}");
+            crate::relay_eprintln!("[mobile-relay] connection error: {e}");
         }
         counters.active_connections.fetch_sub(1, AOrd::Relaxed);
     });
@@ -808,7 +808,7 @@ async fn handle_connection(
         let pump_write = Arc::clone(&write);
         tokio::spawn(async move {
             if let Err(e) = super::relay_ws::pump_to_ws_shared(conn_rx, pump_write).await {
-                eprintln!("[mobile-relay] owner-channel pump ended: {e}");
+                crate::relay_eprintln!("[mobile-relay] owner-channel pump ended: {e}");
             }
         });
     }
@@ -931,7 +931,7 @@ async fn handle_connection(
                         // (fresh PairOk, fresh salt).
                         let fails = aead_failures.fetch_add(1, Ordering::SeqCst) + 1;
                         if fails >= AEAD_FAILURE_EVICT_THRESHOLD {
-                            eprintln!(
+                            crate::relay_eprintln!(
                                 "[mobile-relay] evicting connection after {fails} consecutive \
                                  undecryptable frames (replay / broken client)"
                             );
@@ -1019,7 +1019,7 @@ async fn handle_connection(
             MobileMessage::ListSessions => {
                 match build_session_list(&db, &app) {
                     Ok(sessions) => {
-                        eprintln!(
+                        crate::relay_eprintln!(
                             "[mobile-relay] ListSessions: {} sessions ({} live)",
                             sessions.len(),
                             sessions.iter().filter(|s| s.is_live).count()
@@ -1112,17 +1112,17 @@ async fn handle_connection(
                 let _ = send_msg(&write, &resp).await;
             }
             MobileMessage::SendToSession { session_id, text } => {
-                eprintln!(
+                crate::relay_eprintln!(
                     "[mobile-relay] SendToSession: session={session_id} text_len={}",
                     text.len()
                 );
                 if let Some(pty_state) = app.try_state::<crate::PtyState>() {
                     let pty = &pty_state.0;
                     if let Some(pane_id) = pty.pane_id_for_session(&session_id) {
-                        eprintln!("[mobile-relay]   resolved pane_id={pane_id}");
+                        crate::relay_eprintln!("[mobile-relay]   resolved pane_id={pane_id}");
                         let _ = pty.write(&pane_id, &text);
                     } else {
-                        eprintln!(
+                        crate::relay_eprintln!(
                             "[mobile-relay]   no pane_id found, writing directly to session_id"
                         );
                         let _ = pty.write(&session_id, &text);
@@ -1561,7 +1561,7 @@ async fn handle_connection(
                         })
                         .await
                         .unwrap_or_else(|e| {
-                            eprintln!("[mobile-relay] git status join failed: {e}");
+                            crate::relay_eprintln!("[mobile-relay] git status join failed: {e}");
                             (
                                 crate::types::GitStatusInfo {
                                     is_repo: false,
@@ -2573,7 +2573,7 @@ pub(crate) async fn handle_mid_turn_frame(
 
     match serde_json::from_str::<MobileMessage>(&text) {
         Ok(MobileMessage::CancelChatTurn { chat_session_id }) => {
-            eprintln!("[mobile-relay] CancelChatTurn mid-turn (B-26)");
+            crate::relay_eprintln!("[mobile-relay] CancelChatTurn mid-turn (B-26)");
             on_cancel(&chat_session_id);
             let resp = DesktopMessage::ChatDone {
                 chat_session_id,

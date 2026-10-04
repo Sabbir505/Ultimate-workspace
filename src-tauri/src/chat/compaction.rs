@@ -692,7 +692,7 @@ async fn summarize(
     if !resp.status().is_success() {
         let status = resp.status();
         let err_body = resp.text().await.unwrap_or_default();
-        eprintln!("[local-compaction] summarize FAILED status={status} body={err_body}");
+        crate::relay_eprintln!("[local-compaction] summarize FAILED status={status} body={err_body}");
         return Err(format!("summarize returned {status}: {err_body}"));
     }
     let v: Value = resp
@@ -792,7 +792,7 @@ pub async fn maybe_compact(
     // llama-server context-shift.
     let effective_ctx = n_ctx.saturating_sub(reserved_tokens);
     if effective_ctx == 0 {
-        eprintln!(
+        crate::relay_eprintln!(
             "[local-compaction] reserved overhead ({reserved_tokens} tokens) fills the \
             {n_ctx}-token window; skipping compaction (context-shifting will degrade)"
         );
@@ -804,7 +804,7 @@ pub async fn maybe_compact(
         None => match count_entries_tokens(client, base_url, system, messages).await {
             Ok(n) => n,
             Err(e) => {
-                eprintln!(
+                crate::relay_eprintln!(
                     "[local-compaction] /tokenize failed ({e}); passing history through \
                     unchanged (llama-server context-shifting will degrade if needed)"
                 );
@@ -827,7 +827,7 @@ pub async fn maybe_compact(
     // context-shifting handle it — log so it's visible during testing.
     if let Ok(pinned_tokens) = count_entries_tokens(client, base_url, system, &pinned).await {
         if pinned_tokens.saturating_add(RESPONSE_HEADROOM) >= effective_ctx {
-            eprintln!(
+            crate::relay_eprintln!(
                 "[local-compaction] pinned tail ({pinned_tokens} tokens) already fills \
                 the {effective_ctx}-token window; skipping compaction (context-shifting will degrade)"
             );
@@ -862,7 +862,7 @@ pub async fn maybe_compact(
         to_compact_truncated.reverse();
     }
     if to_compact_truncated.len() < to_compact.len() {
-        eprintln!(
+        crate::relay_eprintln!(
             "[local-compaction] to_compact truncated: {} → {} entries ({} chars; n_ctx={})",
             to_compact.len(),
             to_compact_truncated.len(),
@@ -925,14 +925,14 @@ pub async fn maybe_compact(
                     ));
                 }
                 Err(e) => {
-                    eprintln!(
+                    crate::relay_eprintln!(
                         "[local-compaction] map-summarize part {} failed ({e}); continuing",
                         i + 1
                     );
                 }
             }
         }
-        eprintln!(
+        crate::relay_eprintln!(
             "[local-compaction] map-reduce: {dropped_count} dropped entries -> {} partial summaries",
             chunks.len()
         );
@@ -959,7 +959,7 @@ pub async fn maybe_compact(
     {
         Ok(s) => s,
         Err(e) => {
-            eprintln!(
+            crate::relay_eprintln!(
                 "[local-compaction] summarize failed ({e}); passing history through \
                 unchanged (context-shifting will degrade if needed)"
             );

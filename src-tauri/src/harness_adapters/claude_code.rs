@@ -367,7 +367,7 @@ mod live_probe_tests {
             since,
             "live-probe",
         );
-        eprintln!("probe result: {id:?}");
+        crate::relay_eprintln!("probe result: {id:?}");
         assert!(id.is_some());
         // Leave the registry clean for other tests in this binary.
         super::super::release_claims_for("live-probe");

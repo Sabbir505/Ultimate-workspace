@@ -495,7 +495,7 @@ impl Capture {
             timings_json: telem.timings.map(|v| v.to_string()),
         };
         if let Err(e) = store::insert(conn, &entry, cfg.max_body_kb) {
-            eprintln!("[relay:llm-log] insert failed: {e}");
+            crate::relay_eprintln!("[relay:llm-log] insert failed: {e}");
         }
     }
 }
@@ -506,7 +506,7 @@ pub fn prune(conn: &rusqlite::Connection, cfg: &LogConfig) -> usize {
     match store::prune(conn, cfg.retention_days, cfg.max_rows) {
         Ok(n) => n,
         Err(e) => {
-            eprintln!("[relay:llm-log] prune failed: {e}");
+            crate::relay_eprintln!("[relay:llm-log] prune failed: {e}");
             0
         }
     }

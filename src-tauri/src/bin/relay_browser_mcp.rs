@@ -418,6 +418,10 @@ fn tool_op(tool: &str) -> Result<String, &'static str> {
         | "generate_image"
         | "plan_document" | "revise_document"
         | "get_skill" | "list_skills" | "list_artifacts" | "search_docs" | "get_capabilities"
+        // Project wiki: read-only DB-only knowledge-base tools. Mapped here
+        // (not the forward-unknown fallback) so the static schemas and the op
+        // mapping can never disagree — same contract as the vault family.
+        | "search_wiki" | "read_wiki_page"
         // Automation CRUD: parity with the built-in chat's automation tools —
         // without these a harness session answers "I can't schedule things"
         // to the same requests the built-in chat handles.
@@ -1073,6 +1077,31 @@ fn static_relay_schemas() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "search_wiki",
+            "description": "Search the current project's Relay-generated wiki (Settings → Wiki / the project's knowledge base). Use when the user asks how THEIR project works — architecture, modules, features, workflows. Hybrid retrieval: semantic embedding matches fused with keyword (FTS) matching, over the wiki's owned-markdown pages. Returns ranked hits with slug, title, heading, and a text excerpt; feed a hit's slug into read_wiki_page for the full page.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Keywords or a natural-language question about the project (architecture, modules, workflows). Phrase it the way the answer would be written." },
+                    "top_k": { "type": "integer", "description": "How many top hits to return. Defaults to 5. The server caps this at 20.", "minimum": 1, "maximum": 20 }
+                },
+                "required": ["query"]
+            },
+            "annotations": { "readOnlyHint": true }
+        }),
+        json!({
+            "name": "read_wiki_page",
+            "description": "Read one full wiki page by slug (from search_wiki results): the owned markdown body plus its evidence ledger — the source files each section was distilled from, so claims can be traced back to code. Read-only.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "slug": { "type": "string", "description": "The page slug from search_wiki results (the `code` token), e.g. 'overview' or 'session-mesh'." }
+                },
+                "required": ["slug"]
+            },
+            "annotations": { "readOnlyHint": true }
+        }),
+        json!({
             "name": "get_capabilities",
             "description": "Report which connectors, MCP servers, and skills are available in this Relay session, as JSON. THE authority on availability — call this instead of running `claude mcp list` or similar shell probes; it is instant, in-process, and reflects the app's real connections rather than a config file.",
             "inputSchema": { "type": "object", "properties": {} }
@@ -1384,6 +1413,7 @@ mod tests {
         for tool in ["navigate", "read_page", "generate_document", "generate_diagram",
                      "generate_file", "generate_image", "plan_document", "revise_document",
                      "get_skill", "list_skills", "search_docs",
+                     "search_wiki", "read_wiki_page",
                      "get_capabilities",
                      "list_automations", "create_automation", "update_automation",
                      "delete_automation", "run_automation_now",

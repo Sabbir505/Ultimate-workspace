@@ -23,6 +23,19 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const srcTauri = join(__dirname, "..", "src-tauri");
 const bins = ["relay-browser-mcp", "relay-automation"];
 
+// Kill any RUNNING sidecar instances before cargo touches their exes. On
+// Windows a running exe cannot be replaced ("Access is denied", os error 5),
+// and both sidecars legitimately outlive the app: relay-browser-mcp is
+// spawned by harness CLIs via mcp.json, relay-automation is fired headless
+// by Windows Task Scheduler. An orphaned one therefore locks every dev
+// launch until it is killed. Dev-only by construction: this script runs
+// solely in `tauri dev`'s beforeDevCommand, where the binaries are about to
+// be REPLACED — anything still running is serving the stale build this
+// script exists to refresh. `taskkill` exits 128 when no process matches.
+for (const bin of bins) {
+  spawnSync("taskkill", ["/IM", `${bin}.exe`, "/F"], { stdio: "ignore" });
+}
+
 const started = Date.now();
 const res = spawnSync(
   "cargo",

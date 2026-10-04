@@ -524,6 +524,10 @@ impl ChatManager {
                         == Some("true")
             },
             memory_context: None,
+            // llama-server prompt-cache opt-in: local sidecars only (see
+            // ChatRequest.cache_prompt). Cloud OpenAI-family endpoints
+            // reject the unknown field, so nobody else gets it.
+            cache_prompt: matches!(provider_id, ChatProviderId::LocalGguf),
         };
 
         // OpenRouter and LocalGguf speak the OpenAI wire format, so they ride
@@ -3025,6 +3029,7 @@ mod tests {
             local_docs_retrieval: Vec::new(),
             web_search_options: false,
             memory_context: None,
+            cache_prompt: false,
         };
         let client = reqwest::Client::new();
         let perf = crate::chat::turn_perf::TurnPerf::new_headless("sid-done");

@@ -5,7 +5,7 @@ All project documentation lives under `docs/`. The README at the repo root is th
 | Folder | Contents |
 |---|---|
 | [`ai-context/`](ai-context/) | **Canonical, living docs for AI assistants and contributors** — start at [`ai-context/AI_CONTEXT.md`](ai-context/AI_CONTEXT.md) (code map), plus the IPC contract (`CONTRACT.md`), product spec (`PRD.md`), build log (`BUILD_LOG.md`), release flow (`RELEASE.md`), and historical bug audits. Kept in sync with the code; the code is the source of truth. |
-| [`architecture/`](architecture/) | Design docs for shipped subsystems: user memory, document design layer, context compaction, self-improving artifacts, Session Mesh. Status headers state what shipped. |
+| [`architecture/`](architecture/) | Design docs for shipped subsystems: user memory, document design layer, context compaction, self-improving artifacts, Session Mesh, local-model prompt caching (`LOCAL_MODEL_PROMPT_CACHING.md` — the update-me-first contract for sidecar/warmup/request-path changes). Status headers state what shipped. |
 | [`research/`](research/) | Point-in-time research notes that fed features (auto model routing, browser system, TTS, document fidelity, competitor analysis, …). Not kept up to date. |
 | [`audits/`](audits/) | Audit reports, bug lists, issue trackers, roadmaps, and progress logs (e.g. `PROJECT_AUDIT.md`, `PERFORMANCE_AUDIT.md`, `BUG_AUDIT.md`). Each is a snapshot of its date — trust the code over any finding here. |
 | [`notes/`](notes/) | One-off reports, release/social posts, and old task briefs. |

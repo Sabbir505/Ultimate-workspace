@@ -146,6 +146,15 @@ pub struct ChatRequest {
     /// per-turn path, currently unused.)
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub memory_context: Option<String>,
+    /// Send `"cache_prompt": true` on the OpenAI wire body. LocalGguf turns
+    /// set this: llama-server's `cache_prompt` default flipped across
+    /// releases, and an explicit true guarantees the sidecar reuses the
+    /// cached KV prefix across turns/rounds regardless of the binary
+    /// vintage. Cloud OpenAI-family endpoints reject unknown fields, so
+    /// this must stay false for every non-local provider.
+    /// (LOCAL_MODEL_PROMPT_CACHING.md §2.3)
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    pub cache_prompt: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -288,6 +297,11 @@ struct OpenAIWireBody {
     /// in `anthropic_request` and never sees this field.
     #[serde(skip_serializing_if = "Option::is_none")]
     chat_template_kwargs: Option<ChatTemplateKwargs>,
+    /// Explicit llama-server prompt-cache opt-in (see `ChatRequest
+    /// .cache_prompt`). `Some(true)` only for LocalGguf sends — cloud
+    /// OpenAI-family endpoints 400 on unknown fields.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_prompt: Option<bool>,
 }
 
 /// `stream_options.include_usage` — the only field this codebase needs from
@@ -533,6 +547,7 @@ fn openai_wire_body(req: &ChatRequest, cache_marks: bool) -> OpenAIWireBody {
         chat_template_kwargs: req
             .thinking
             .map(|t| ChatTemplateKwargs { enable_thinking: t }),
+        cache_prompt: req.cache_prompt.then_some(true),
     }
 }
 
@@ -1134,6 +1149,7 @@ mod tests {
             local_docs_retrieval: Vec::new(),
             web_search_options: false,
             memory_context: None,
+            cache_prompt: false,
         }
     }
 
@@ -1235,6 +1251,7 @@ mod tests {
             local_docs_retrieval: Vec::new(),
             web_search_options: false,
             memory_context: None,
+            cache_prompt: false,
         }
     }
 
@@ -1590,6 +1607,21 @@ data: [DONE]
         let json = serde_json::to_value(&body).unwrap();
         assert_eq!(json["stream_options"]["include_usage"], serde_json::json!(true));
         assert_eq!(json["stream"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn openai_wire_body_sends_cache_prompt_only_when_requested() {
+        // Cloud OpenAI-family requests must NOT carry the field — those
+        // endpoints reject unknown parameters — while LocalGguf sends
+        // explicitly opt the sidecar's prompt cache in.
+        let cloud = bare_req();
+        let json = serde_json::to_value(openai_wire_body(&cloud, false)).unwrap();
+        assert!(json.get("cache_prompt").is_none(), "{json}");
+
+        let mut local = bare_req();
+        local.cache_prompt = true;
+        let json = serde_json::to_value(openai_wire_body(&local, false)).unwrap();
+        assert_eq!(json["cache_prompt"], serde_json::json!(true));
     }
 
     #[test]

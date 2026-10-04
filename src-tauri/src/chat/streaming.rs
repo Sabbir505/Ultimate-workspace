@@ -1215,6 +1215,13 @@ fn build_openai_body(
     if let Some(on) = req.thinking {
         body["chat_template_kwargs"] = json!({ "enable_thinking": on });
     }
+    // Explicit llama-server prompt-cache opt-in (LocalGguf only — see
+    // ChatRequest.cache_prompt). Guarantees the sidecar reuses the cached
+    // KV prefix across turns and tool-loop rounds even on binaries where
+    // the `cache_prompt` default is off.
+    if req.cache_prompt {
+        body["cache_prompt"] = json!(true);
+    }
     if cache_marks {
         let mut msgs = messages.to_vec();
         cache::apply_openai_cache_marks(&mut msgs);
@@ -2386,6 +2393,7 @@ mod tests {
             local_docs_retrieval: Vec::new(),
             web_search_options: false,
             memory_context: None,
+            cache_prompt: false,
         }
     }
 
@@ -2618,6 +2626,7 @@ mod tests {
             local_docs_retrieval: Vec::new(),
             web_search_options: false,
             memory_context: None,
+            cache_prompt: false,
         }
     }
 
@@ -2679,6 +2688,24 @@ mod tests {
     }
 
     #[test]
+    fn openai_body_sends_cache_prompt_only_for_local() {
+        let msgs = vec![json!({"role": "user", "content": "hi"})];
+        // Cloud requests: no cache_prompt field (unknown-parameter 400s).
+        let cloud = build_openai_body(&openai_cache_req(), &msgs, &[], false);
+        assert!(
+            cloud.get("cache_prompt").is_none(),
+            "{}",
+            serde_json::to_string(&cloud).unwrap()
+        );
+        // LocalGguf requests: explicit opt-in for the sidecar's KV prefix
+        // cache, robust against binaries whose default is off.
+        let mut local = openai_cache_req();
+        local.cache_prompt = true;
+        let local_body = build_openai_body(&local, &msgs, &[], false);
+        assert_eq!(local_body["cache_prompt"], json!(true));
+    }
+
+    #[test]
     fn openai_body_keeps_effort_and_thinking_fields() {
         let mut req = openai_cache_req();
         req.effort = Some("low".to_string());
@@ -2724,6 +2751,7 @@ mod web_search_options_tests {
             local_docs_retrieval: Vec::new(),
             web_search_options: ws,
             memory_context: None,
+            cache_prompt: false,
         }
     }
 

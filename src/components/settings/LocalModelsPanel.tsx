@@ -27,6 +27,7 @@ import {
 import { shortModelName } from "../../lib/modelLabel";
 import { ModelToolBadge } from "../common/ModelToolBadge";
 import { useChatStore } from "../../state/chat";
+import { warmLocalPromptForChat } from "../chat/useLocalModelSidecar";
 import { useSettingsStore } from "../../state/settings";
 import { useUiStore } from "../../state/ui";
 import { ModelMarket, FitBadge } from "./ModelMarket";
@@ -324,6 +325,14 @@ export function LocalModelsPanel() {
         (s) => s.provider === "local_gguf" && s.model === modelName,
       );
       if (existing) {
+        // Warm BEFORE handing the user back to the composer — the "Starting…"
+        // spinner covers it. Skipping this is what made the first message pay
+        // the full cold prefill (measured 83s TTFT on a 4B model; warmed it's
+        // ~1s). Same contract as the chat-picker spawn path.
+        // (LOCAL_MODEL_PROMPT_CACHING.md §2.2/§3)
+        await warmLocalPromptForChat(existing.id).catch((warmErr) => {
+          console.warn("prompt warmup failed (non-fatal)", warmErr);
+        });
         // Reuse the matching session instead of spawning a duplicate one
         // (selectSession loads its history; the view switches to chat).
         await selectSession(existing.id);
@@ -336,6 +345,9 @@ export function LocalModelsPanel() {
       // and the ✓ never lands. Same reason handleLoadLocalModel sets it first.
       const session = await newChat("local_gguf", modelName, undefined, "local");
       if (session) {
+        await warmLocalPromptForChat(session.id).catch((warmErr) => {
+          console.warn("prompt warmup failed (non-fatal)", warmErr);
+        });
         setActiveView("chat");
       }
     } catch (err) {
@@ -738,6 +750,17 @@ export function LocalModelsPanel() {
                         setStarting((prev) => ({ ...prev, [m.id]: true }));
                         void startLocalModel(m.id, m.path, m.mmprojPath, overridesMapRef.current[m.id])
                           .then(() => refreshStatus())
+                          // The restart wiped the sidecar's KV cache — re-warm
+                          // the active chat's prefix so its next send doesn't
+                          // pay the full cold prefill. Non-fatal: a failed
+                          // warmup must not render as a panel error.
+                          .then(() =>
+                            warmLocalPromptForChat(
+                              useChatStore.getState().activeChatSessionId ?? null,
+                            ).catch((warmErr) =>
+                              console.warn("prompt warmup failed (non-fatal)", warmErr),
+                            ),
+                          )
                           .catch((err2) =>
                             setErrors((prev) => ({ ...prev, [m.id]: String(err2) })),
                           )

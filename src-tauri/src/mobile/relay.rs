@@ -2736,6 +2736,7 @@ pub(super) async fn handle_chat_turn(
         local_docs_retrieval: Vec::new(),
             web_search_options: false,
         memory_context: None,
+        cache_prompt: false,
     };
 
     let provider = crate::chat::streaming::resolve_provider(&provider_id);

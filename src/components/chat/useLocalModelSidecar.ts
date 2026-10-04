@@ -19,6 +19,46 @@ import {
 } from "../../lib/ipc";
 import { autoLocalContextWindow } from "../../lib/contextWindow";
 
+/**
+ * Warm the sidecar's prompt cache with the EXACT prefix this session's next
+ * send will render (system prompt + tools + working-directory tail). The
+ * working dir and composer toggles are frontend state, resolved here exactly
+ * like sendMessage resolves them; the backend can't guess them at load time.
+ *
+ * EVERY surface that starts a sidecar must call this before handing the user
+ * back to the composer — otherwise the first message pays the full cold
+ * prefill (measured: 83s TTFT on a 4B model that fits the GPU, where a warmed
+ * first turn is ~1s). The Settings → Local Models panel's "Use model" was the
+ * surface that skipped it. Returns the resolved working dir so callers that
+ * dedupe re-warms (the chat-switch effect) can record it.
+ *
+ * Warmup surface contract + the segment list the warmup must mirror:
+ * LOCAL_MODEL_PROMPT_CACHING.md §2.2/§3.
+ */
+export async function warmLocalPromptForChat(
+  sessionId: string | null,
+): Promise<string> {
+  const s = useChatStore.getState();
+  const session = sessionId
+    ? s.sessions.find((x) => x.id === sessionId)
+    : undefined;
+  const projects = useProjectsStore.getState();
+  const boundProject = sessionId
+    ? projects.projectById(s.sessionProjects[sessionId] ?? projects.selectedProjectId)
+    : undefined;
+  const workingDir =
+    (sessionId ? s.cwdOverrides[sessionId] : undefined) ??
+    session?.worktreePath ??
+    boundProject?.path;
+  await warmupLocalPrompt(
+    workingDir ?? null,
+    sessionId,
+    s.toolsEnabled,
+    s.codeExecEnabled,
+  );
+  return workingDir ?? "";
+}
+
 export function useLocalModelSidecar({
   activeChatSessionId,
   isLocal,
@@ -169,41 +209,18 @@ export function useLocalModelSidecar({
       setLocalLoading(true);
       try {
         await startLocalModel(match.id, match.path, match.mmprojPath, overrides);
-        // Warm the prompt cache with the EXACT prefix this session's next
-        // send will render — system prompt + tools + the `## Working
-        // directory` tail. The working dir is frontend state (custom folder →
-        // worktree → bound project), resolved here exactly like sendMessage
-        // resolves it; the backend can't know it at load time. The loading
-        // spinner stays up until the warmup completes, so "loaded" means the
-        // first message answers immediately instead of paying CUDA init +
+        // Warm the prompt cache via the shared helper — the loading spinner
+        // stays up until it completes, so "loaded" means the first message
+        // answers immediately instead of paying CUDA init +
         // multi-thousand-token prompt eval. Best-effort: a failed warmup
         // just means the first send pays the normal cold-start cost.
         try {
-          const s = useChatStore.getState();
           // Key off THIS pane's session (the hook param), not the global
           // store's active one — in split view the pane the user picked the
           // model in may not be the globally active chat.
           const sid = activeChatSessionId;
-          const session = sid ? s.sessions.find((x) => x.id === sid) : undefined;
-          const projects = useProjectsStore.getState();
-          const boundProject = sid
-            ? projects.projectById(s.sessionProjects[sid] ?? projects.selectedProjectId)
-            : undefined;
-          const workingDir =
-            (sid ? s.cwdOverrides[sid] : undefined) ??
-            session?.worktreePath ??
-            boundProject?.path;
-          // Composer toggles ride along: the tool specs are part of the cached
-          // prefix, so a warmup that assumes different toggles than the first
-          // send uses saves nothing (this mismatch — web_search/code_exec —
-          // is exactly what made first messages pay the full prompt eval).
-          await warmupLocalPrompt(
-            workingDir,
-            sid,
-            s.toolsEnabled,
-            s.codeExecEnabled,
-          );
-          lastWarmRef.current = { sid: sid ?? null, wd: workingDir ?? "" };
+          const workingDir = await warmLocalPromptForChat(sid);
+          lastWarmRef.current = { sid: sid ?? null, wd: workingDir };
         } catch (warmErr) {
           console.warn("prompt warmup failed (non-fatal)", warmErr);
         }

@@ -34,6 +34,21 @@ pub async fn generate_chat_title(
     if api_key.is_none() && provider_str != "local_gguf" {
         return Ok(None);
     }
+
+    // Local sidecars skip the LLM title entirely. The call used to land on
+    // the same single GPU that powers the chat, right as the user is most
+    // likely typing their next message (it fires on turn 1 and 3 completion):
+    // its prefill competes for compute with the real turn and, on the
+    // partially-offloaded models this app runs, stretches the next TTFT.
+    // The frontend already derives a deterministic title from the first user
+    // message (generateSessionTitle) and keeps it whenever this returns
+    // None, so the session is still titled — just without burning sidecar
+    // compute. (Prompt-cache-wise the sidecar's multi-slot routing means the
+    // one-shot never evicted the chat prefix, so this is purely a
+    // compute-contention + wasted-prefill win. LOCAL_MODEL_PROMPT_CACHING.md §3.)
+    if provider_str == "local_gguf" {
+        return Ok(None);
+    }
     let api_key = api_key.unwrap_or_default();
 
     let model = if model_str.trim().is_empty() {

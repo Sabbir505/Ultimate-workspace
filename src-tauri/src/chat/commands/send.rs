@@ -786,8 +786,7 @@ pub async fn send_chat_message(
     // folders, find the file whose name/filename matches the session's model,
     // and (re)spawn llama-server so the send proceeds against a live endpoint.
     // A chat:status notice keeps the "Loading local model…" indicator up while
-    // the sidecar warms; it clears on the first token / done / error, and
-    // (E-9a) when the warmup itself finishes — whichever comes first.
+    // the sidecar warms; it clears on the first token / done / error.
     if provider_str == "local_gguf" {
         let local_state = app
             .try_state::<crate::chat::local_models::LocalModelState>()
@@ -962,19 +961,23 @@ pub async fn send_chat_message(
                                     "[local-warmup] sidecar started OK, persisted base_url={:?}",
                                     started.base_url
                                 );
-                                // Same prompt-cache warmup as start_local_model —
-                                // queued behind the in-flight send on
-                                // llama-server, so it primes the NEXT turn.
-                                // Mirrors this turn's toggles so turn 2's
-                                // prefix matches.
-                                spawn_prompt_warmup(
-                                    app.clone(),
-                                    started.base_url.clone(),
-                                    started.model_id.clone(),
-                                    chat_session_id.clone(),
-                                    tools_on,
-                                    code_exec_enabled.unwrap_or(false),
-                                );
+                                // Deliberately NO prompt-cache warmup here.
+                                // This turn is about to hit the freshly
+                                // spawned sidecar and its prefill IS the
+                                // primer — llama-server continuous-batches
+                                // across its slots, so a concurrently fired
+                                // warmup doesn't queue behind the turn (the
+                                // old assumption), it RACES it: both prefills
+                                // split the GPU and the turn's time-to-first-
+                                // token stretched ~40% (measured on a 4B GGUF
+                                // at 32k ctx: full prefill ~75s solo). Turn 2
+                                // reuses turn 1's cached prefix either way,
+                                // so the warmup bought nothing here. The
+                                // surfaces that CAN warm before traffic (the
+                                // picker spawn and the Settings "Use model"
+                                // flow) run warmLocalPromptForChat on the
+                                // frontend while their spinner is up.
+                                // (LOCAL_MODEL_PROMPT_CACHING.md §2.2)
                             }
                             Err(e) => {
                                 crate::relay_eprintln!("[local-warmup] start FAILED: {e}");
@@ -1949,12 +1952,12 @@ pub(crate) fn working_directory_section(root: &str) -> String {
 /// - `code_exec` / `tools_on` — the composer toggles, passed by the frontend,
 /// - attached connectors — the session's `chat_session_connectors` rows.
 ///
-/// Two callers:
-/// - `warmup_local_prompt` (frontend, right after `start_local_model`) — the
-///   loading spinner covers it, so "loaded" means the first message answers
-///   immediately.
-/// - The send path's sidecar respawn fires it via [`spawn_prompt_warmup`] —
-///   a turn is already in flight there, so it can't block; it primes turn 2.
+/// Caller: `warmup_local_prompt` (frontend, right after `start_local_model`
+/// or the Settings "Use model" flow) — the loading spinner covers it, so
+/// "loaded" means the first message answers immediately. The send path's
+/// sidecar respawn deliberately does NOT warm: its turn is already in
+/// flight, and a concurrently fired warmup races that turn's prefill for
+/// GPU (continuous batching across slots) instead of helping.
 pub(crate) async fn run_prompt_warmup(
     app: &tauri::AppHandle,
     base_url: &str,
@@ -2118,6 +2121,10 @@ pub(crate) async fn run_prompt_warmup(
         ],
         "max_tokens": 1,
         "stream": false,
+        // Mirror the send path's cache_prompt (the warmup exists precisely to
+        // prime the sidecar's KV prefix — make the opt-in explicit so a
+        // binary whose default is false still caches it).
+        "cache_prompt": true,
     });
     if tools_on {
         // Mirror the send's request shape: no `tools` key at all when the
@@ -2160,39 +2167,14 @@ pub(crate) async fn run_prompt_warmup(
     }
 }
 
-/// Fire-and-forget variant for paths that can't block (the send path's
-/// sidecar respawn — a turn is already streaming, so the warmup primes the
-/// NEXT turn instead). Uses the working dir persisted by the last send and
-/// the session's persisted policies so the primed prefix matches turn 2.
-pub(crate) fn spawn_prompt_warmup(
-    app: tauri::AppHandle,
-    base_url: String,
-    model_id: String,
-    chat_session_id: String,
-    tools_on: bool,
-    code_exec: bool,
-) {
-    tokio::spawn(async move {
-        let root = {
-            let db_state = app.state::<crate::DbState>();
-            let conn = db_state.0.lock();
-            db::get_setting(&conn, "chat.local_gguf.last_working_dir")
-                .ok()
-                .flatten()
-                .filter(|r| !r.trim().is_empty())
-        };
-        run_prompt_warmup(
-            &app,
-            &base_url,
-            &model_id,
-            root.as_deref(),
-            Some(&chat_session_id),
-            tools_on,
-            code_exec,
-        )
-        .await;
-    });
-}
+// NOTE: the old fire-and-forget `spawn_prompt_warmup` (called by the send
+// path's sidecar respawn) is gone on purpose. Its "queued behind the
+// in-flight send, primes the NEXT turn" assumption was wrong on llama-server
+// builds with multiple slots — continuous batching races the warmup against
+// the in-flight turn's prefill instead, splitting the GPU and stretching
+// that turn's time-to-first-token. The turn's own prefill is the primer;
+// the real warmups run on the frontend before any traffic (picker spawn +
+// Settings "Use model", both under their spinner).
 
 /// Warm the local model's prompt cache with the EXACT system+tools prefix
 /// the next send from this chat will render. Called by the frontend right

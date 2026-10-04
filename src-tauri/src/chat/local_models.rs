@@ -967,6 +967,19 @@ impl LocalModelRegistry {
                 // ladder below surfaces that as a start failure with the
                 // real reason in stderr.
                 "--jinja".to_string(),
+                // KV chunk reuse beyond the exact common prefix: when the
+                // next request diverges mid-history (tool-result elision,
+                // flattened assistant rows re-sent from the DB, compaction),
+                // the server re-matches unchanged chunks further back instead
+                // of re-prefilling everything after the divergence point.
+                // 256 is llama.cpp's documented default. Live-measured on the
+                // app's sidecar builds: warm next-turn prefill drops to
+                // ~300 tokens (~1-3s) where a cold prefill of the same
+                // prompt is 12-43s. Legacy binaries that reject the flag
+                // are retried without it (see the spawn-ladder handler).
+                // Spawn-arg contract + fallback list: LOCAL_MODEL_PROMPT_CACHING.md §2.1/§3.
+                "--cache-reuse".to_string(),
+                "256".to_string(),
             ];
             if let Some(mp) = mmproj_path {
                 if !mp.is_empty() {
@@ -1173,22 +1186,36 @@ impl LocalModelRegistry {
 
             // Non-OOM early exit: real error (bad model, wrong mmproj, etc.)
             if !is_oom && had_early_exit {
-                // Special-case the --jinja flag: Clang 20.1.8 builds reject it
-                // with "unrecognized argument" — try once more without it.
+                // Special-case optional flags a legacy binary may reject with
+                // "unrecognized argument" — drop ONE flag per retry,
+                // least-essential first, and retry the same rung.
+                // `--cache-reuse` is perf insurance; `--jinja` is required
+                // for the tools array, but a working non-tool sidecar beats
+                // no sidecar at all.
                 let stderr = output.trim();
-                let no_jinja = stderr.contains("unrecognized argument")
+                let rejected = stderr.contains("unrecognized argument")
                     || stderr.contains("invalid option flag");
-                if no_jinja && args_template.contains(&"--jinja".to_string()) {
-                    crate::relay_eprintln!(
-                        "[local-models] --jinja rejected; retrying without it. Snippet: {}",
-                        stderr.lines().take(1).collect::<String>()
-                    );
-                    args_template = args_template
-                        .iter()
-                        .filter(|arg| arg.as_str() != "--jinja")
-                        .cloned()
-                        .collect();
-                    continue;
+                if rejected {
+                    let mut dropped: Option<&'static str> = None;
+                    for flag in ["--cache-reuse", "--jinja"] {
+                        let Some(pos) =
+                            args_template.iter().position(|a| a == flag)
+                        else {
+                            continue;
+                        };
+                        // --cache-reuse takes a value; --jinja stands alone.
+                        let span = if flag == "--cache-reuse" { 2 } else { 1 };
+                        args_template.drain(pos..pos + span);
+                        dropped = Some(flag);
+                        break;
+                    }
+                    if let Some(flag) = dropped {
+                        crate::relay_eprintln!(
+                            "[local-models] {flag} rejected; retrying without it. Snippet: {}",
+                            stderr.lines().take(1).collect::<String>()
+                        );
+                        continue;
+                    }
                 }
                 return Err(format!(
                     "llama-server exited during startup with --n-gpu-layers={}.\n{}",

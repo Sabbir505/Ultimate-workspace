@@ -220,6 +220,19 @@ pub(crate) async fn browser_serp_search(
         // A fresh tab / fresh pane already points at the DDG SERP; a REUSED
         // tab (and the second engine) needs an explicit navigate.
         let first = load_and_extract(&mgr, app, &pane_id, &tab_id, &label, &ddg_url, navigate_needed).await;
+        // The sweep drives the user's browser pane, so it belongs in the
+        // pane's user-owned timeline like every other agent action — the
+        // chat tools path (dispatch.rs) records per tool call; without this
+        // the pane's "Agent actions — this session" panel never showed the
+        // searches that opened the page.
+        mgr.append_timeline(
+            &pane_id,
+            "navigate",
+            &ddg_url,
+            if first.is_ok() { "ok" } else { "error" },
+            None,
+            first.as_ref().err().map(|e| crate::util::truncate_chars(e, 200)),
+        );
         let hits = match first {
             Ok(h) if !h.is_empty() => h,
             first => {
@@ -227,9 +240,20 @@ pub(crate) async fn browser_serp_search(
                     "https://www.mojeek.com/search?q={}",
                     percent_encode_query(query)
                 );
-                match load_and_extract(&mgr, app, &pane_id, &tab_id, &label, &mojeek_url, true)
-                    .await
-                {
+                let second =
+                    load_and_extract(&mgr, app, &pane_id, &tab_id, &label, &mojeek_url, true).await;
+                mgr.append_timeline(
+                    &pane_id,
+                    "navigate",
+                    &mojeek_url,
+                    if second.is_ok() { "ok" } else { "error" },
+                    None,
+                    second
+                        .as_ref()
+                        .err()
+                        .map(|e| crate::util::truncate_chars(e, 200)),
+                );
+                match second {
                     Ok(h) => h,
                     Err(mojeek_err) => return Err(first.err().unwrap_or(mojeek_err)),
                 }

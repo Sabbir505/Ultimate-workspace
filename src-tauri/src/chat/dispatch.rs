@@ -3374,6 +3374,89 @@ async fn run_app_ui_tool(app: &AppHandle, name: &str, args: &Value) -> Option<St
     }
 }
 
+/// Human-facing target string for the chat-path timeline record. The chat
+/// browser tools' arg vocabulary (ref/point/text/query/prompt/…) differs from
+/// the MCP ops' (element/selector_or_description/…), so browser_mcp's
+/// `timeline_target` mostly misses here — same 120-char cap, though.
+fn chat_timeline_target(args: &Value) -> String {
+    let s = |k: &str| {
+        args.get(k)
+            .and_then(|v| v.as_str())
+            .filter(|v| !v.is_empty())
+    };
+    if let Some(v) = s("url")
+        .or_else(|| s("selector"))
+        .or_else(|| s("prompt"))
+        .or_else(|| s("query"))
+        .or_else(|| s("text"))
+        .or_else(|| s("key"))
+        .or_else(|| s("value"))
+        .or_else(|| s("path"))
+    {
+        return v.chars().take(120).collect();
+    }
+    if let Some(r) = args.get("ref").and_then(|v| v.as_i64()) {
+        return format!("ref {r}");
+    }
+    if let (Some(x), Some(y)) = (
+        args.get("x").and_then(|v| v.as_f64()),
+        args.get("y").and_then(|v| v.as_f64()),
+    ) {
+        return format!("({x:.0},{y:.0})");
+    }
+    if let Some(n) = args.get("amount").and_then(|v| v.as_i64()) {
+        return format!("{n}px");
+    }
+    if let Some(fields) = args.get("fields").and_then(|x| x.as_array()) {
+        return format!("{} field(s)", fields.len());
+    }
+    if let Some(actions) = args.get("actions").and_then(|x| x.as_array()) {
+        let ops: Vec<&str> = actions
+            .iter()
+            .filter_map(|a| a.get("op").and_then(|o| o.as_str()))
+            .collect();
+        if !ops.is_empty() {
+            return format!("batch: {}", ops.join(" -> "));
+        }
+    }
+    String::new()
+}
+
+/// Dispatch one agentic browser tool and record it in the pane's user-owned
+/// timeline. The MCP dispatch (browser_mcp.rs) logs every op it runs; this
+/// direct chat path ran unlogged, so the pane's "Agent actions — this
+/// session" panel showed nothing for chat-driven browsing. `None` (not a
+/// browser tool) records nothing, same as before.
+///
+/// The batch wrapper and the batch's per-step recursion both land here, so a
+/// `browser_batch` logs one entry per step plus its own aggregate — the same
+/// shape the MCP `batch` op produces.
+async fn run_browser_tool(
+    app: &AppHandle,
+    name: &str,
+    args: &Value,
+    artifacts_dir: &std::path::Path,
+    sid: &str,
+    ) -> Option<Result<String, String>> {
+    let result = run_browser_tool_inner(app, name, args, artifacts_dir, sid).await?;
+    let mgr = app.state::<crate::BrowserState>().0.clone();
+    if let Some(pane_id) = mgr.active_pane_id() {
+        let (outcome, detail) = match &result {
+            Ok(_) => ("ok", None),
+            Err(e) => ("error", Some(crate::util::truncate_chars(e, 200))),
+        };
+        mgr.append_timeline(
+            &pane_id,
+            name.strip_prefix("browser_").unwrap_or(name),
+            &chat_timeline_target(args),
+            outcome,
+            None,
+            detail,
+        );
+    }
+    Some(result)
+}
+
 /// Dispatch the agentic browser tools against the active browser-pane webview.
 /// Returns `None` for any other tool name so the caller falls through to the
 /// normal tool dispatcher.
@@ -3384,7 +3467,7 @@ async fn run_app_ui_tool(app: &AppHandle, name: &str, args: &Value) -> Option<St
 /// actions (`browser_click`, `browser_type`, `browser_fill_form`,
 /// `browser_select_option`, `browser_press_key`, `browser_scroll`,
 /// `browser_upload_file`), and `browser_batch`, which composes the rest.
-async fn run_browser_tool(
+async fn run_browser_tool_inner(
     app: &AppHandle,
     name: &str,
     args: &Value,
@@ -4545,6 +4628,53 @@ pub(crate) async fn run_search_docs_tool(app: &AppHandle, _name: &str, args: &Va
 
 #[cfg(test)]
 mod tests {
+
+    // ---- chat timeline targets ----
+    //
+    // The chat browser tools speak a different arg dialect than the MCP ops;
+    // the timeline target extractor must surface something human for each
+    // family so "Agent actions — this session" reads as what actually
+    // happened, not a column of dashes.
+
+    #[test]
+    fn chat_timeline_target_prefers_human_strings() {
+        assert_eq!(
+            chat_timeline_target(&serde_json::json!({"text": "generative AI", "ref": 3})),
+            "generative AI"
+        );
+        assert_eq!(chat_timeline_target(&serde_json::json!({"query": "sign in"})), "sign in");
+        assert_eq!(
+            chat_timeline_target(&serde_json::json!({"url": "https://example.com/a"})),
+            "https://example.com/a"
+        );
+    }
+
+    #[test]
+    fn chat_timeline_target_falls_back_to_structured_shapes() {
+        assert_eq!(chat_timeline_target(&serde_json::json!({"ref": 7})), "ref 7");
+        assert_eq!(
+            chat_timeline_target(&serde_json::json!({"x": 120.4, "y": 88.9})),
+            "(120,89)"
+        );
+        assert_eq!(chat_timeline_target(&serde_json::json!({"amount": 600})), "600px");
+        assert_eq!(
+            chat_timeline_target(&serde_json::json!({"fields": [1, 2, 3]})),
+            "3 field(s)"
+        );
+        assert_eq!(
+            chat_timeline_target(
+                &serde_json::json!({"actions": [{"op": "click"}, {"op": "wait_for"}]})
+            ),
+            "batch: click -> wait_for"
+        );
+        assert_eq!(chat_timeline_target(&serde_json::json!({})), "");
+    }
+
+    #[test]
+    fn chat_timeline_target_caps_long_text() {
+        let long = "x".repeat(300);
+        assert_eq!(chat_timeline_target(&serde_json::json!({"text": long})).len(), 120);
+    }
 
     // ---- browser_batch argument contract ----
     //

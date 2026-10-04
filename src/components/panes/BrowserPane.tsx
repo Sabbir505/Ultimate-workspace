@@ -541,10 +541,19 @@ export function BrowserPane({ pane, visible = true }: Props) {
       // the DOM overlays cannot paint above an OS child window.
       const shouldShow = !occluded && !trustOverlayOpen && tabId === activeTabId;
       void browserSetVisibleTab(paneId, tabId, shouldShow).catch(() => {});
-      // Move off-screen when hidden as a safety net — native webviews don't
-      // respect CSS z-index and the visibility call may not take effect
-      // immediately (or at all on some platforms).
-      if (!shouldShow) {
+      if (shouldShow) {
+        // The hide path parks the webview off-screen (1×1 at -9999,-9999) as
+        // a safety net. The bounds-sync effect below does NOT re-run when a
+        // trust overlay closes (no resize, unchanged tabs/tabStates), so
+        // without restoring the body rect here the webview stayed parked —
+        // the pane rendered solid black after closing the timeline or the
+        // credential-takeover overlay until some unrelated resize happened.
+        const body = bodyRef.current;
+        if (body) void browserSetBoundsTab(paneId, tabId, rectOf(body)).catch(() => {});
+      } else {
+        // Move off-screen when hidden as a safety net — native webviews don't
+        // respect CSS z-index and the visibility call may not take effect
+        // immediately (or at all on some platforms).
         void browserSetBoundsTab(paneId, tabId, offScreen).catch(() => {});
       }
     }

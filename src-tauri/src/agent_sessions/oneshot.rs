@@ -409,33 +409,84 @@ pub fn run_one_shot(
 /// three minutes is wedged, not working.
 pub(super) const ONESHOT_GEN_TIMEOUT: Duration = Duration::from_secs(180);
 
-/// Blocking one-shot TEXT generation through a harness CLI — the artifact
-/// generator's backend for `harness:<id>` chat sessions, whose provider/model
-/// columns name a CLI, not an HTTP API. Self-contained prompt in, final text
-/// out: no chat session, no events, no resume, no tool markers. Runs the
-/// blocking process I/O on `spawn_blocking` so async command callers stay free.
+/// Markers (lowercased) for failures no retry can fix: the CLI's account is
+/// out of credit / over quota / rejected auth. Harness CLIs report these as a
+/// normal assistant REPLY ("Insufficient credits") with exit code 0, so they
+/// used to flow into generation as if they were text and died later as a
+/// baffling parse failure ("response contained no JSON"). Matched as
+/// substrings against the extracted final text and stderr.
+const PERMANENT_GENERATION_MARKERS: &[&str] = &[
+    "insufficient credits",
+    "out of credits",
+    "not enough credits",
+    "credit balance",
+    "quota exceeded",
+    "exceeded your current quota",
+    "billing",
+    "payment required",
+    "unauthorized",
+    "invalid api key",
+    "api key not valid",
+    "authentication required",
+];
+
+/// Whether a generation reply/stderr names a permanently-failing condition
+/// (credits/quota/auth). Callers must not retry these — the second call
+/// fails identically and the run just wastes minutes.
+pub(crate) fn is_permanent_generation_error(msg: &str) -> bool {
+    let m = msg.to_ascii_lowercase();
+    PERMANENT_GENERATION_MARKERS.iter().any(|k| m.contains(k))
+}
+
 pub(crate) async fn harness_oneshot_text(
     harness_id: &str,
     model: &str,
     prompt: &str,
     cwd: Option<&str>,
 ) -> Result<String, String> {
+    harness_oneshot_text_with_timeout(harness_id, model, prompt, cwd, ONESHOT_GEN_TIMEOUT, None)
+        .await
+}
+
+/// [`harness_oneshot_text`] with a caller-chosen bound and an optional cancel
+/// flag. Long structured generations (the project wiki's whole-wiki one-pass
+/// prompt) ride a reasoning flash model through the CLI's own ~25k-token
+/// context — 180s cut real builds off mid-body, so the wiki passes a 600s
+/// bound. The cancel flag is polled in the wait loop: when it fires, the
+/// CLI's whole process tree is KILLED and the call returns `cancelled`
+/// immediately — a level-triggered flag alone (polled only between pages)
+/// left the × button waiting out the current 2-6 minute call.
+pub(crate) async fn harness_oneshot_text_with_timeout(
+    harness_id: &str,
+    model: &str,
+    prompt: &str,
+    cwd: Option<&str>,
+    timeout: Duration,
+    cancel: Option<Arc<AtomicBool>>,
+) -> Result<String, String> {
     let harness = harness_id.to_string();
     let model = model.to_string();
     let prompt = prompt.to_string();
     let cwd = cwd.map(|c| c.to_string());
     tokio::task::spawn_blocking(move || {
-        harness_oneshot_blocking(&harness, &model, &prompt, cwd.as_deref())
+        harness_oneshot_blocking(&harness, &model, &prompt, cwd.as_deref(), timeout, cancel)
     })
     .await
     .map_err(|e| format!("generation task failed: {e}"))?
 }
 
+/// Blocking one-shot TEXT generation through a harness CLI — the artifact
+/// generator's backend for `harness:<id>` chat sessions, whose provider/model
+/// columns name a CLI, not an HTTP API. Self-contained prompt in, final text
+/// out: no chat session, no events, no resume, no tool markers. Runs the
+/// blocking process I/O on `spawn_blocking` so async command callers stay free.
 pub(super) fn harness_oneshot_blocking(
     harness_id: &str,
     model: &str,
     prompt: &str,
     cwd: Option<&str>,
+    gen_timeout: Duration,
+    cancel: Option<Arc<AtomicBool>>,
 ) -> Result<String, String> {
     // Claude uses plain `--output-format json`: one result object whose
     // `.result` field IS the final text (unlike stream-json, where the final
@@ -648,14 +699,21 @@ pub(super) fn harness_oneshot_blocking(
     // Poll-wait with a deadline; a hung CLI is killed at the bound instead of
     // wedging the async command forever (same posture as run_one_shot). The
     // child lock is NOT held across the sleep so the app-exit killer can take
-    // it (M13).
-    let deadline = std::time::Instant::now() + ONESHOT_GEN_TIMEOUT;
+    // it (M13). A caller cancel flag kills the tree the same way — the ×
+    // button stops the CLI mid-call instead of waiting out the bound.
+    let deadline = std::time::Instant::now() + gen_timeout;
     let mut timed_out = false;
+    let mut cancelled = false;
     loop {
         {
             let mut guard = child.lock().map_err(|e| e.to_string())?;
             match guard.try_wait().map_err(|e| e.to_string())? {
                 Some(_) => break,
+                None if cancel.as_ref().is_some_and(|c| c.load(Ordering::SeqCst)) => {
+                    kill_child_tree(&mut guard);
+                    cancelled = true;
+                    break;
+                }
                 None if std::time::Instant::now() >= deadline => {
                     // E-7: kill the WHOLE tree — on Windows `child.kill()` only
                     // terminates the cmd.exe /C wrapper and the CLI grandchild
@@ -669,6 +727,9 @@ pub(super) fn harness_oneshot_blocking(
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+    if cancelled {
+        return Err("cancelled".to_string());
+    }
     if timed_out {
         // The kill above closed the stderr pipe → the reader hits EOF; give
         // it a moment and surface WHAT the CLI was doing when it was killed
@@ -677,7 +738,7 @@ pub(super) fn harness_oneshot_blocking(
         let suffix = stderr_suffix(&err);
         return Err(format!(
             "{harness_id} generation timed out after {}s{suffix}",
-            ONESHOT_GEN_TIMEOUT.as_secs()
+            gen_timeout.as_secs()
         ));
     }
     // Bounded EOF wait, then take whatever stdout captured — a complete reply
@@ -692,6 +753,15 @@ pub(super) fn harness_oneshot_blocking(
 
     let text =
         parse_oneshot_text(harness_id, &raw).map_err(|e| format!("{e}{}", stderr_suffix(&err)))?;
+    // A credits/quota/auth refusal arrives as a normal (short) reply with exit
+    // code 0 — catch it here or it flows into structured generation and dies
+    // later as "no JSON in the response", blaming the wrong thing.
+    if text.trim().len() < 200 && is_permanent_generation_error(&text) {
+        return Err(format!(
+            "{harness_id} reported: {} — top up the CLI account or pick a different model",
+            text.trim()
+        ));
+    }
     if text.trim().is_empty() {
         if err.trim().is_empty() {
             // Char-safe truncation: byte slicing panics when offset 200 lands
@@ -699,6 +769,14 @@ pub(super) fn harness_oneshot_blocking(
             return Err(format!(
                 "{harness_id} returned an empty response (raw: {})",
                 crate::util::truncate_chars(&raw, 200)
+            ));
+        }
+        // The stderr IS the reply in this shape — a permanent failure there
+        // gets the actionable framing, not a bare "empty response".
+        if is_permanent_generation_error(&err) {
+            return Err(format!(
+                "{harness_id} reported: {} — top up the CLI account or pick a different model",
+                err.trim()
             ));
         }
         return Err(format!(

@@ -46,6 +46,7 @@ import {
 } from "lucide-react";
 import { PanelIcon } from "../common/PanelIcon";
 import { ToolbarHeader } from "../common/ToolbarHeader";
+import { VaultIcon } from "../../lib/icons";
 import { open as pickFolder, open as pickFile } from "@tauri-apps/plugin-dialog";
 import type { EditorView } from "@codemirror/view";
 import { redo, undo } from "@codemirror/commands";
@@ -661,7 +662,12 @@ export function VaultView() {
       <ToolbarHeader>
         <header className="vault-header">
           <div className="vault-header-left" data-tauri-drag-region="">
-            <span className="vault-title" title={root}>{vaultName}</span>
+            {/* The safe mark the sidebar uses — the other full-page headers
+                carry their icon into the caption, this one had none. */}
+            <span className="vault-header-icon" data-tauri-drag-region="">
+              <VaultIcon size={16} strokeWidth={1.8} />
+            </span>
+            <span className="vault-title" data-tauri-drag-region="" title={root}>{vaultName}</span>
             {stats ? (
               <span className="vault-stats-chip">
                 {stats.notes} notes · {stats.links} links{stats.unresolved > 0 ? ` · ${stats.unresolved} unresolved` : ""}

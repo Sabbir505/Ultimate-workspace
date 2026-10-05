@@ -817,6 +817,50 @@ fn scripted_page(slug: &str, mesh_line: &str) -> String {
 }
 
 #[tokio::test]
+async fn malformed_one_pass_response_is_self_repaired_by_the_same_model() {
+    // A one-pass response whose JSON is corrupted mid-document (mirrors the
+    // live free-model failure: valid-looking wiki, unbalanced quote at char
+    // ~34k) must be handed back to the model for ONE repair round instead of
+    // paying the N+1-call two-phase fallback immediately.
+    let (_tmp, root) = sample_repo();
+    let app = mock_wiki_app();
+
+    let valid = serde_json::json!({
+        "pages": [
+            {"slug":"overview","title":"Overview","kind":"overview","summary":"s",
+             "body":"# Overview\n\nSome body text comfortably over the eighty character minimum the parser enforces.\n","claims":[]},
+            {"slug":"mesh","title":"Mesh","kind":"module","summary":"s",
+             "body":"# Mesh\n\nSome body text comfortably over the eighty character minimum the parser enforces.\n","claims":[]},
+        ]
+    })
+    .to_string();
+    let malformed = valid.replacen("\"summary\":\"s\"", "\"summary\":\"s", 1);
+    assert_ne!(malformed, valid, "corruption must change the payload");
+    assert!(
+        parse_single_wiki(&malformed, 20).is_err(),
+        "the corrupted response must fail the strict parse"
+    );
+
+    // Queue: [malformed one-pass, repaired response]. The build must end on
+    // the repair — no outline/page calls follow.
+    let out = run_build_with(&app, &root, scripted(&[&malformed, &valid]))
+        .await
+        .unwrap();
+    assert_eq!(out.pages, 2, "the repaired response must be used");
+
+    let canonical = canonical_root(&root).unwrap();
+    let pages = {
+        let db = app.state::<crate::DbState>();
+        let conn = db.0.lock();
+        let project = db::wiki_get_project_by_path(&conn, &canonical)
+            .unwrap()
+            .unwrap();
+        db::wiki_list_pages(&conn, &project.id).unwrap()
+    };
+    assert_eq!(pages.len(), 2);
+}
+
+#[tokio::test]
 async fn scripted_build_end_to_end_then_update_pass() {
     let (_tmp, root) = sample_repo();
     let app = mock_wiki_app();

@@ -115,6 +115,39 @@ describe("view nav history", () => {
     ]);
     expect(useUiStore.getState().viewIndex).toBe(2);
   });
+
+  it("navBackToChat skips intermediate full-page views and restores the chat", () => {
+    // wiki → vault → chat: "Back to chat" from vault must land on the CHAT,
+    // not step onto wiki again (the old one-step navBack did exactly that).
+    const { setActiveView, navBackToChat } = useUiStore.getState();
+    setActiveView("vault");
+    setActiveView("wiki");
+    const landed = navBackToChat();
+    expect(landed?.view).toBe("chat");
+    expect(useUiStore.getState().activeView).toBe("chat");
+    expect(useUiStore.getState().viewIndex).toBe(0);
+    // Forward still walks the full branch back through vault/wiki.
+    useUiStore.getState().navForward();
+    expect(useUiStore.getState().activeView).toBe("vault");
+  });
+
+  it("navBackToChat re-selects the recorded chat session id", () => {
+    const { recordChatNav, setActiveView, navBackToChat } = useUiStore.getState();
+    recordChatNav("session-b");
+    setActiveView("wiki");
+    const landed = navBackToChat();
+    expect(landed?.chatSessionId).toBe("session-b");
+  });
+
+  it("navBackToChat returns null when no chat entry is behind", () => {
+    useUiStore.setState({
+      viewHistory: [{ view: "wiki", chatSessionId: null }],
+      viewIndex: 0,
+      activeView: "wiki",
+      baseView: "wiki",
+    });
+    expect(useUiStore.getState().navBackToChat()).toBeNull();
+  });
 });
 
 // Overlays (settings/skills/cost) float above the real view; closing one

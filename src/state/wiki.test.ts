@@ -140,7 +140,16 @@ describe("wiki store", () => {
       step: "Wrote page: Overview (1/4)",
     });
     expect(useWikiStore.getState().progress?.pagesDone).toBe(1);
-    expect(wikiGetMock).not.toHaveBeenCalled();
+    // A running event against a stale `jobRunning: false` snapshot refreshes
+    // JUST the flag (throttled): the dead-job reconciliation needs current
+    // registry data or the live feed gets hidden for the whole build. This
+    // is a status-only patch — the page/selection state must not reload.
+    await vi.waitFor(() => {
+      expect(wikiGetMock).toHaveBeenCalledWith("/repo");
+    });
+    expect(useWikiStore.getState().statusLoading).toBe(false);
+    expect(useWikiStore.getState().pageLoading).toBe(false);
+    wikiGetMock.mockClear();
     useWikiStore.getState().applyProgress({
       path: "/repo",
       mode: "build",

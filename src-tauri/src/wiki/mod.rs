@@ -58,6 +58,10 @@ pub(crate) const SETTING_BUILD_PROVIDER: &str = "wiki.build_provider";
 pub(crate) const SETTING_BUILD_MODEL: &str = "wiki.build_model";
 
 const DEFAULT_MAX_PAGES: usize = 20;
+/// Bound for one harness generation call. 600s (matching the Real arm's HTTP
+/// client) — the shared 180s `ONESHOT_GEN_TIMEOUT` killed real wiki builds:
+/// the CLI's own context is ~25k tokens before the wiki prompt lands.
+const WIKI_ONESHOT_TIMEOUT: Duration = Duration::from_secs(600);
 /// Char budgets. Page file bundles are the input-cost driver; heads only —
 /// the wiki describes structure, not every line.
 const MAX_OUTLINE_INPUT_CHARS: usize = 16_000;
@@ -224,6 +228,27 @@ impl Caller {
         user: &str,
         anthropic_max_tokens: u32,
     ) -> Result<String, String> {
+        self.call_cancellable(system, user, anthropic_max_tokens, None)
+            .await
+    }
+
+    /// [`Caller::call`] with a cancel flag. The × button must stop the call
+    /// IN FLIGHT, not just between pages: one harness page call runs up to
+    /// WIKI_ONESHOT_TIMEOUT, and a flag checked only between pages left the
+    /// cancel button waiting out a 2-6 minute generation. Harness calls kill
+    /// the CLI's process tree; the HTTP arm drops the request future; both
+    /// return `Err("cancelled")` (run_build_with turns that into the
+    /// terminal `cancelled` progress event).
+    async fn call_cancellable(
+        &self,
+        system: &str,
+        user: &str,
+        anthropic_max_tokens: u32,
+        cancel: Option<&Arc<AtomicBool>>,
+    ) -> Result<String, String> {
+        if cancel.is_some_and(|c| cancelled(c)) {
+            return Err("cancelled".to_string());
+        }
         match self {
             Caller::Real {
                 provider,
@@ -240,7 +265,7 @@ impl Caller {
                     .timeout(std::time::Duration::from_secs(600))
                     .build()
                     .map_err(|e| format!("failed to build HTTP client: {e}"))?;
-                crate::chat::llm_client::oneshot(
+                let req = crate::chat::llm_client::oneshot(
                     provider,
                     &client,
                     api_key,
@@ -249,29 +274,66 @@ impl Caller {
                     system,
                     user,
                     anthropic_max_tokens,
-                )
-                .await
-                .and_then(|out| {
-                    out.ok_or_else(|| "no usable provider/base for the wiki build model".to_string())
-                })
+                );
+                match cancel {
+                    // Drop the request future on cancel — reqwest aborts the
+                    // connection when the future is dropped.
+                    Some(flag) => {
+                        tokio::select! {
+                            out = req => out.and_then(|out| {
+                                out.ok_or_else(|| "no usable provider/base for the wiki build model".to_string())
+                            }),
+                            _ = async {
+                                loop {
+                                    if cancelled(flag) {
+                                        return;
+                                    }
+                                    tokio::time::sleep(Duration::from_millis(200)).await;
+                                }
+                            } => Err("cancelled".to_string()),
+                        }
+                    }
+                    None => req
+                        .await
+                        .and_then(|out| {
+                            out.ok_or_else(|| "no usable provider/base for the wiki build model".to_string())
+                        }),
+                }
             }
             Caller::Harness { harness_id, model } => {
                 // Harness CLIs have no system-prompt slot — fold both halves
                 // into one self-contained prompt (the oneshot contract:
-                // "self-contained prompt in, final text out").
+                // "self-contained prompt in, final text out"). The wiki's
+                // whole-wiki one-pass prompt rides a reasoning flash model
+                // through the CLI's own ~25k-token context, so the shared
+                // 180s generation bound cut REAL builds off mid-body (session
+                // transcripts show outline/page calls killed at exactly 180s);
+                // 600s, the same bound the Real HTTP arm's client uses.
                 let prompt = format!("{system}
 
 ---
 
 {user}");
-                crate::agent_sessions::harness_oneshot_text(harness_id, model, &prompt, None)
-                    .await
+                crate::agent_sessions::harness_oneshot_text_with_timeout(
+                    harness_id,
+                    model,
+                    &prompt,
+                    None,
+                    WIKI_ONESHOT_TIMEOUT,
+                    cancel.cloned(),
+                )
+                .await
             }
-            Caller::Scripted(queue) => queue
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .pop_front()
-                .ok_or_else(|| "scripted wiki caller exhausted".to_string()),
+            Caller::Scripted(queue) => {
+                if cancel.is_some_and(|c| cancelled(c)) {
+                    return Err("cancelled".to_string());
+                }
+                queue
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .pop_front()
+                    .ok_or_else(|| "scripted wiki caller exhausted".to_string())
+            }
         }
     }
 
@@ -1173,24 +1235,77 @@ pub(crate) fn validate_claims(root: &Path, raw: &[RawClaim]) -> Vec<db::WikiClai
 
 // ── build + update orchestration ──────────────────────────────────────────
 
-/// One retry around a page-generation call. Harness one-shots transiently
-/// return empty (CLI session hiccups) and cloud endpoints occasionally drop
-/// a request; the outline call just proved the engine alive, so a single
-/// retry rescues the build instead of failing it (and, pre-fix, loosing the
-/// freshness tick into a silent hourly rebuild loop).
+/// One retry around a generation call. Harness one-shots transiently return
+/// empty (CLI session hiccups, provider stream errors — the free flash models
+/// also intermittently fail outright) and cloud endpoints occasionally drop a
+/// request; a single retry rescues the build instead of failing it (and,
+/// pre-fix, loosing the freshness tick into a silent hourly rebuild loop).
+/// PERMANENT failures (credits/quota/auth — "Insufficient credits" arrives as
+/// a normal CLI reply with exit 0) and cancellations are returned as-is: the
+/// retry fails identically (or the job is already dead) and only burns time.
+async fn call_with_retry(
+    caller: &Caller,
+    system: &str,
+    user: &str,
+    anthropic_max_tokens: u32,
+    cancel: Option<&Arc<AtomicBool>>,
+) -> Result<String, String> {
+    match caller
+        .call_cancellable(system, user, anthropic_max_tokens, cancel)
+        .await
+    {
+        Ok(raw) => Ok(raw),
+        Err(first)
+            if first != "cancelled"
+                && !crate::agent_sessions::is_permanent_generation_error(&first) =>
+        {
+            match caller
+                .call_cancellable(system, user, anthropic_max_tokens, cancel)
+                .await
+            {
+                Ok(raw) => Ok(raw),
+                Err(second) => Err(format!(
+                    "{second} (retry after a first failure: {first})"
+                )),
+            }
+        }
+        Err(first) => Err(first),
+    }
+}
+
+/// [`call_with_retry`] pinned to the page-generation prompt.
 async fn call_page_with_retry(
     caller: &Caller,
     user: &str,
+    cancel: Option<&Arc<AtomicBool>>,
 ) -> Result<String, String> {
-    match caller.call(PAGE_SYSTEM, user, 4_096).await {
-        Ok(raw) => Ok(raw),
-        Err(first) => match caller.call(PAGE_SYSTEM, user, 4_096).await {
-            Ok(raw) => Ok(raw),
-            Err(second) => Err(format!(
-                "{second} (retry after a first failure: {first})"
-            )),
-        },
+    call_with_retry(caller, PAGE_SYSTEM, user, 4_096, cancel).await
+}
+
+const JSON_REPAIR_SYSTEM: &str = "You repair broken JSON. You get a text that was supposed to be STRICT JSON but failed to parse, together with the parser's error. Return the COMPLETE, corrected JSON only — the same content with valid syntax: escape quotes and control characters inside strings, close every bracket and brace, complete anything cut off. Never invent, drop, or summarize content. No prose, no markdown fences, no commentary.";
+
+/// One SELF-REPAIR round: a generation that came back as malformed JSON is
+/// handed back to the SAME model together with the parser's error, so it can
+/// fix its own output (unescaped quotes, truncated spans) instead of the
+/// build paying for the N+1-call fallback pipeline. One attempt, no retry on
+/// top; `None` = repair unavailable or still broken (callers fall through).
+/// Tiny garbage skips the round — nothing salvageable, no call wasted.
+async fn repair_json(
+    caller: &Caller,
+    raw: &str,
+    parse_error: &str,
+    cancel: Option<&Arc<AtomicBool>>,
+) -> Option<String> {
+    if raw.trim().len() < 200 {
+        return None;
     }
+    let user = format!(
+        "The text below failed to parse with this error: {parse_error}\n\n\
+         Return the corrected, COMPLETE JSON only.\n\nTEXT:\n{raw}"
+    );
+    call_with_retry(caller, JSON_REPAIR_SYSTEM, &user, 16_000, cancel)
+        .await
+        .ok()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1268,9 +1383,26 @@ pub(crate) async fn run_build_with<R: Runtime>(
     // EVERY failure must reach the UI. Page-call errors used to `?` out
     // with no event at all — the feed froze at the last running step while
     // the freshness tick silently restarted the build every minute (the
-    // stuck/repeating loop the live test of the tool panel exposed).
+    // stuck/repeating loop the live test of the tool panel exposed). A
+    // mid-call cancellation ALSO has to land here: the × button kills the
+    // in-flight CLI call deep inside run_build_acquired, which returns
+    // Err("cancelled") with no event of its own — without this terminal
+    // event the title-bar pill kept spinning over a dead job.
     if let Err(e) = &result {
-        if e != "cancelled" {
+        if e == "cancelled" {
+            emit_progress(
+                app,
+                &canonical,
+                "build",
+                "cancelled",
+                "pages",
+                None,
+                0,
+                0,
+                None,
+                Some("Cancelled".to_string()),
+            );
+        } else {
             emit_progress(
                 app,
                 &canonical,
@@ -1360,26 +1492,71 @@ async fn run_build_acquired<R: Runtime>(
             None,
             Some("Writing the whole wiki in one pass".to_string()),
         );
-        let single = {
-            // Ground the one-pass build in real content: the key files the
-            // analysis already ranked, read under a hard char budget.
-            let bundle_root = PathBuf::from(canonical);
-            let bundle_files = analysis.key_files.clone();
-            let bundle = tauri::async_runtime::spawn_blocking(move || {
-                read_file_bundle(&bundle_root, &bundle_files)
-            })
-            .await
-            .map_err(|e| e.to_string())?;
-            caller
-                .call(
-                    SINGLE_SYSTEM,
-                    &single_call_user(&analysis, max_pages, &bundle),
-                    16_000,
-                )
-                .await
+        // Ground the one-pass build in real content: the key files the
+        // analysis already ranked, read under a hard char budget.
+        let bundle_root = PathBuf::from(canonical);
+        let bundle_files = analysis.key_files.clone();
+        let bundle = tauri::async_runtime::spawn_blocking(move || {
+            read_file_bundle(&bundle_root, &bundle_files)
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        // ONE retry here too: the free flash models intermittently return
+        // malformed/empty responses (observed live: whole-wiki JSON with
+        // corrupted spans mid-document, and outright empty runs), and the
+        // single-pass used to burn the whole build on the first flake.
+        // The strict-parse fallback to the two-phase pipeline below still
+        // covers "the model answered, but the JSON is unusable".
+        let single = call_with_retry(
+            &caller,
+            SINGLE_SYSTEM,
+            &single_call_user(&analysis, max_pages, &bundle),
+            16_000,
+            Some(&cancel_flag),
+        ).await;
+        // SELF-REPAIR: before giving up on the one-pass, hand a malformed
+        // response back to the SAME model with the parser's error — fixing
+        // its own JSON (unescaped quotes, truncation) costs one call, against
+        // N+1 calls for the two-phase fallback below. Only tiny garbage
+        // skips the round.
+        let single_pages = match single.as_deref() {
+            Ok(raw) => match parse_single_wiki(raw, max_pages) {
+                Ok(pages) => Some(pages),
+                Err(e) => {
+                    emit_progress(
+                        app,
+                        canonical,
+                        "build",
+                        "running",
+                        "outline",
+                        None,
+                        0,
+                        0,
+                        None,
+                        Some(format!(
+                            "One-pass JSON didn't parse ({}) — asking the model to repair it",
+                            crate::util::truncate_chars(&e, 80)
+                        )),
+                    );
+                    let repaired = repair_json(&caller, raw, &e, Some(&cancel_flag)).await;
+                    match repaired
+                        .as_deref()
+                        .map(|fixed| parse_single_wiki(fixed, max_pages))
+                    {
+                        Some(Ok(pages)) => Some(pages),
+                        Some(Err(repair_err)) => {
+                            // The repair still didn't parse — take the
+                            // two-phase road; the feed already said why.
+                            let _ = repair_err;
+                            None
+                        }
+                        None => None, // repair call itself failed
+                    }
+                }
+            },
+            Err(_) => None,
         };
-        if let Ok(raw) = single {
-            if let Ok(single_pages) = parse_single_wiki(&raw, max_pages) {
+        if let Some(single_pages) = single_pages {
                 let total = single_pages.len();
                 emit_progress(
                     app,
@@ -1396,18 +1573,8 @@ async fn run_build_acquired<R: Runtime>(
                 let mut stored = 0usize;
                 for sp in &single_pages {
                     if cancelled(&cancel_flag) {
-                        emit_progress(
-                            app,
-                            canonical,
-                            "build",
-                            "cancelled",
-                            "pages",
-                            Some(&sp.brief.slug),
-                            stored,
-                            total,
-                            None,
-                            Some("Cancelled".to_string()),
-                        );
+                        // The terminal `cancelled` event is emitted centrally
+                        // by run_build_with — the Err string is the signal.
                         return Err("cancelled".to_string());
                     }
                     let claims_root = root_path.clone();
@@ -1480,7 +1647,6 @@ async fn run_build_acquired<R: Runtime>(
                     pages: stored,
                     model: model_label,
                 });
-            }
         }
         emit_progress(
             app,
@@ -1499,15 +1665,41 @@ async fn run_build_acquired<R: Runtime>(
         );
     }
 
-    let outline_raw = caller
-        .call(
-            OUTLINE_SYSTEM,
-            &outline_user(&analysis, max_pages),
-            2_000,
-        )
-        .await
-        .map_err(fail)?;
-    let briefs = normalize_outline(&outline_raw, max_pages).map_err(fail)?;
+    let outline_raw = call_with_retry(
+        &caller,
+        OUTLINE_SYSTEM,
+        &outline_user(&analysis, max_pages),
+        2_000,
+        Some(&cancel_flag),
+    )
+    .await
+    .map_err(fail)?;
+    let briefs = match normalize_outline(&outline_raw, max_pages) {
+        Ok(b) => b,
+        Err(e) => {
+            // Same self-repair round as the fast path: the outline is small,
+            // so a repair call is cheap and usually beats failing the build.
+            emit_progress(
+                app,
+                &canonical,
+                "build",
+                "running",
+                "outline",
+                None,
+                0,
+                0,
+                None,
+                Some("Outline JSON didn't parse — asking the model to repair it".to_string()),
+            );
+            let repaired = repair_json(&caller, &outline_raw, &e, Some(&cancel_flag))
+                .await
+                .and_then(|fixed| normalize_outline(&fixed, max_pages).ok());
+            match repaired {
+                Some(b) => b,
+                None => return Err(fail(e)),
+            }
+        }
+    };
     let total = briefs.len();
     emit_progress(
         app,
@@ -1524,17 +1716,8 @@ async fn run_build_acquired<R: Runtime>(
     let mut pages_done = 0usize;
     for brief in &briefs {
         if cancelled(&cancel_flag) {
-            emit_progress(
-                app,
-                canonical,
-                "build",
-                "cancelled",
-                "pages",
-                Some(&brief.slug),
-                pages_done,
-                total,
-                None,
-        Some("Cancelled".to_string()));
+            // The terminal `cancelled` event is emitted centrally by
+            // run_build_with — the Err string is the signal.
             return Err("cancelled".to_string());
         }
         let root_for_bundle = root_path.clone();
@@ -1543,7 +1726,7 @@ async fn run_build_acquired<R: Runtime>(
             tauri::async_runtime::spawn_blocking(move || read_file_bundle(&root_for_bundle, &files))
                 .await
                 .map_err(|e| e.to_string())?;
-        let raw = call_page_with_retry(&caller, &page_user(brief, &bundle, None)).await?;
+        let raw = call_page_with_retry(&caller, &page_user(brief, &bundle, None), Some(&cancel_flag)).await?;
         let (body, raw_claims) = parse_page(&raw);
         let claims_root = root_path.clone();
         let claims = tauri::async_runtime::spawn_blocking(move || {
@@ -1886,8 +2069,34 @@ current excerpts; drop or re-evidence claims that no longer hold.",
         })
         .await
         .map_err(|e| e.to_string())?;
-        let raw =
-            call_page_with_retry(&caller, &page_user(&brief, &bundle, Some(&note))).await?;
+        let raw = match call_page_with_retry(
+            &caller,
+            &page_user(&brief, &bundle, Some(&note)),
+            Some(&cancel_flag),
+        )
+        .await
+        {
+            Ok(raw) => raw,
+            // A mid-call cancel returns with no event of its own (unlike the
+            // between-pages check above) — emit the terminal one here so the
+            // pill doesn't spin over a dead job.
+            Err(e) if e == "cancelled" => {
+                emit_progress(
+                    app,
+                    &canonical,
+                    "update",
+                    "cancelled",
+                    "pages",
+                    Some(&slug),
+                    refreshed,
+                    total,
+                    None,
+                    Some("Cancelled".to_string()),
+                );
+                return Err(e);
+            }
+            Err(e) => return Err(e),
+        };
         let (body, raw_claims) = parse_page(&raw);
         let claims_root = root_path.clone();
         let claims = tauri::async_runtime::spawn_blocking(move || {

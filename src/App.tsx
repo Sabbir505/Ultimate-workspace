@@ -12,6 +12,7 @@
 // eager because it's the first thing visible on every page.
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { installTitleBarDrag } from "./lib/titleBarDrag";
 import { ArrowLeft, ArrowRight, MessageCirclePlus } from "lucide-react";
 import { Modal } from "./components/common/Modal";
 import { PanelIcon } from "./components/common/PanelIcon";
@@ -180,6 +181,13 @@ export default function App() {
       unlisten?.();
     };
   }, []);
+
+  // Title-bar drag through child elements: the portaled view headers
+  // (vault/automations/wiki) are full of h1/svg/chip children that Tauri's
+  // own drag-region check ignores (it only fires when the event TARGET has
+  // the attribute) — so the caption stopped dragging in those views. One
+  // delegated handler restores it everywhere (see lib/titleBarDrag).
+  useEffect(() => installTitleBarDrag(), []);
 
   // Pop-out chat window (roadmap #17): when the window is opened with
   // `?popout=chat&session=<id>`, render a standalone ChatView (no sidebar,

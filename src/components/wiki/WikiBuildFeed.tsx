@@ -36,7 +36,10 @@ export function WikiBuildFeed({
   }, [steps.length, running]);
 
   return (
-    <div className={`wiki-feed${compact ? " compact" : ""}`} data-testid="wiki-feed">
+    <div
+      className={`wiki-feed${compact ? " compact" : ""}${running ? " running" : ""}`}
+      data-testid="wiki-feed"
+    >
       <div className="wiki-feed-head">
         {running ? (
           <Loader2 className="wiki-feed-spinner" size={13} aria-hidden="true" />
@@ -70,7 +73,12 @@ export function WikiBuildFeed({
           </button>
         )}
       </div>
-      {steps.length > 0 && (
+      {/* While running the steps box is ALWAYS rendered (even with no rows
+          yet) at a fixed height: the empty-state column is vertically
+          centered, and letting the box grow row by row re-centered the whole
+          block on every progress event — the feed visibly "shook", and the
+          moving Cancel button caught clicks meant for nothing. */}
+      {(steps.length > 0 || running) && (
         <>
           <div className="wiki-progress-bar">
             <span

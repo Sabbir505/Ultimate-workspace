@@ -176,9 +176,9 @@ describe("WikiView overlay", () => {
     wikiGetMock.mockResolvedValue({ ...STATUS, project: null, pages: [], hasModel: false });
     render(<WikiView />);
     await waitFor(() => {
-      expect(screen.getByText("No wiki yet")).toBeTruthy();
+      expect(screen.getByText(/No wiki/, { exact: false })).toBeTruthy();
     });
-    const build = screen.getByText("Build the wiki") as HTMLButtonElement;
+    const build = screen.getByText(/Build a wiki for|Build the wiki/) as HTMLButtonElement;
     expect(build.disabled).toBe(true);
     expect(screen.getByText(/No build model configured/)).toBeTruthy();
   });
@@ -212,13 +212,22 @@ describe("WikiView overlay", () => {
     await waitFor(() => {
       expect(wikiBuildStartMock).toHaveBeenCalledWith("/other");
     });
+    // The build is now in flight for the followed project — reflect that in
+    // the status snapshot the mock serves (a running progress with
+    // jobRunning: false would rightly read as a dead job).
+    wikiGetMock.mockResolvedValue({ ...STATUS, jobRunning: true });
     fireEvent.click(screen.getByTestId("wiki-update"));
+    // The view FOLLOWS the build it started (viewProjectPath = /other), so
+    // Update targets the followed project, not the one the view started on.
     await waitFor(() => {
-      expect(wikiUpdateMock).toHaveBeenCalledWith("/repo");
+      expect(wikiUpdateMock).toHaveBeenCalledWith("/other");
     });
     act(() => {
+      // The view FOLLOWS the build started via the add menu (build() sets
+      // viewProjectPath), so the running event carries /other — that's the
+      // project whose build is actually in flight now.
       useWikiStore.getState().applyProgress({
-        path: "/repo",
+        path: "/other",
         mode: "build",
         state: "running",
         phase: "pages",
@@ -230,15 +239,20 @@ describe("WikiView overlay", () => {
       });
     });
     await waitFor(() => {
-      // Progress rides the window title bar now, not a panel at the foot.
+      // Progress rides the window title bar AND a compact live feed strip
+      // renders above the reader — the pill alone never said WHICH page was
+      // being written.
       expect(screen.getByTestId("wiki-titlebar-progress")).toBeTruthy();
-      expect(screen.queryByTestId("wiki-feed")).toBeNull();
+      expect(screen.getByTestId("wiki-feed")).toBeTruthy();
     });
     expect(screen.getByText(/Building wiki/)).toBeTruthy();
-    // Header (testid) and feed both expose Cancel — use the testid one.
+    // The running page shows up in the feed's step rows.
+    expect(screen.getByText(/Wrote page: Overview/)).toBeTruthy();
+    // Header (testid) and feed both expose Cancel — use the testid one; it
+    // cancels the project the view is following (the one being built).
     fireEvent.click(screen.getByTestId("wiki-cancel"));
     await waitFor(() => {
-      expect(wikiCancelMock).toHaveBeenCalledWith("/repo");
+      expect(wikiCancelMock).toHaveBeenCalledWith("/other");
     });
   });
 
@@ -298,25 +312,33 @@ describe("WikiView overlay", () => {
     wikiGetMock.mockResolvedValue({ ...STATUS, project: null, pages: [], hasModel: true });
     render(<WikiView />);
     await waitFor(() => {
-      expect(screen.getByText("No wiki yet")).toBeTruthy();
+      expect(screen.getByText(/No wiki/, { exact: false })).toBeTruthy();
     });
     // The projects rail is always there; the pages rail needs a selection.
     expect(screen.getByLabelText("Wiki projects")).toBeTruthy();
     expect(screen.queryByLabelText("Wiki pages")).toBeNull();
   });
 
-  it("deletes a project wiki from its rail row: first click arms, second deletes", async () => {
+  it("deletes a project wiki from its rail row: one click opens a confirm popover, Delete confirms", async () => {
     render(<WikiView />);
     const del = await screen.findByTestId("wiki-remove-/repo");
     // The title bar no longer carries a delete control — it lives on the row.
     expect(screen.queryByLabelText("Delete the wiki")).toBeNull();
+    // One click opens the confirmation popover; nothing is removed yet.
     fireEvent.click(del);
     expect(wikiRemoveMock).not.toHaveBeenCalled();
-    expect(del.className).toContain("is-armed");
+    expect(await screen.findByTestId("wiki-confirm")).toBeTruthy();
+    // Cancel closes the popover without deleting.
+    fireEvent.click(screen.getByTestId("wiki-confirm-cancel"));
+    expect(screen.queryByTestId("wiki-confirm")).toBeNull();
+    // Re-open, then Delete does the removing.
     fireEvent.click(del);
+    fireEvent.click(await screen.findByTestId("wiki-confirm-delete"));
     await waitFor(() => {
       expect(wikiRemoveMock).toHaveBeenCalledWith("/repo");
     });
+    // The popover closes once the removal kicked off.
+    expect(screen.queryByTestId("wiki-confirm")).toBeNull();
   });
 
   // ── regressions ──────────────────────────────────────────────────────────
@@ -371,14 +393,17 @@ describe("WikiView overlay", () => {
       resolveGet({ ...STATUS, pages: [] });
     });
     await waitFor(() => {
-      expect(screen.getByText("No wiki yet")).toBeTruthy();
+      expect(screen.getByText(/No wiki/, { exact: false })).toBeTruthy();
     });
-    const buildBtn = screen.getByRole("button", { name: "Build the wiki" }) as HTMLButtonElement;
+    const buildBtn = screen.getByRole("button", { name: /Build a? ?wiki/ }) as HTMLButtonElement;
     expect(buildBtn.disabled).toBe(false);
 
     act(() => {
       useWikiStore.setState({
-        status: { ...STATUS, pages: [] },
+        // A genuinely running build reports jobRunning: true from the status
+        // snapshot — with it false the dead-job reconciliation (rightly)
+        // reads the stale running progress as a dead job.
+        status: { ...STATUS, pages: [], jobRunning: true },
         loadedPath: "/repo",
         progress: {
           path: "/repo",
@@ -393,7 +418,7 @@ describe("WikiView overlay", () => {
         },
       });
     });
-    expect((screen.getByRole("button", { name: "Build the wiki" }) as HTMLButtonElement).disabled)
+    expect((screen.getByRole("button", { name: /Build a? ?wiki/ }) as HTMLButtonElement).disabled)
       .toBe(true);
   });
 
@@ -438,16 +463,16 @@ describe("WikiView overlay", () => {
     await waitFor(() => {
       expect(screen.getByText("Loading…")).toBeTruthy();
     });
-    expect(screen.queryByText("No wiki yet")).toBeNull();
-    expect(screen.queryByRole("button", { name: "Build the wiki" })).toBeNull();
+    expect(screen.queryByText(/No wiki/, { exact: false })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Build a? ?wiki/ })).toBeNull();
 
     // A real "no wiki" answer does show the empty state and its button.
     await act(async () => {
       resolveGet({ ...STATUS, pages: [] });
     });
     await waitFor(() => {
-      expect(screen.getByText("No wiki yet")).toBeTruthy();
+      expect(screen.getByText(/No wiki/, { exact: false })).toBeTruthy();
     });
-    expect(screen.getByRole("button", { name: "Build the wiki" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Build a? ?wiki/ })).toBeTruthy();
   });
 });

@@ -41,6 +41,7 @@ import { BookOpen } from "lucide-react";
 import { useProjectsStore } from "../../state/projects";
 import { useProjectsSidebarStore } from "../../state/projectsSidebar";
 import { useChatStore } from "../../state/chat";
+import { useWikiStore } from "../../state/wiki";
 import { useUiStore } from "../../state/ui";
 import { useArtifactsStore } from "../../state/artifacts";
 import { useAppearanceStore } from "../../state/appearance";
@@ -60,7 +61,7 @@ import { PetStrip } from "../pet/PetStrip";
 export function SidebarHeader() {
   const setPaletteOpen = useUiStore((s) => s.setPaletteOpen);
   const toggleSidebar = useUiStore((s) => s.toggleSidebar);
-  const { back: navBack, forward: navForward, canBack, canForward } = useViewNav();
+  const { backToChat, back: navBack, forward: navForward, canBack, canForward } = useViewNav();
   const activeView = useUiStore((s) => s.activeView);
   const setActiveView = useUiStore((s) => s.setActiveView);
   // Full-page views (logs / automations / vault) swap the back/forward pair
@@ -73,8 +74,11 @@ export function SidebarHeader() {
     activeView === "vault" ||
     activeView === "wiki";
   const exitFullPageView = () => {
-    if (canBack) navBack();
-    else setActiveView("chat"); // deep-linked straight into the view: go to chat
+    // "Back to chat" means CHAT: skip over intermediate full-page views
+    // (wiki → vault → Back must land on the chat you were reading, not on
+    // vault again). Falls back to a plain chat view when the history behind
+    // has no chat entry (deep link straight into the view).
+    if (!backToChat()) setActiveView("chat");
   };
   const headerArt = useAppearanceStore((s) => s.artData);
   // Load once per app boot; the Appearance panel refreshes the store after
@@ -187,6 +191,12 @@ export function Sidebar() {
   const setPaletteOpen = useUiStore((s) => s.setPaletteOpen);
   const setGitPromptProjectId = useUiStore((s) => s.setGitPromptProjectId);
   const toggleSidebar = useUiStore((s) => s.toggleSidebar);
+  // A wiki build runs in the BACKEND (leaving the view never cancels it), so
+  // the sidebar keeps a visible pulse on the Wiki entry from any view — the
+  // only build indicator outside the wiki surface itself.
+  const wikiBuilding =
+    useWikiStore((s) => s.progress?.state === "running") ||
+    useWikiStore((s) => s.status?.jobRunning === true);
   // Projects panel (second sidebar) — open state + toggle, persisted.
   const projectsPanelOpen = useProjectsSidebarStore((s) => s.open);
   const toggleProjectsSidebar = useProjectsSidebarStore((s) => s.toggleOpen);
@@ -402,11 +412,14 @@ export function Sidebar() {
               onClick={() => setActiveView("wiki")}
               className={`artifact-lib-title ${activeView === "wiki" ? "is-active" : ""}`}
               style={{ width: "100%" }}
-              title="Open project wiki"
-              aria-label="Open project wiki"
+              title={wikiBuilding ? "A wiki build is running" : "Open project wiki"}
+              aria-label={
+                wikiBuilding ? "A wiki build is running — open project wiki" : "Open project wiki"
+              }
             >
               <BookOpen size={14} strokeWidth={1.8} className="artifact-lib-title-icon" />
               <span className="artifact-lib-title-label">Wiki</span>
+              {wikiBuilding && <span className="sidebar-wiki-running" aria-hidden="true" />}
             </button>
             {/* Projects — toggles the nested projects panel that opens beside
                 this sidebar (state in useProjectsSidebarStore, persisted). */}

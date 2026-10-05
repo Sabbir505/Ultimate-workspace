@@ -10,10 +10,11 @@ import remarkGfm from "remark-gfm";
 import { MermaidDiagram } from "../chat/MermaidDiagram";
 import { toastError } from "../../lib/ipc";
 import { ToolbarHeader } from "../common/ToolbarHeader";
-import { BookOpen, Plus, RefreshCw, Trash2, X } from "lucide-react";
+import { BookOpen, Loader2, Plus, RefreshCw, Trash2, X } from "lucide-react";
 import type { WikiClaim, WikiPage } from "../../lib/ipc/wiki";
 import { useProjectsStore } from "../../state/projects";
 import { ensureWikiProgressSubscription, useWikiStore } from "../../state/wiki";
+import { WikiBuildFeed } from "./WikiBuildFeed";
 
 // Hoisted to module scope on purpose. `react-markdown` v9 does not memoize
 // its processor — it rebuilds the unified pipeline and re-runs the full
@@ -96,9 +97,40 @@ export function WikiView() {
   const update = useWikiStore((s) => s.update);
   const cancel = useWikiStore((s) => s.cancel);
   const remove = useWikiStore((s) => s.remove);
-  // Which project's delete is armed (clicked once, awaiting the second).
-  // Keyed by path so arming one row doesn't arm another.
-  const [armedRemove, setArmedRemove] = useState<string | null>(null);
+  // Which project's delete confirmation popover is open (single click on the
+  // trash opens it — the old arm-then-click-again flow made the SECOND click
+  // feel like a coin flip). Keyed by path so one row's popover doesn't belong
+  // to another. `confirmPos` anchors the popover under that row's trash.
+  const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
+  const [confirmPos, setConfirmPos] = useState<{ left: number; top: number } | null>(null);
+  const confirmRef = useRef<HTMLDivElement | null>(null);
+  // The row whose removal is in flight — `wiki_remove` + the reload round trip
+  // takes a beat, and a dead-looking button invited extra clicks.
+  const [removingPath, setRemovingPath] = useState<string | null>(null);
+  // Close on OUTSIDE pointerdown or Escape — not on blur. An onBlur close
+  // fires whenever focus moves anywhere (even the window losing focus), so
+  // the old armed state silently evaporated between clicks. Focus changes are
+  // irrelevant; only a press outside the popover and its row's trash (or
+  // Escape) cancels.
+  useEffect(() => {
+    if (!confirmRemove) return;
+    const onDown = (e: PointerEvent) => {
+      const t = e.target as Element | null;
+      if (confirmRef.current?.contains(t)) return;
+      const btn = t?.closest?.('[data-testid^="wiki-remove-"]');
+      if (btn?.getAttribute("data-testid") === `wiki-remove-${confirmRemove}`) return;
+      setConfirmRemove(null);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setConfirmRemove(null);
+    };
+    document.addEventListener("pointerdown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [confirmRemove]);
   const [addOpen, setAddOpen] = useState(false);
   const addBtnRef = useRef<HTMLButtonElement | null>(null);
   const addMenuRef = useRef<HTMLDivElement | null>(null);
@@ -161,6 +193,8 @@ export function WikiView() {
   const allSummaries = useWikiStore((s) => s.allSummaries);
   const openProject = useWikiStore((s) => s.openProject);
   const loadAll = useWikiStore((s) => s.loadAll);
+  const loadedPath = useWikiStore((s) => s.loadedPath);
+  const steps = useWikiStore((s) => s.steps);
   const project = useMemo(
     () =>
       projects.find((p) => p.path === viewProjectPath) ??
@@ -169,6 +203,24 @@ export function WikiView() {
     [projects, viewProjectPath, selectedProjectId],
   );
   const root = project?.path ?? null;
+  // The project whose pages are ACTUALLY on screen: `status`/`pages` belong
+  // to `loadedPath`, while `root` can disagree (project fallback to the
+  // sidebar selection after a wiki was deleted). Page clicks and the pages
+  // rail label must follow the LOADED wiki — clicks keyed on `root` asked
+  // the backend for a project that no longer existed and silently returned
+  // null, leaving the reader stuck on "Select a page.".
+  const statusProject = useMemo(
+    () => projects.find((p) => p.path === loadedPath) ?? null,
+    [projects, loadedPath],
+  );
+  // Display names always lead with a capital, whatever the folder is called.
+  const cap = (n: string) => (n ? n.charAt(0).toUpperCase() + n.slice(1) : n);
+  // Empty-state shelf: every project except the one already on offer via the
+  // primary Build button.
+  const otherProjects = useMemo(
+    () => projects.filter((p) => p.path !== root),
+    [projects, root],
+  );
 
   useEffect(() => {
     ensureWikiProgressSubscription();
@@ -181,7 +233,16 @@ export function WikiView() {
 
   // Live events OR the status snapshot's registry check — either means a
   // job is in flight (app reload mid-build leaves the event store blank).
-  const running = progress?.state === "running" || status?.jobRunning === true;
+  // A STALE "running" progress whose registry slot is already gone (app
+  // restart mid-build, a crashed task) is DEAD: without this reconciliation
+  // the feed spun forever over a job that would never emit a terminal event.
+  const jobDead =
+    progress?.state === "running" &&
+    status != null &&
+    status.jobRunning === false &&
+    (loadedPath === null || progress.path === loadedPath);
+  const running =
+    (progress?.state === "running" && !jobDead) || status?.jobRunning === true;
   const pages = status?.pages ?? [];
 
   // Build progress lives in the window TITLE BAR (see .wiki-titlebar-progress),
@@ -191,7 +252,7 @@ export function WikiView() {
   const [pillVisible, setPillVisible] = useState(false);
   const [pillFading, setPillFading] = useState(false);
   useEffect(() => {
-    if (progress?.state === "running") {
+    if (progress?.state === "running" && !jobDead) {
       setPillVisible(true);
       setPillFading(false);
       return;
@@ -203,11 +264,18 @@ export function WikiView() {
       clearTimeout(fade);
       clearTimeout(drop);
     };
-  }, [progress, pillVisible]);
+  }, [progress, pillVisible, jobDead]);
   const buildPct =
     progress && progress.pagesTotal > 0
       ? Math.min(100, Math.round((progress.pagesDone / progress.pagesTotal) * 100))
       : null;
+  // A job the progress store can't see (double Build click racing the
+  // registry guard, or an app reload mid-build) still has to show up here:
+  // the status snapshot's `jobRunning` renders an INDETERMINATE pill instead
+  // of a "Failed to start" toast for a build that is, in fact, running. Only
+  // the no-events case: when a progress object exists (running or the kept
+  // terminal one), the event-based pill logic above owns the pill.
+  const snapshotRunning = status?.jobRunning === true && progress === null;
   // Pages are authored WITH their own `# Title` heading — rendering ours
   // above it doubled every page title.
   const bodyStartsWithH1 =
@@ -219,8 +287,12 @@ export function WikiView() {
     build(root).catch((e) => toastError("Failed to start the wiki build", e));
   };
   const onUpdate = () => {
-    if (!root) return;
-    update(root).catch((e) => toastError("Failed to update the wiki", e));
+    // Refresh the wiki the view is actually SHOWING (loadedPath owns
+    // status/pages) — `root` can point at a different project after a
+    // delete/switch, and the refresh would then no-op on a phantom wiki.
+    const target = loadedPath ?? root;
+    if (!target) return;
+    update(target).catch((e) => toastError("Failed to update the wiki", e));
   };
 
   return (
@@ -240,20 +312,30 @@ export function WikiView() {
         <div className="wiki-header-actions">
           {/* Build progress rides the caption like model downloads do — spinner,
               phase label and a slim bar — instead of a panel at the foot of
-              the view. */}
-          {pillVisible && progress && (
+              the view. When all we know is the registry's `jobRunning` (no
+              events heard yet), the pill renders indeterminate: spinner +
+              label, no percentage. */}
+          {(progress ? pillVisible : snapshotRunning) ? (
             <span
-              className={`wiki-titlebar-progress${pillFading ? " is-fading" : ""}`}
+              className={`wiki-titlebar-progress${pillFading && !snapshotRunning ? " is-fading" : ""}`}
               data-testid="wiki-titlebar-progress"
               role="status"
               title={
-                progress.step ||
-                (progress.mode === "build" ? "Building the wiki" : "Updating the wiki")
+                progress?.step ||
+                (snapshotRunning
+                  ? "A wiki build or update is already running for this project"
+                  : progress?.mode === "build"
+                    ? "Building the wiki"
+                    : "Updating the wiki")
               }
             >
               <span className="wiki-titlebar-spinner" aria-hidden="true" />
               <span className="wiki-titlebar-label">
-                {progress.mode === "build" ? "Building wiki" : "Updating wiki"}
+                {progress
+                  ? progress.mode === "build"
+                    ? "Building wiki"
+                    : "Updating wiki"
+                  : "Building wiki"}
                 {buildPct !== null ? ` ${buildPct}%` : ""}
               </span>
               {buildPct !== null && (
@@ -262,7 +344,7 @@ export function WikiView() {
                 </span>
               )}
             </span>
-          )}
+          ) : null}
           {/* "Add" replaced "Build": the rails make the wiki a LIST you grow,
               so the title bar's job is adding a project to it. Clicking a
               project here either builds its wiki (first time) or jumps to the
@@ -319,7 +401,7 @@ export function WikiView() {
                           );
                         }}
                       >
-                        <span className="wiki-add-menu-name">{p.name}</span>
+                        <span className="wiki-add-menu-name">{cap(p.name)}</span>
                         <span className={`wiki-add-menu-state${sum ? " is-built" : ""}`}>
                           {sum ? `${sum.pageCount} pages` : "Build"}
                         </span>
@@ -379,7 +461,7 @@ export function WikiView() {
             allSummaries.map((sum) => {
               const name =
                 projects.find((pr) => pr.path === sum.path)?.name ?? sum.path;
-              const armed = armedRemove === sum.path;
+              const openConfirm = confirmRemove === sum.path;
               return (
                 /* A div, not a button: the row holds a select button AND a
                    delete button, and a button cannot nest another one. */
@@ -392,34 +474,104 @@ export function WikiView() {
                     className="wiki-rail-project-main"
                     onClick={() => void openProject(sum.path).catch(() => {})}
                   >
-                    <span className="wiki-rail-project-name">{name}</span>
+                    <span className="wiki-rail-project-name">{cap(name)}</span>
                     <span className="wiki-rail-project-count">{sum.pageCount}</span>
                   </button>
                   {/* Hover-only, and it takes the page count's place on the
-                      right of the row. First click arms; second deletes. */}
+                      right of the row. ONE click opens the confirmation
+                      popover (anchored under this row); the popover's Delete
+                      button does the removing. */}
                   <button
                     type="button"
-                    className={`wiki-rail-project-delete${armed ? " is-armed" : ""}`}
+                    className={`wiki-rail-project-delete${removingPath === sum.path ? " is-removing" : ""}`}
                     data-testid={`wiki-remove-${sum.path}`}
-                    aria-label={`Delete the ${name} wiki`}
-                    title={armed ? "Click again to permanently delete" : "Delete this wiki"}
-                    onClick={() => {
-                      if (armed) {
-                        setArmedRemove(null);
-                        remove(sum.path).catch((e) => toastError("Failed to remove the wiki", e));
-                      } else {
-                        setArmedRemove(sum.path);
+                    disabled={removingPath === sum.path}
+                    aria-label={
+                      removingPath === sum.path
+                        ? `Deleting the ${name} wiki`
+                        : `Delete the ${name} wiki`
+                    }
+                    aria-expanded={openConfirm}
+                    title={
+                      removingPath === sum.path ? "Deleting…" : "Delete this wiki"
+                    }
+                    onClick={(e) => {
+                      if (openConfirm) {
+                        setConfirmRemove(null);
+                        return;
                       }
+                      // Anchor the popover under this row's trash, clamped to
+                      // the window (same math as the Add menu).
+                      const rect = e.currentTarget.getBoundingClientRect();
+                      const width = 240;
+                      const left = Math.min(
+                        Math.max(8, rect.right - width),
+                        window.innerWidth - width - 8,
+                      );
+                      const top = Math.min(
+                        rect.bottom + 6,
+                        window.innerHeight - 120,
+                      );
+                      setConfirmPos({ left, top });
+                      setConfirmRemove(sum.path);
                     }}
-                    onBlur={() => setArmedRemove(null)}
                   >
-                    <Trash2 size={13} strokeWidth={1.8} />
+                    {removingPath === sum.path ? (
+                      <Loader2 size={13} strokeWidth={1.8} className="wiki-spin" />
+                    ) : (
+                      <Trash2 size={13} strokeWidth={1.8} />
+                    )}
                   </button>
                 </div>
               );
             })
           )}
         </nav>
+
+        {confirmRemove &&
+          confirmPos &&
+          createPortal(
+            <div
+              className="wiki-confirm-menu"
+              role="alertdialog"
+              aria-label={`Delete the wiki for ${confirmRemove}?`}
+              data-testid="wiki-confirm"
+              ref={confirmRef}
+              style={{ left: confirmPos.left, top: confirmPos.top }}
+            >
+              <div className="wiki-confirm-title">Delete this wiki?</div>
+              <div className="wiki-confirm-note">
+                Pages and their evidence ledgers are removed permanently.
+              </div>
+              <div className="wiki-confirm-actions">
+                <button
+                  type="button"
+                  className="wiki-confirm-btn ghost"
+                  data-testid="wiki-confirm-cancel"
+                  onClick={() => setConfirmRemove(null)}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="wiki-confirm-btn danger"
+                  data-testid="wiki-confirm-delete"
+                  disabled={removingPath === confirmRemove}
+                  onClick={() => {
+                    const path = confirmRemove;
+                    setConfirmRemove(null);
+                    setRemovingPath(path);
+                    remove(path)
+                      .catch((err) => toastError("Failed to remove the wiki", err))
+                      .finally(() => setRemovingPath((p) => (p === path ? null : p)));
+                  }}
+                >
+                  Delete
+                </button>
+              </div>
+            </div>,
+            document.body,
+          )}
 
         {statusLoading ? (
           <div className="wiki-empty">
@@ -428,13 +580,24 @@ export function WikiView() {
           </div>
         ) : pages.length === 0 ? (
           <div className="wiki-empty">
-            <h2>No wiki yet</h2>
-            <p>
-              A build reads the repository (structure, key files, recent history), drafts an
-              outline, then writes one page per subsystem — every claim grounded in the exact
-              source lines it cites. Commits that touch cited files mark pages stale and
-              regenerate just those.
-            </p>
+            {/* A running build owns the heading; with OTHER wikis present the
+                plain "No wiki yet" lied (three built wikis are listed right
+                below), so name the project that lacks one. */}
+            <h2>
+              {running || snapshotRunning
+                ? "Building the wiki…"
+                : allSummaries.length > 0
+                  ? `No wiki for ${cap(project?.name ?? "this project")} yet`
+                  : "No wiki yet"}
+            </h2>
+            {!(running || snapshotRunning) && (
+              <p>
+                A build reads the repository (structure, key files, recent history), drafts an
+                outline, then writes one page per subsystem — every claim grounded in the exact
+                source lines it cites. Commits that touch cited files mark pages stale and
+                regenerate just those.
+              </p>
+            )}
             <button
               type="button"
               className="primary"
@@ -445,16 +608,116 @@ export function WikiView() {
               // guard as a red toast.
               disabled={!root || !status?.hasModel || running || updating}
             >
-              Build the wiki
+              {project ? `Build a wiki for ${cap(project.name)}` : "Build the wiki"}
             </button>
             {status && !status.hasModel && (
               <p>No build model configured — pick one in Settings → Wiki.</p>
             )}
-            {running && <p>A build is already running for this project.</p>}
+            {/* LIVE build feed: what phase we're in, which page is being
+                written right now, per-page progress — the title-bar pill only
+                had a percentage, so a build read as a silent "Building…" for
+                minutes. Also covers the reload-mid-build snapshot. */}
+            {(running || snapshotRunning) && (
+              <WikiBuildFeed
+                steps={steps}
+                state={
+                  jobDead
+                    ? "error"
+                    : progress?.state === "error"
+                      ? "error"
+                      : progress?.state === "cancelled"
+                        ? "cancelled"
+                        : "running"
+                }
+                phase={progress?.phase ?? "analysis"}
+                mode={progress?.mode ?? "build"}
+                pagesDone={progress?.pagesDone ?? 0}
+                pagesTotal={progress?.pagesTotal ?? 0}
+                onCancel={() => {
+                  const target = loadedPath ?? root ?? progress?.path;
+                  if (target) {
+                    void cancel(target).catch((e) => toastError("Failed to cancel the build", e));
+                  }
+                }}
+              />
+            )}
             {!root && <p>Select a project first.</p>}
+            {/* The rest of the shelf: every OTHER project one click away —
+                click builds its wiki (or opens it when one exists). "No wiki
+                yet" used to offer only THIS project's Build button, sending
+                every other project through the Add-menu detour. */}
+            {otherProjects.length > 0 && (
+              <div className="wiki-empty-projects" data-testid="wiki-empty-projects">
+                <div className="wiki-rail-label">Available projects</div>
+                {otherProjects.map((p) => {
+                  const sum = allSummaries.find((s) => s.path === p.path);
+                  return (
+                    <button
+                      key={p.id}
+                      type="button"
+                      className="wiki-empty-project"
+                      data-testid={`wiki-empty-build-${p.path}`}
+                      disabled={running || updating}
+                      title={
+                        sum
+                          ? `Open the wiki for ${p.name}`
+                          : `Build a wiki for ${p.name}`
+                      }
+                      onClick={() => {
+                        if (sum) {
+                          void openProject(p.path).catch(() => {});
+                          return;
+                        }
+                        useWikiStore.getState().resetFeed();
+                        build(p.path).catch((e) =>
+                          toastError("Failed to start the wiki build", e),
+                        );
+                      }}
+                    >
+                      <span className="wiki-empty-project-name">{cap(p.name)}</span>
+                      <span className="wiki-empty-project-state">
+                        {sum ? `${sum.pageCount} pages` : "Build"}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
           </div>
         ) : (
-          <article className="wiki-reader" data-testid="wiki-reader">
+          <>
+            {/* Rebuild over an existing wiki: the reader stays usable, so
+                the live feed rides as a slim strip above it. */}
+            {(running || snapshotRunning) && (
+              <div className="wiki-reader-live">
+                <WikiBuildFeed
+                  compact
+                  steps={steps}
+                  state={
+                    jobDead
+                      ? "error"
+                      : progress?.state === "error"
+                        ? "error"
+                        : progress?.state === "cancelled"
+                          ? "cancelled"
+                          : "running"
+                  }
+                  phase={progress?.phase ?? "analysis"}
+                  mode={progress?.mode ?? "build"}
+                  pagesDone={progress?.pagesDone ?? 0}
+                  pagesTotal={progress?.pagesTotal ?? 0}
+                  onCancel={() => {
+                    const target = loadedPath ?? root ?? progress?.path;
+                    if (target) {
+                      void cancel(target).catch((e) =>
+                        toastError("Failed to cancel the build", e),
+                      );
+                    }
+                  }}
+                />
+              </div>
+            )}
+            <article className="wiki-reader" data-testid="wiki-reader">
             {pageDetail ? (
               <>
                 {!bodyStartsWithH1 && <h1>{pageDetail.title}</h1>}
@@ -487,12 +750,13 @@ export function WikiView() {
               <div className="wiki-tab-empty">{pageLoading ? "Loading…" : "Select a page."}</div>
             )}
           </article>
+          </>
         )}
 
-        {root && pages.length > 0 && (
+        {loadedPath && pages.length > 0 && (
           <nav className="wiki-pages" aria-label="Wiki pages">
             <div className="wiki-rail-label">
-              Pages{project ? ` · ${project.name}` : ""}
+              Pages{statusProject ? ` · ${cap(statusProject.name)}` : ""}
             </div>
             {pages.map((page) => (
               <PageRow
@@ -500,7 +764,13 @@ export function WikiView() {
                 page={page}
                 selected={page.slug === selectedSlug}
                 onSelect={() =>
-                  root && void select(root, page.slug).catch((e) => toastError("Failed to open the page", e))
+                  // Keyed on loadedPath — the project whose pages these
+                  // actually are (see statusProject above): `root` can point
+                  // at a different (even deleted) project, and every click
+                  // then read as dead.
+                  void select(loadedPath, page.slug).catch((e) =>
+                    toastError("Failed to open the page", e),
+                  )
                 }
               />
             ))}

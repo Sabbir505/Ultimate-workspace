@@ -72,6 +72,13 @@ const nextToken = () => ++requestSeq;
 /** True when no newer load/select has started since `token` was minted. */
 const isCurrent = (token: number) => token === requestSeq;
 
+/** Rate-limits the select-on-missing-page status re-sync (one per second,
+ *  so a pathological backend can't turn a null read into a reload loop). */
+let lastPageResyncAt = 0;
+/** Rate-limits the jobRunning snapshot refresh (one per 3s while a live
+ *  build streams events that contradict the cached snapshot). */
+let lastJobFlagRefreshAt = 0;
+
 
 export const useWikiStore = create<WikiState>((set, get) => ({
   allSummaries: [],
@@ -158,12 +165,43 @@ export const useWikiStore = create<WikiState>((set, get) => ({
     // the SAME slug and A's body won the race into B's reader.
     if (!isCurrent(token)) return;
     if (get().selectedSlug !== slug || get().loadedPath !== path) return;
+    // A null read means the wiki (or that page) vanished under the reader —
+    // the project row was deleted, or the list on screen is stale. Sitting
+    // on "Select a page." with a dead list while every click returned null
+    // read as "clicking does nothing". Re-sync the status once (bounded, so
+    // a genuinely broken pair can't loop) instead of swallowing the null.
+    if (!detail) {
+      const listed = get().status?.pages.some((p) => p.slug === slug) ?? false;
+      if (listed && Date.now() - lastPageResyncAt > 1_000) {
+        lastPageResyncAt = Date.now();
+        await get().load(path);
+      }
+      return;
+    }
     set({ pageDetail: detail });
   },
 
   build: async (path) => {
-    set({ progress: null, steps: [], updateNote: null });
-    await wikiBuildStart(path);
+    // The view FOLLOWS whatever it starts building — the Add menu and the
+    // empty-state list start builds for projects other than the one on
+    // screen, and the view used to stay behind on the old project (whose
+    // wiki row might not even exist anymore), so page clicks after the build
+    // hit the wrong path and silently returned nothing.
+    set({ progress: null, steps: [], updateNote: null, viewProjectPath: path });
+    try {
+      await wikiBuildStart(path);
+    } catch (e) {
+      // A second Build click while one is already running used to die as a
+      // red toast on the backend's registry guard. It isn't a failure — the
+      // build the user asked for IS running — so reload the status instead:
+      // `jobRunning` drives the title-bar progress pill and the Cancel
+      // button, which is the whole ask.
+      if (String(e).includes("already running")) {
+        await get().load(path).catch(() => {});
+        return;
+      }
+      throw e;
+    }
   },
 
   update: async (path) => {
@@ -273,6 +311,33 @@ export const useWikiStore = create<WikiState>((set, get) => ({
       if (steps.length > 60) steps = steps.slice(steps.length - 60);
       return { progress: p, steps };
     });
+    // A live running event contradicted by the cached `jobRunning: false`
+    // snapshot means the snapshot is STALE (taken before the build acquired
+    // its registry slot). Refresh JUST the flag — a full `load` would flash
+    // "Loading…" over the feed — so the view's dead-job reconciliation sees
+    // current data and keeps the live feed visible. Throttled.
+    if (
+      p.state === "running" &&
+      get().status?.jobRunning === false &&
+      Date.now() - lastJobFlagRefreshAt > 3_000
+    ) {
+      lastJobFlagRefreshAt = Date.now();
+      void wikiGet(p.path)
+        .then((fresh) => {
+          const cur = get();
+          if (
+            fresh &&
+            cur.status &&
+            cur.loadedPath === p.path &&
+            cur.status.jobRunning !== fresh.jobRunning
+          ) {
+            useWikiStore.setState({
+              status: { ...cur.status, jobRunning: fresh.jobRunning },
+            });
+          }
+        })
+        .catch(() => {});
+    }
     if (p.state !== "running") {
       void get().loadAll();
       if (get().loadedPath === p.path) {

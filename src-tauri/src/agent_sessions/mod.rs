@@ -1290,7 +1290,10 @@ use handlers::*;
 use oneshot::*;
 use tracker::*;
 
-pub(crate) use oneshot::{harness_oneshot_text, run_one_shot};
+pub(crate) use oneshot::{
+    harness_oneshot_text, harness_oneshot_text_with_timeout, is_permanent_generation_error,
+    run_one_shot,
+};
 pub(crate) use tracker::tool_meta_generic;
 pub(crate) use ask::{
     build_opencode_reply_answers, compose_ask_display, compose_ask_follow_up,
@@ -2959,6 +2962,22 @@ mod tests {
             parse_oneshot_text("opencode", oc).unwrap(),
             "{\"type\":\"skill\"}"
         );
+    }
+
+    #[test]
+    fn permanent_generation_errors_match_credits_quota_auth_phrasings() {
+        // The exact reply a commandcode one-shot gave a wiki build (observed
+        // live, exit code 0 — it looked like a successful generation).
+        assert!(is_permanent_generation_error("Insufficient credits"));
+        assert!(is_permanent_generation_error(
+            "You exceeded your current quota, please check your plan and billing details."
+        ));
+        assert!(is_permanent_generation_error("401 Unauthorized"));
+        // Real generated text never trips the markers.
+        assert!(!is_permanent_generation_error(
+            "The wiki overview page covers the repository structure and credits the original authors."
+        ));
+        assert!(!is_permanent_generation_error(""));
     }
 
     #[test]

@@ -40,6 +40,14 @@ export function useViewNav() {
     if (entry?.view === "vault" && entry.vault) restoreVault(entry.vault);
   }, []);
 
+  // "Back to chat" (full-page views' left arrow): skip over any intermediate
+  // full-page views and land on the chat the user was last reading.
+  const backToChat = useCallback(() => {
+    const entry = useUiStore.getState().navBackToChat();
+    if (entry?.chatSessionId) restoreChat(entry.chatSessionId);
+    return entry;
+  }, []);
+
   const forward = useCallback(() => {
     const entry = useUiStore.getState().navForward();
     if (entry?.chatSessionId) restoreChat(entry.chatSessionId);
@@ -48,6 +56,7 @@ export function useViewNav() {
 
   return {
     back,
+    backToChat,
     forward,
     canBack: viewIndex > 0,
     canForward: viewIndex < historyLength - 1,

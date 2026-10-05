@@ -377,8 +377,11 @@
   font-weight: 650;
 }
 /* Icon follows the label down, so it reads as a mark next to the text rather
-   than a glyph that outweighs it. */
-.toolbar .automations-header-left > svg {
+   than a glyph that outweighs it. All three full-page headers share the
+   treatment — the wiki's BookOpen used to stay at page size (20px) next to
+   the automations' 16px mark. */
+.toolbar .automations-header-left > svg,
+.toolbar .wiki-header-left > svg {
   width: 16px;
   height: 16px;
 }

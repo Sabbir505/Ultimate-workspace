@@ -264,7 +264,13 @@
   animation: wiki-spin 0.9s linear infinite;
 }
 
+/* Explicit from AND to: an implicit `from` picks up whatever static
+   transform the element carries and can cancel the rotation outright
+   (matrix interpolation translateY→rotate has no spin in it). */
 @keyframes wiki-spin {
+  from {
+    transform: rotate(0deg);
+  }
   to {
     transform: rotate(360deg);
   }
@@ -402,19 +408,68 @@
   white-space: nowrap;
 }
 
-.wiki-rail-project-count {
-  font-size: 10.5px;
-  opacity: 0.75;
+/* Sidebar pulse: a wiki build runs in the backend, so the Wiki nav entry
+   pulses from ANY view (leaving the wiki page never stops a build). */
+.sidebar-wiki-running {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent, #5865f2);
+  animation: sidebar-wiki-pulse 1.2s ease-in-out infinite;
 }
 
-/* Delete sits where the page count was and takes its place on hover. It is
-   absolutely positioned so it never reflows the row, and :focus-visible keeps
-   it reachable by keyboard even though it is hidden at rest. */
+@keyframes sidebar-wiki-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.35;
+    transform: scale(0.7);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-wiki-running {
+    animation: none;
+  }
+}
+
+/* The count is metadata, not the title: clearly smaller and dimmer than the
+   12px/500 name so "trading" and "12" never read as the same level. */
+.wiki-rail-project-count {
+  font-size: 9.5px;
+  opacity: 0.5;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Slim strip above the reader while a rebuild runs over existing pages. */
+.wiki-reader-live {
+  flex: 0 0 auto;
+  padding: 8px 14px 0;
+}
+
+/* Delete takes the page count's place on hover. It is absolutely positioned
+   (so the count stays right-edged at rest and the button never reflows the
+   row) but anchored with top/bottom INSETS, not `top: 50%` +
+   `translateY(-50%)`: on press the focus ring perturbed the percentage
+   transform and the button jumped ~11px, so mouseup landed on the row behind
+   it, the click never fired, and deleting took half a dozen tries. Insets
+   don't move on focus; the glyph centers via the button's own flex. Hidden
+   at rest with opacity + pointer-events, so the invisible button can never
+   eat a click; :focus-visible keeps it reachable by keyboard. */
 .wiki-rail-project-delete {
   position: absolute;
+  /* Aligned with the count's pixels, measured: with the chip's 4px internal
+     padding, right: 5px puts the icon's box right edge exactly on the
+     number's span right edge (both 9.8px in from the row edge), so the icon
+     occupies the number's slot instead of floating beside it. */
   right: 5px;
-  top: 50%;
-  transform: translateY(-50%);
+  top: 4px;
+  bottom: 4px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -425,6 +480,7 @@
   color: var(--text-dim);
   cursor: pointer;
   opacity: 0;
+  pointer-events: none;
   transition: opacity 0.1s, background-color 0.12s, color 0.12s;
   /* The app resets outlines on inputs but NOT on buttons, so a mouse click
      left the UA focus ring flashing on this glyph — the only control in the
@@ -436,6 +492,7 @@
 .wiki-rail-project:hover .wiki-rail-project-delete,
 .wiki-rail-project-delete:focus-visible {
   opacity: 1;
+  pointer-events: auto;
 }
 
 .wiki-rail-project-delete:focus-visible {
@@ -448,16 +505,155 @@
   color: var(--red, #ff6b6b);
 }
 
-/* Armed: stays visible once the pointer leaves, and reads as "click again". */
-.wiki-rail-project-delete.is-armed {
+/* Delete confirmation popover — one click on the trash opens it (the old
+   arm-then-click-again flow read as "the button does nothing"). Portaled to
+   <body>, same glass as the Add menu; anchored under the row's trash. */
+.wiki-confirm-menu {
+  position: fixed;
+  width: 240px;
+  max-width: calc(100vw - 16px);
+  padding: 12px 12px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 45%, transparent),
+    color-mix(in srgb, var(--surface-glass) 25%, transparent)
+  );
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  box-shadow: var(--glass-rim), var(--glass-drop);
+  z-index: 2100;
+}
+
+:root[data-theme="light"] .wiki-confirm-menu {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 55%, transparent),
+    color-mix(in srgb, var(--surface-glass) 38%, transparent)
+  );
+}
+
+.wiki-confirm-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.wiki-confirm-note {
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text-dim);
+}
+
+.wiki-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.wiki-confirm-btn {
+  padding: 5px 12px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.wiki-confirm-btn.ghost:hover {
+  background: var(--hover);
+}
+
+.wiki-confirm-btn.danger {
+  border-color: transparent;
+  background: var(--red, #ff6b6b);
+  color: #fff;
+}
+
+.wiki-confirm-btn.danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--red, #ff6b6b) 86%, #000);
+}
+
+.wiki-confirm-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* Removal in flight: the spinner replaces the glyph and stays visible (and
+   unclickable) until the store finishes the delete + reload. */
+.wiki-rail-project-delete.is-removing {
   opacity: 1;
-  background: rgba(255, 107, 107, 0.2);
+  pointer-events: none;
+  background: rgba(255, 107, 107, 0.14);
   color: var(--red, #ff6b6b);
 }
 
 /* The count yields to the delete on hover. */
 .wiki-rail-project:hover .wiki-rail-project-count {
   visibility: hidden;
+}
+
+/* Empty-state shelf: the other projects you can build (or open) a wiki for.
+   Rows read like the rail's, sized to the centered column. */
+.wiki-empty-projects {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: min(320px, 100%);
+  margin-top: 14px;
+  text-align: left;
+}
+
+.wiki-empty-projects .wiki-rail-label {
+  padding-left: 2px;
+}
+
+.wiki-empty-project {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: none;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.wiki-empty-project:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.wiki-empty-project:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.wiki-empty-project-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wiki-empty-project-state {
+  flex: 0 0 auto;
+  font-size: 10.5px;
+  opacity: 0.75;
 }
 
 .wiki-chip {
@@ -859,6 +1055,9 @@
 }
 
 @keyframes wiki-spin {
+  from {
+    transform: rotate(0deg);
+  }
   to {
     transform: rotate(360deg);
   }
@@ -881,6 +1080,13 @@
   padding-left: 2px;
 }
 
+/* While a build runs, the steps area holds a FIXED height: the empty-state
+   column is vertically centered, and a growing box re-centered the whole
+   block on every progress event (the "shaking" build timeline). */
+.wiki-feed.running .wiki-feed-steps {
+  height: 140px;
+}
+
 .wiki-feed.compact .wiki-feed-steps {
   max-height: 200px;
 }
@@ -899,7 +1105,13 @@
 
 .wiki-feed-step .wiki-feed-icon,
 .wiki-feed-step .wiki-feed-spinner {
-  transform: translateY(2px);
+  /* Baseline nudge WITHOUT `transform`: a static transform on the spinner
+     becomes the animation's implicit `from` keyframe, and matrix
+     interpolation from translateY(2px) to rotate(360deg) loses the rotation
+     entirely (rotate-360's matrix is the identity) — the glyph then just
+     wiggled 2px instead of spinning. */
+  position: relative;
+  top: 2px;
 }
 
 @media (prefers-reduced-motion: reduce) {

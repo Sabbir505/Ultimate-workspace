@@ -241,6 +241,14 @@ export interface UiState {
    *  landed on (null = already at the start) so callers can restore the
    *  entry's chat session. */
   navBack: () => ViewNavEntry | null;
+  /** Jump Back to the most recent CHAT entry before the current position
+   *  (the full-page views' "Back to chat" arrow). Unlike navBack — which
+   *  steps one entry and can land on ANOTHER full-page view (wiki → vault →
+   *  Back landed on vault) — this skips intermediate full-page views and
+   *  re-selects the chat the user was reading. The forward branch stays
+   *  intact (Forward walks back through vault/wiki). Returns the chat entry,
+   *  or null when nothing behind is a chat. */
+  navBackToChat: () => ViewNavEntry | null;
   /** Step one entry forward through the visited views/chats (see navBack). */
   navForward: () => ViewNavEntry | null;
   /** Conversational artifact creation: form data to prefill when the editor opens.
@@ -549,6 +557,16 @@ export const useUiStore = create<UiState>((set, get) => ({
     const entry = s.viewHistory[viewIndex];
     set({ activeView: entry.view, baseView: isOverlayView(entry.view) ? s.baseView : entry.view, viewIndex });
     return entry;
+  },
+  navBackToChat: () => {
+    const s = get();
+    for (let i = s.viewIndex - 1; i >= 0; i--) {
+      const entry = s.viewHistory[i];
+      if (entry.view !== "chat") continue;
+      set({ activeView: "chat", baseView: "chat", viewIndex: i });
+      return entry;
+    }
+    return null;
   },
   navForward: () => {
     const s = get();

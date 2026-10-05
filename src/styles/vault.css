@@ -121,6 +121,12 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* The header mark (added to match automations/wiki) — centered against the
+   14px title instead of baseline-aligned, which sat it low. */
+.vault-header-icon {
+  display: inline-flex;
+  align-self: center;
+}
 .vault-stats-chip {
   font-size: 11px;
   color: var(--text-dim);

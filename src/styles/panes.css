@@ -13,16 +13,42 @@
 .turn-rail {
   position: absolute;
   left: 0;
-  top: 0;
-  bottom: 0;
-  width: 22px;
+  /* A little less than the full screen, CENTERED in the pane: equal breathing
+     room above and below (44px each — the top gap also clears the floating
+     chat header, --toolbar-h). */
+  top: 50%;
+  bottom: auto;
+  height: calc(100% - 88px);
+  min-height: 120px;
+  transform: translateY(-50%);
+  /* Wider than the visible tick area so the hover-grown line (24px + glow,
+     ending ~31px in) stays inside the scroll box instead of clipping. */
+  width: 38px;
   z-index: 4;
   display: flex;
   flex-direction: column;
-  justify-content: center;
   /* Inset the ticks from the hard screen edge so the lines breathe. */
   padding-left: 5px;
+  /* A long-lived chat (automation run logs land a turn every run) outgrows
+     any screen: the rail scrolls INSIDE this fixed window instead of
+     spilling past both screen edges. Its own scrollbar is hidden — the
+     wheel over the ticks scrolls it; ticks stay the only hit targets. */
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: none;
   pointer-events: none;
+}
+.turn-rail::-webkit-scrollbar {
+  display: none;
+}
+/* Centered when the ticks fit the window; once they overflow, the auto
+   margins collapse and the rail scrolls top-anchored — a centered flex
+   overflow would park the topmost ticks permanently out of scroll reach. */
+.turn-rail-tick:first-child {
+  margin-top: auto;
+}
+.turn-rail-tick:last-child {
+  margin-bottom: auto;
 }
 .turn-rail-tick {
   flex: 0 0 auto;
@@ -68,12 +94,12 @@
   box-shadow: 0 0 8px var(--accent-glow);
 }
 
-/* Floating tooltip on hover: user message + assistant response (truncated). */
+/* Floating tooltip on hover: user message + assistant response (truncated).
+   PORTALED to document.body (TurnNavigator) at a fixed position beside the
+   hovered tick — inside the rail it used to clip against the rail's own
+   scroll overflow. Geometry (left/top) is set inline by the component. */
 .turn-rail-tooltip {
-  position: absolute;
-  left: 30px;
-  top: 50%;
-  transform: translateY(-50%);
+  position: fixed;
   min-width: 220px;
   max-width: 320px;
   padding: 8px 10px;
@@ -88,6 +114,7 @@
   display: flex;
   flex-direction: column;
   gap: 6px;
+  transform: translateY(-50%);
   animation: turn-rail-fade 0.15s var(--ease);
 }
 @keyframes turn-rail-fade {

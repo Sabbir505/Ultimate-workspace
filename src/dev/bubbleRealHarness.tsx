@@ -49,6 +49,94 @@ useChatStore.setState({
   loaded: true,
 });
 
+// ---- Giant automation turn (turn-height cap verification) ----
+// Builds the kind of run-log turn that overflowed the viewport: dozens of
+// interleaved tool rows / thinking blocks / narration, then a long answer.
+function giantTurn(): string {
+  const parts: string[] = [];
+  for (let i = 0; i < 40; i++) {
+    parts.push(`\nGathering batch ${i} of today's coverage…\n`);
+    parts.push(`<tool>${JSON.stringify({ kind: "search", title: "Searching the web", detail: `AI model releases October 2026 — batch ${i}` })}</tool>`);
+    parts.push(`<think>Batch ${i}: cross-checking each claim against the primary source; the benchmark numbers match prior coverage, pricing moves need a second source.</think>`);
+    parts.push(`<tool>${JSON.stringify({ kind: "code", title: "Running shell command", lang: "bash", code: `curl -s https://example.com/feed/${i} | jq '.items[] | {title, published}'` })}</tool>`);
+  }
+  parts.push("\n## Today's AI/ML/LLM digest\n\n");
+  for (let i = 0; i < 30; i++) {
+    parts.push(`- **Story ${i}** — a reasonably long digest line so the answer body itself grows past a screen: model releases, benchmark results, open-weight drops, and pricing moves across the industry.\n`);
+  }
+  return parts.join("\n");
+}
+
+const USER_ROW = { id: 12, chatSessionId: "s1", role: "user", content: USER_PROMPT, inputTokens: null, outputTokens: null, costUsd: null, createdAt: now - 600 };
+
+let liveSimTimer: number | null = null;
+function stopLiveSim() {
+  if (liveSimTimer != null) {
+    window.clearTimeout(liveSimTimer);
+    liveSimTimer = null;
+  }
+}
+function seedGiantStoppedTurn() {
+  stopLiveSim();
+  const content = giantTurn();
+  useChatStore.setState((s) => ({
+    messages: [
+      USER_ROW,
+      // No durationSec + matching stoppedPartial → endedByStop → the process
+      // region stays EXPANDED after the turn, the overflow repro.
+      { id: 13, chatSessionId: "s1", role: "assistant", content, inputTokens: null, outputTokens: null, costUsd: null, createdAt: now - 30 },
+    ] as never,
+    stoppedPartial: { ...s.stoppedPartial, s1: content },
+    streaming: {},
+  }));
+}
+function startLiveSim() {
+  stopLiveSim();
+  const content = giantTurn();
+  useChatStore.setState((s) => ({
+    messages: [USER_ROW] as never,
+    stoppedPartial: {},
+    streaming: { ...s.streaming, s1: "" },
+  }));
+  let i = 0;
+  const step = () => {
+    for (let k = 0; k < 4 && i < content.length; k++) {
+      const end = Math.min(content.length, i + 60);
+      useChatStore.getState().onToken("s1", content.slice(i, end));
+      i = end;
+    }
+    if (i < content.length) liveSimTimer = window.setTimeout(step, 60);
+  };
+  step();
+}
+
+// Turns overflow seed: a 300-turn automation run-log — the turn rail must
+// cap just under the screen and scroll internally (newest ticks pinned).
+function seedManyTurns(count = 300) {
+  stopLiveSim();
+  const msgs: Record<string, unknown>[] = [];
+  for (let i = 0; i < count; i++) {
+    msgs.push({
+      id: 1000 + i * 2,
+      chatSessionId: "s1",
+      role: "user",
+      content: `Run #${i + 1} — compile today's digest`,
+      inputTokens: null, outputTokens: null, costUsd: null,
+      createdAt: now - (count - i) * 3600,
+    });
+    msgs.push({
+      id: 1001 + i * 2,
+      chatSessionId: "s1",
+      role: "assistant",
+      content: `Digest #${i + 1} compiled — ${i + 1} stories covered.`,
+      inputTokens: null, outputTokens: null, costUsd: null,
+      createdAt: now - (count - i) * 3600 + 30,
+      durationSec: 12,
+    });
+  }
+  useChatStore.setState({ messages: msgs as never, stoppedPartial: {}, streaming: {} });
+}
+
 function Controls() {
   const ref = React.useRef<HTMLDivElement>(null);
   React.useEffect(() => {
@@ -109,6 +197,10 @@ function Controls() {
       }}
     >
       <strong>real ChatView harness</strong>
+      <button id="c-many-turns" onClick={() => seedManyTurns(300)}>Seed 300 turns (rail)</button>
+      <button id="c-giant-stopped" onClick={seedGiantStoppedTurn}>Seed giant stopped turn</button>
+      <button id="c-giant-live" onClick={startLiveSim}>Simulate giant live turn</button>
+      <button id="c-giant-reset" onClick={() => { stopLiveSim(); useChatStore.setState({ messages: [USER_ROW, { id: 13, chatSessionId: "s1", role: "assistant", content: ASSISTANT_REPLY, inputTokens: null, outputTokens: null, costUsd: null, createdAt: now - 590, durationSec: 4 }] as never, stoppedPartial: {}, streaming: {} }); }}>Reset to short turn</button>
       <button id="c-drag" onClick={() => (window as any).__harness.simulateDrag(532, 260)}>Simulate drag 532 → 260</button>
       <button id="c-drag-out" onClick={() => (window as any).__harness.simulateDrag(260, 532)}>Simulate drag 260 → 532</button>
       <button id="c-set-narrow" onClick={() => (window as any).__harness.setPanel(260)}>Set panel 260 (instant)</button>

@@ -36,7 +36,7 @@ pub fn run_one_shot(
     // bubble with no reply (audit H22).
     let user_message_id = {
         let conn = db.lock();
-        crate::db::add_chat_message(
+        let id = crate::db::add_chat_message(
             &conn,
             crate::db::NewChatMessage {
                 chat_session_id: chat_session_id,
@@ -46,7 +46,14 @@ pub fn run_one_shot(
             },
         )
         .map_err(|e| e.to_string())?
-        .id
+        .id;
+        // Turn started: bump the session's last_active_at. The sidebar
+        // timestamps + sorts rows by it, and an automation whose run-log chat
+        // the user hasn't opened used to keep showing the previous run's time
+        // until they did. The turn END is bumped by finish_turn (every reader
+        // path funnels through it); this covers the minutes IN a long run.
+        let _ = crate::db::touch_chat_session(&conn, chat_session_id);
+        id
     };
     // Remove the just-written user row after an early failure. Best-effort:
     // a failure to delete leaves the orphan bubble, never a broken turn.

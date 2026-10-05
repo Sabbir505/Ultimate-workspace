@@ -606,6 +606,13 @@ cancelStream: async (sessionIdOverride?: string) => {
       // chat event, and failure paths can die before emitting one).
       if (!(chatSessionId in get().streaming)) return;
       set((s) => clearStreamState(s, chatSessionId));
+      // Refresh the session list so the sidebar row reflects the run's real
+      // finish time: automation runs append to their run-log chat while it's
+      // CLOSED, and the provider one-shot path never emits chat:done (whose
+      // handler relists) — without this the row kept showing when the chat
+      // was last OPENED, in both its timestamp and its sort slot. Deduped
+      // in-flight; best-effort (rejections stay inside loadSessions).
+      void get().loadSessions();
       // Surface the persisted reply: a viewer (active view or the pinned pane
       // showing this session) refetches the page (same bufferWriteBack
       // contract as cancelStream / onDone); everyone else gets the unread

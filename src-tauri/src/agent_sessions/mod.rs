@@ -668,9 +668,13 @@ impl AgentSessionManager {
         // invariant when the spawn itself fails.
         let user_message_id = {
             let conn = db.0.lock();
-            crate::db::add_user_chat_message(&conn, chat_session_id, content)
+            let id = crate::db::add_user_chat_message(&conn, chat_session_id, content)
                 .map_err(|e| e.to_string())?
-                .id
+                .id;
+            // Turn started: bump last_active_at so the sidebar row reflects
+            // this turn (finish_turn bumps it again when the turn ends).
+            let _ = crate::db::touch_chat_session(&conn, chat_session_id);
+            id
         };
 
         // Prepend the Relay persona + the user's custom system prompt
@@ -1533,6 +1537,18 @@ fn finish_turn(
     if let Some(mid) = message_id {
         let conn = db.0.lock();
         let _ = crate::db::attach_artifacts_to_message(&conn, sid, mid);
+    }
+
+    // Bump the session's last_active_at BEFORE the terminal chat:done: the
+    // sidebar timestamps + sorts rows by it, and a turn that finished while
+    // the user was elsewhere — a scheduled automation's run-log chat above
+    // all — must surface with its real finish time instead of keeping the
+    // time of the last OPEN/interactive turn. Best-effort: a failed touch
+    // must never fail the finished turn. (Turn START is bumped where the
+    // user row is persisted — AgentSessionManager::send and run_one_shot.)
+    {
+        let conn = db.0.lock();
+        let _ = crate::db::touch_chat_session(&conn, sid);
     }
 
     emit_done(

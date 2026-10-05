@@ -47,6 +47,8 @@ import { useArtifactsStore } from "../../state/artifacts";
 import { useAppearanceStore } from "../../state/appearance";
 import { useNewChatAction } from "../../hooks/useNewChatAction";
 import { useViewNav } from "../../hooks/useViewNav";
+import { useRelativeTimeTick } from "../../hooks/useRelativeTimeTick";
+import { relativeTime } from "../../lib/relativeTime";
 import { ArtifactLibrary } from "./ArtifactLibrary";
 import { ChatSessionRowMemo as ChatSessionRow, type ChatSessionRowData } from "../chat/ChatSessionRow";
 import { AppVersion } from "./AppVersion";
@@ -315,6 +317,10 @@ export function Sidebar() {
   // Inbox list: EVERY chat in one flat list — project-bound chats included
   // (their project/branch now live on the row's second line instead of a
   // nested tree). Starred chats float to the top, then most-recent.
+  // nowTick: recomputes the precomputed timeLabels twice a minute so a row's
+  // "2m ago" doesn't freeze when the app is idle (the store only pushes
+  // session-list changes on real activity).
+  const nowTick = useRelativeTimeTick();
   const chatRowData: ChatSessionRowData[] = useMemo(
     () =>
       chatSessions
@@ -337,6 +343,7 @@ export function Sidebar() {
             id: s.id,
             title: s.title ?? "Untitled Chat",
             lastActiveAt: s.lastActiveAt,
+            timeLabel: relativeTime(s.lastActiveAt),
             lastMessage: undefined,
             starred: s.starred ?? false,
             unread: s.unread ?? false,
@@ -351,7 +358,7 @@ export function Sidebar() {
           (a, b) =>
             Number(b.starred) - Number(a.starred) || b.lastActiveAt - a.lastActiveAt,
         ),
-    [chatSessions, sessionProjects, projects, gitStatuses, cwdOverrides],
+    [chatSessions, sessionProjects, projects, gitStatuses, cwdOverrides, nowTick],
   );
 
   // PERF (PERFORMANCE_AUDIT.md mi27/F5): virtualize the flat chat-history

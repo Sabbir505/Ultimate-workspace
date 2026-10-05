@@ -27,6 +27,8 @@ import { useChatStore } from "../../state/chat";
 import { useUiStore } from "../../state/ui";
 import { seedSelectionFrom } from "../../lib/lastSelection";
 import { ChatSessionRowMemo, type ChatSessionRowData } from "../chat/ChatSessionRow";
+import { useRelativeTimeTick } from "../../hooks/useRelativeTimeTick";
+import { relativeTime } from "../../lib/relativeTime";
 
 /** Chats visible per project before "Show more" — and the step size of
  *  each subsequent reveal. */
@@ -88,7 +90,8 @@ export function ProjectsSidebar() {
   // binding cache second — same two paths the main sidebar reads). Starred
   // chats float to the top of their project, then most-recent: identical
   // ordering to the Chat History inbox so a pinned chat behaves the same in
-  // both lists.
+  // both lists. nowTick: same label-freshness tick as the inbox (see Sidebar).
+  const nowTick = useRelativeTimeTick();
   const chatsByProject = useMemo(() => {
     const byProject: Record<string, ChatSessionRowData[]> = {};
     for (const s of chatSessions) {
@@ -107,6 +110,7 @@ export function ProjectsSidebar() {
         id: s.id,
         title: s.title ?? "Untitled Chat",
         lastActiveAt: s.lastActiveAt,
+        timeLabel: relativeTime(s.lastActiveAt),
         starred: s.starred ?? false,
         unread: s.unread ?? false,
         worktreePath: s.worktreePath ?? null,
@@ -125,7 +129,7 @@ export function ProjectsSidebar() {
       );
     }
     return byProject;
-  }, [chatSessions, sessionProjects, gitStatuses, cwdOverrides, projects]);
+  }, [chatSessions, sessionProjects, gitStatuses, cwdOverrides, projects, nowTick]);
 
   // Stashed projects sink to the bottom of the list; the rest keep the
   // store's order (newest first — addProjectAtPath prepends).

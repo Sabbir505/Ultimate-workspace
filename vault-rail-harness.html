@@ -1,0 +1,40 @@
+<!doctype html>
+<!-- Static harness for the vault left-rail collapse/expand animation: real
+     vault.css classes, inline width/min-width switching exactly like
+     VaultView's React inline styles. Serve `npx vite`, open
+     http://localhost:1511/vault-rail-harness.html — measure mid-transition
+     widths from the console: __harness.toggle(); __harness.measure(). -->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Vault rail collapse harness</title>
+    <script type="module" src="./src/dev/vaultRailHarness.ts"></script>
+    <style>
+      body { margin: 0; background: var(--surface-1, #141517); }
+    </style>
+  </head>
+  <body>
+    <div class="vault-view" style="height: 100vh; display: flex; flex-direction: column;">
+      <div class="vault-body" id="vb" style="flex: 1;">
+        <aside class="vault-left-rail" id="rail">
+          <div class="vault-rail-inner" id="inner">
+            <div class="vault-rail-tabs" role="tablist">
+              <button role="tab" class="active">Files</button>
+              <button role="tab">Search</button>
+              <button role="tab">Tags</button>
+              <button class="vault-rail-collapse" id="collapseBtn" title="Hide the files panel">⌐</button>
+            </div>
+            <div style="padding: 10px; color: var(--text-dim); font: 13px sans-serif;">
+              <div>📁 Books</div>
+              <div>📁 ML Lessons</div>
+              <div>📁 Papers</div>
+            </div>
+          </div>
+          <button class="vault-rail-expand" id="expandBtn" title="Show the files panel">⌐</button>
+        </aside>
+        <main class="vault-center" style="flex: 1;"></main>
+      </div>
+    </div>
+    <div id="readout" style="position: fixed; right: 8px; top: 8px; background: #16181d; color: #ddd; border: 1px solid #333; border-radius: 8px; padding: 10px; font: 12px monospace; z-index: 99;"></div>
+  </body>
+</html>

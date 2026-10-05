@@ -707,41 +707,49 @@ export function VaultView() {
         <aside
           className={`vault-left-rail${leftRailCollapsed ? " collapsed" : ""}`}
           style={{
+            // Collapse animates: only `width` (and min-width) switch — a
+            // switching max-width would clamp the animating width to 28 on
+            // the first frame and snap shut (and expanding, min-width 250
+            // would snap it open). max stays at the expanded ceiling; 28 is
+            // always below it. The rail content stays MOUNTED at its
+            // expanded pixel width and fades (see vault.css) so the panel
+            // slides shut smoothly instead of blink-vanishing.
             width: leftRailCollapsed ? 28 : leftRailWidth,
             minWidth: leftRailCollapsed ? 28 : VAULT_LEFT_RAIL.min,
-            maxWidth: leftRailCollapsed ? 28 : VAULT_LEFT_RAIL.max,
+            maxWidth: VAULT_LEFT_RAIL.max,
           }}
         >
-          {leftRailCollapsed ? (
-            <button className="vault-rail-expand" title="Show the files panel" onClick={toggleLeftRail}>
-              <PanelIcon side="left" size={14} />
-            </button>
-          ) : (
-            <div className="vault-rail-inner">
-              <div className="vault-rail-tabs" role="tablist">
-                <button role="tab" aria-selected={rail === "files"} className={rail === "files" ? "active" : ""} onClick={() => setRail("files")}>
-                  Files
-                </button>
-                <button role="tab" aria-selected={rail === "search"} className={rail === "search" ? "active" : ""} onClick={() => setRail("search")}>
-                  <Search size={12} /> Search
-                </button>
-                <button role="tab" aria-selected={rail === "tags"} className={rail === "tags" ? "active" : ""} onClick={() => setRail("tags")}>
-                  <Hash size={12} /> Tags
-                </button>
-                <button className="vault-rail-collapse" title="Hide the files panel" onClick={toggleLeftRail}>
-                  <PanelIcon side="left" size={13} />
-                </button>
-              </div>
-              {rail === "files" && (
-                <>
-                  <VaultPinned />
-                  <VaultFileTree tree={tree} />
-                </>
-              )}
-              {rail === "search" && <VaultSearchPanel />}
-              {rail === "tags" && <VaultTagsPanel />}
+          <div className="vault-rail-inner" style={{ width: leftRailWidth }}>
+            <div className="vault-rail-tabs" role="tablist">
+              <button role="tab" aria-selected={rail === "files"} className={rail === "files" ? "active" : ""} onClick={() => setRail("files")}>
+                Files
+              </button>
+              <button role="tab" aria-selected={rail === "search"} className={rail === "search" ? "active" : ""} onClick={() => setRail("search")}>
+                <Search size={12} /> Search
+              </button>
+              <button role="tab" aria-selected={rail === "tags"} className={rail === "tags" ? "active" : ""} onClick={() => setRail("tags")}>
+                <Hash size={12} /> Tags
+              </button>
+              <button className="vault-rail-collapse" title="Hide the files panel" onClick={toggleLeftRail}>
+                <PanelIcon side="left" size={13} />
+              </button>
             </div>
-          )}
+            {rail === "files" && (
+              <>
+                <VaultPinned />
+                <VaultFileTree tree={tree} />
+              </>
+            )}
+            {rail === "search" && <VaultSearchPanel />}
+            {rail === "tags" && <VaultTagsPanel />}
+          </div>
+          <button
+            className="vault-rail-expand"
+            title="Show the files panel"
+            onClick={toggleLeftRail}
+          >
+            <PanelIcon side="left" size={14} />
+          </button>
         </aside>
         {!leftRailCollapsed && (
           <ResizeHandle

@@ -19,6 +19,10 @@ export interface ChatSessionRowData {
   id: string;
   title: string;
   lastActiveAt: number;
+  /** Precomputed `relativeTime(lastActiveAt)` — computed by the list owner so
+   *  a slow tick can refresh labels without defeating the row memo. Falls
+   *  back to computing from `lastActiveAt` when omitted. */
+  timeLabel?: string;
   lastMessage?: string;
   starred?: boolean;
   unread?: boolean;
@@ -264,7 +268,7 @@ export function ChatSessionRow({
             {working ? (
               <span className="chat-session-working" title="Working…" aria-label="Working" />
             ) : (
-              <span className="chat-session-time">{relativeTime(session.lastActiveAt)}</span>
+              <span className="chat-session-time">{session.timeLabel ?? relativeTime(session.lastActiveAt)}</span>
             )}
             {session.worktreePath && (
               <span

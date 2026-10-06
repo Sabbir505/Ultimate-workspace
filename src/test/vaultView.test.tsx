@@ -2,7 +2,7 @@
 // binder when nothing is bound and the workspace when bound; the tree opens
 // notes and drives create/rename/delete through the store.
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 const vaultGetStateMock = vi.fn();
 const vaultTreeMock = vi.fn();
@@ -33,6 +33,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 import { VaultView } from "../components/vault/VaultView";
 import { VaultFileTree } from "../components/vault/VaultFileTree";
 import { useVaultStore } from "../state/vault";
+import { useConfirmStore } from "../state/confirm";
 
 const TREE = [
   {
@@ -185,8 +186,9 @@ describe("VaultFileTree", () => {
     expect(openNote).not.toHaveBeenCalled();
   });
 
-  it("hides rename for assets but still offers delete", () => {
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+  it("hides rename for assets but still offers delete", async () => {
+    // Delete now opens the in-app confirm (state/confirm.ts) — accept it.
+    useConfirmStore.setState({ current: null });
     const deleteNote = vi.fn().mockResolvedValue(undefined);
     useVaultStore.setState({ deleteNote: deleteNote as never });
     const WITH_ASSET = [{ name: "report.pdf", path: "report.pdf", kind: "file", children: [] }];
@@ -195,9 +197,9 @@ describe("VaultFileTree", () => {
     // Rename would push the file through the .md-only path ("report.pdf.md").
     expect(row.querySelector("[title='Rename']")).toBeNull();
     fireEvent.click(row.querySelector("[title='Delete file (to .trash)']") as HTMLElement);
-    expect(confirmSpy).toHaveBeenCalled();
-    expect(deleteNote).toHaveBeenCalledWith("report.pdf");
-    confirmSpy.mockRestore();
+    await waitFor(() => expect(useConfirmStore.getState().current).toBeTruthy());
+    act(() => useConfirmStore.getState().settle(true));
+    await waitFor(() => expect(deleteNote).toHaveBeenCalledWith("report.pdf"));
   });
 
   it("renders the asset view (not the editor) when a file is active", () => {
@@ -235,8 +237,8 @@ describe("VaultFileTree", () => {
     expect(useVaultStore.getState().activePath).toBe("Home.md");
   });
 
-  it("delete asks for confirmation and calls the store", () => {
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+  it("delete asks for confirmation and calls the store", async () => {
+    useConfirmStore.setState({ current: null });
     const deleteNote = vi.fn().mockResolvedValue(undefined);
     useVaultStore.setState({ deleteNote: deleteNote as never });
     render(<VaultFileTree tree={TREE as never} />);
@@ -244,9 +246,23 @@ describe("VaultFileTree", () => {
     const homeRow = screen.getByText("Home.md").closest(".vault-tree-row") as HTMLElement;
     const deleteBtn = homeRow.querySelector("[title='Delete note (to .trash)']") as HTMLElement;
     fireEvent.click(deleteBtn);
-    expect(confirmSpy).toHaveBeenCalled();
-    expect(deleteNote).toHaveBeenCalledWith("Home.md");
-    confirmSpy.mockRestore();
+    // Nothing deleted until the in-app confirm is accepted.
+    await waitFor(() => expect(useConfirmStore.getState().current).toBeTruthy());
+    expect(deleteNote).not.toHaveBeenCalled();
+    act(() => useConfirmStore.getState().settle(true));
+    await waitFor(() => expect(deleteNote).toHaveBeenCalledWith("Home.md"));
+  });
+
+  it("delete does nothing when the confirm is denied", async () => {
+    useConfirmStore.setState({ current: null });
+    const deleteNote = vi.fn().mockResolvedValue(undefined);
+    useVaultStore.setState({ deleteNote: deleteNote as never });
+    render(<VaultFileTree tree={TREE as never} />);
+    const homeRow = screen.getByText("Home.md").closest(".vault-tree-row") as HTMLElement;
+    fireEvent.click(homeRow.querySelector("[title='Delete note (to .trash)']") as HTMLElement);
+    await waitFor(() => expect(useConfirmStore.getState().current).toBeTruthy());
+    act(() => useConfirmStore.getState().settle(false));
+    expect(deleteNote).not.toHaveBeenCalled();
   });
 
   it("shows the empty state for an empty vault", () => {

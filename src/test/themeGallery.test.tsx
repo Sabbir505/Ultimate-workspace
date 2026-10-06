@@ -3,9 +3,10 @@
 // export). Mocks ipc getSetting/setSetting/readFileText + the tauri dialog/fs
 // plugins, following the promptTemplates test pattern (importOriginal spread).
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useTheme } from "../hooks/useTheme";
 import { useSettingsStore } from "../state/settings";
+import { useConfirmStore } from "../state/confirm";
 import { ThemeGalleryPanel } from "../components/settings/ThemeGalleryPanel";
 import { parseThemeJson, themeJson, KNOWN_THEME_TOKENS } from "../lib/themes";
 
@@ -190,7 +191,8 @@ describe("ThemeGalleryPanel", () => {
   });
 
   it("deletes a theme and clears the active id", async () => {
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    // Delete opens the in-app confirm (state/confirm.ts) — accept it.
+    useConfirmStore.setState({ current: null });
     useSettingsStore.setState({
       customThemes: [{ id: "t1", name: "Nord", colors: { accent: "#88c0d0" } }],
       customThemeId: "t1",
@@ -198,6 +200,8 @@ describe("ThemeGalleryPanel", () => {
     render(<Harness />);
 
     fireEvent.click(await screen.findByTitle("Delete theme"));
+    await waitFor(() => expect(useConfirmStore.getState().current).toBeTruthy());
+    act(() => useConfirmStore.getState().settle(true));
     await waitFor(() => {
       const saved = setSettingMock.mock.calls.find((c) => c[0] === "themes.custom")?.[1];
       expect(JSON.parse(saved)).toHaveLength(0);
@@ -208,7 +212,6 @@ describe("ThemeGalleryPanel", () => {
     expect(screen.queryByTitle("Delete theme")).toBeNull();
     expect(screen.getAllByText(/Nord/)).toHaveLength(1);
     expect(useSettingsStore.getState().customThemeId).toBeNull();
-    confirmSpy.mockRestore();
   });
 
   it("exports a theme through the save dialog", async () => {

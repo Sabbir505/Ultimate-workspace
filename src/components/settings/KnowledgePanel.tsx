@@ -50,6 +50,7 @@ import {
   type PerDownloadState,
 } from "../../lib/ipc";
 import { formatBytes, formatDateTime, shortName } from "../../lib/format";
+import { confirmDialog } from "../../state/confirm";
 import { Modal } from "../common/Modal";
 
 /** Recommended Hugging Face embedding GGUFs — the small set the backend's
@@ -331,7 +332,14 @@ export function KnowledgePanel() {
   };
 
   const handleRemove = async (corpusId: string) => {
-    if (!window.confirm("Remove this corpus and delete all its chunks?")) return;
+    // In-app confirm — window.confirm is rejected by this webview (see
+    // state/confirm.ts).
+    const ok = await confirmDialog({
+      title: "Remove knowledge corpus",
+      body: "Remove this corpus and delete all its chunks?",
+      confirmLabel: "Remove corpus",
+    });
+    if (!ok) return;
     setError(null);
     setBusy(corpusId);
     try {

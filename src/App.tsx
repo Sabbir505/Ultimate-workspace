@@ -15,6 +15,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { installTitleBarDrag } from "./lib/titleBarDrag";
 import { ArrowLeft, ArrowRight, MessageCirclePlus } from "lucide-react";
 import { Modal } from "./components/common/Modal";
+import { ConfirmDialogHost } from "./components/common/ConfirmDialogHost";
 import { PanelIcon } from "./components/common/PanelIcon";
 import { ToastHost } from "./components/common/ToastHost";
 import { OnboardingBanner } from "./components/onboarding/OnboardingBanner";
@@ -577,6 +578,9 @@ export default function App() {
       </Suspense>
       <ForkChatModal />
       <HotkeyOverlay />
+      {/* In-app confirm prompt (state/confirm.ts) — replaces window.confirm,
+          which this webview build rejects (see the module's header). */}
+      <ConfirmDialogHost />
 
       {pendingReplace && (
         <Modal

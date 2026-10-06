@@ -72,11 +72,10 @@ vi.mock("../lib/ipc", () => ({
   toastSuccess: vi.fn(),
 }));
 
-// The panel calls confirm() before removing — spy it (fresh per test, so the
-// vi.clearAllMocks() reset doesn't detach a stale mock). Seeded to accept by
-// default so the happy-path remove flow is exercised; a case that needs denial
-// can point it at false via callback.mockReturnValue.
-let confirmSpy: ReturnType<typeof vi.fn>;
+// The panel opens the IN-APP confirm (state/confirm.ts) before removing —
+// there is no window.confirm anymore (this webview rejects it). Tests drive
+// the store directly: settle(true) accepts, settle(false) denies.
+import { useConfirmStore } from "../state/confirm";
 
 const corpus = (over: Partial<DocCorpus> = {}): DocCorpus => ({
   id: "corp-1",
@@ -128,9 +127,8 @@ beforeEach(() => {
   docsStartRerankerMock.mockResolvedValue(false);
   onDocsIndexProgressMock.mockImplementation(() => Promise.resolve(vi.fn()));
   onDocsCorpusUpdatedMock.mockImplementation(() => Promise.resolve(vi.fn()));
-  confirmSpy = vi.fn().mockReturnValue(true);
-  // Stash the spy on window so component code that calls window.confirm() picks it up.
-  window.confirm = confirmSpy as unknown as typeof window.confirm;
+  // Fresh confirm state per test (module-global store).
+  useConfirmStore.setState({ current: null });
 });
 
 afterEach(() => {
@@ -226,8 +224,22 @@ describe("KnowledgePanel", () => {
     docsListCorporaMock.mockResolvedValue([]);
     await renderWithDefaults([corpus()], sidecar());
     fireEvent.click(screen.getByText(/^Remove$/));
-    await waitFor(() => expect(confirmSpy).toHaveBeenCalled());
+    // The in-app confirm opens (no window.confirm) — accept it, then the
+    // removal must run.
+    await waitFor(() => expect(useConfirmStore.getState().current).toBeTruthy());
+    expect(docsRemoveCorpusMock).not.toHaveBeenCalled();
+    act(() => useConfirmStore.getState().settle(true));
     await waitFor(() => expect(docsRemoveCorpusMock).toHaveBeenCalledWith("corp-1"));
+  });
+
+  it("does NOT remove a corpus when the confirm is denied", async () => {
+    docsRemoveCorpusMock.mockResolvedValue(undefined);
+    docsListCorporaMock.mockResolvedValue([corpus()]);
+    await renderWithDefaults([corpus()], sidecar());
+    fireEvent.click(screen.getByText(/^Remove$/));
+    await waitFor(() => expect(useConfirmStore.getState().current).toBeTruthy());
+    act(() => useConfirmStore.getState().settle(false));
+    expect(docsRemoveCorpusMock).not.toHaveBeenCalled();
   });
 
   it("persists the reranker toggle to docs.rerank and warms the sidecar", async () => {

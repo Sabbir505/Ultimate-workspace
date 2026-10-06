@@ -162,10 +162,17 @@ pub fn delete_automation(
     db: State<'_, DbState>,
     automation_id: String,
 ) -> Result<(), String> {
-    let conn = db.0.lock();
-    db::delete_automation(&conn, &automation_id)
-        .map_err(|e| e.to_string())
-        .map(|_| automation_triggers::sync_fs_watchers(&app, &db.0))
+    // The guard MUST be dropped before sync_fs_watchers: that call takes the
+    // same DbState mutex itself, and parking_lot is not reentrant — holding
+    // the guard across it deadlocks the whole app's DB access (the delete
+    // commits, then every later query parks forever until restart).
+    {
+        let conn = db.0.lock();
+        db::delete_automation(&conn, &automation_id).map_err(|e| e.to_string())?;
+    }
+    // A deleted row frees its fs-trigger watcher path.
+    automation_triggers::sync_fs_watchers(&app, &db.0);
+    Ok(())
 }
 
 #[tauri::command(async)]
@@ -175,10 +182,15 @@ pub fn set_automation_enabled(
     automation_id: String,
     enabled: bool,
 ) -> Result<(), String> {
-    let conn = db.0.lock();
-    db::set_automation_enabled(&conn, &automation_id, enabled)
-        .map_err(|e| e.to_string())
-        .map(|_| automation_triggers::sync_fs_watchers(&app, &db.0))
+    // Same lock discipline as delete_automation above — the write's guard is
+    // scoped so sync_fs_watchers can take the mutex.
+    {
+        let conn = db.0.lock();
+        db::set_automation_enabled(&conn, &automation_id, enabled).map_err(|e| e.to_string())?;
+    }
+    // Enabling/disabling changes which fs-trigger watchers should exist.
+    automation_triggers::sync_fs_watchers(&app, &db.0);
+    Ok(())
 }
 
 /// Fire one run immediately, on the same launch path the scheduler uses

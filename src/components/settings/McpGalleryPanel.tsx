@@ -44,6 +44,7 @@ import {
   type McpToolView,
 } from "../../lib/ipc";
 import { toastError } from "../../lib/ipc";
+import { confirmDialog } from "../../state/confirm";
 
 /** Icon tile per catalog id; custom servers fall back to the puzzle piece. */
 const SERVER_ICONS: Record<string, LucideIcon> = {
@@ -210,7 +211,14 @@ export function McpGalleryPanel() {
 
     const removeServer = useCallback(
     async (def: McpServerDef) => {
-      if (!window.confirm(`Remove "${def.name}"? Its process will be stopped.`)) return;
+      // In-app confirm — window.confirm is rejected by this webview (see
+      // state/confirm.ts).
+      const ok = await confirmDialog({
+        title: "Remove MCP server",
+        body: `Remove "${def.name}"? Its process will be stopped.`,
+        confirmLabel: "Remove server",
+      });
+      if (!ok) return;
       setBusyId(def.id);
       try {
         await mcpGalleryRemove(def.id);

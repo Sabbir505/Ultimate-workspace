@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import type { VaultTreeNode } from "../../lib/ipc";
 import { useVaultStore } from "../../state/vault";
+import { confirmDialog } from "../../state/confirm";
 
 function NewEntryInput({
   kind,
@@ -252,19 +253,33 @@ export function VaultFileTree({ tree }: { tree: VaultTreeNode[] }) {
 
   const confirmDelete = useCallback(
     (node: VaultTreeNode) => {
+      // In-app confirm — window.confirm is rejected by this webview (see
+      // state/confirm.ts). Deletes are trash-backed, so the copy says so.
       if (node.kind === "folder") {
-        if (window.confirm(`Delete folder "${node.name}" and everything in it?\n(it moves to the vault's .trash)`)) {
-          void deleteFolder(node.path);
-        }
+        void confirmDialog({
+          title: "Delete folder",
+          body: `Delete folder "${node.name}" and everything in it?\n(it moves to the vault's .trash)`,
+          confirmLabel: "Delete folder",
+        }).then((ok) => {
+          if (ok) void deleteFolder(node.path);
+        });
       } else if (node.kind === "note") {
-        if (window.confirm(`Delete "${node.name}"?\n(it moves to the vault's .trash)`)) {
-          void deleteNote(node.path);
-        }
+        void confirmDialog({
+          title: "Delete note",
+          body: `Delete "${node.name}"?\n(it moves to the vault's .trash)`,
+          confirmLabel: "Delete note",
+        }).then((ok) => {
+          if (ok) void deleteNote(node.path);
+        });
       } else {
         // Non-note asset — the backend trash move takes any file.
-        if (window.confirm(`Delete file "${node.name}"?\n(it moves to the vault's .trash)`)) {
-          void deleteNote(node.path);
-        }
+        void confirmDialog({
+          title: "Delete file",
+          body: `Delete file "${node.name}"?\n(it moves to the vault's .trash)`,
+          confirmLabel: "Delete file",
+        }).then((ok) => {
+          if (ok) void deleteNote(node.path);
+        });
       }
     },
     [deleteFolder, deleteNote],

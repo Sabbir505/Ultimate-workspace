@@ -12,6 +12,7 @@ import {
   type CustomTheme,
 } from "../../lib/themes";
 import { toastError, toastSuccess } from "../../lib/ipc";
+import { confirmDialog } from "../../state/confirm";
 import { Plus, Download, Trash2, FileCode, Copy } from "lucide-react";
 import { THEME_PRESETS } from "../../lib/themePresets";
 
@@ -103,8 +104,15 @@ export function ThemeGalleryPanel() {
   };
 
   const removeTheme = (theme: CustomTheme) => {
-    if (!window.confirm(`Delete theme "${theme.name}"?`)) return;
-    deleteCustomTheme(theme.id);
+    // In-app confirm — window.confirm is rejected by this webview (see
+    // state/confirm.ts).
+    void confirmDialog({
+      title: "Delete theme",
+      body: `Delete theme "${theme.name}"?`,
+      confirmLabel: "Delete theme",
+    }).then((ok) => {
+      if (ok) deleteCustomTheme(theme.id);
+    });
   };
 
   const copyTemplate = async () => {

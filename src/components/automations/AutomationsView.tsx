@@ -56,6 +56,7 @@ import { useSubagentStore } from "../../state/subagents";
 import { useProjectsStore } from "../../state/projects";
 import { useSettingsStore } from "../../state/settings";
 import { useUiStore } from "../../state/ui";
+import { confirmDialog } from "../../state/confirm";
 import { useChatStore } from "../../state/chat";
 import { AGENT_OPTIONS } from "../../lib/agents";
 import type { HarnessId } from "../../types";
@@ -321,9 +322,15 @@ export function AutomationsView() {
     });
   }, [setPendingArtifactFormData]);
 
+  // Always refetch on mount. `loaded` means "the store holds a trusted
+  // snapshot" (it survives view unmounts), not "skip the next fetch" — the
+  // list changes behind the view's back all the time (the chat's
+  // create_automation tool, webhook/file trigger bookkeeping, the
+  // relay-automation sidecar, a second window), and gating on `loaded` here
+  // showed a stale list on every re-entry until the app restarted.
   useEffect(() => {
-    if (!loaded) void load();
-  }, [loaded, load]);
+    void load();
+  }, [load]);
 
   useEffect(() => {
     if (loaded && !selectedId && automations.length > 0 && !showNewForm) {
@@ -906,13 +913,20 @@ function AutomationDetail({
   );
 
   const handleDelete = useCallback(() => {
-    if (window.confirm("Delete this automation? Past run history is kept.")) {
+    // In-app confirm — window.confirm is rejected by this webview (see
+    // state/confirm.ts), which silently turned every guard into "yes".
+    void confirmDialog({
+      title: "Delete automation",
+      body: "Delete this automation? Past run history is kept.",
+      confirmLabel: "Delete automation",
+    }).then((ok) => {
+      if (!ok) return;
       // remove hits the backend and can reject (IPC/DB) — toast like the
       // other actions instead of an unhandled rejection.
       void remove(automation.id)
         .then(onDeleted)
         .catch((e) => toastError("Couldn't delete the automation", e));
-    }
+    });
   }, [automation.id, remove, onDeleted]);
 
   return (

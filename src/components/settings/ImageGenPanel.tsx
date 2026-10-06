@@ -55,12 +55,31 @@ const REPO_BY_ROLE: Record<string, string> = {
  *  card title prefix). */
 const FAMILY_LABELS: Record<string, string> = {
   "z-image-turbo": "Z-Image Turbo",
+  "qwen-image-turbo": "Qwen-Image Turbo",
   sd15: "SD 1.5",
   "sdxl-base": "SDXL Base",
   "sdxl-turbo": "SDXL Turbo",
   dreamshaper: "DreamShaper 8",
 };
 const familyLabel = (f: string) => FAMILY_LABELS[f] ?? f;
+
+/** Directory segments of a models-root-relative file path. */
+const dirSegments = (p: string): string[] =>
+  p.replace(/\\/g, "/").split("/").slice(0, -1);
+
+/** Whether two files plausibly belong to ONE manually-downloaded pack: their
+ *  models-root-relative directories share a common folder prefix. A pack
+ *  dropped in one folder (or with diffusion/ and vae/ subfolders, like
+ *  `qwen-image-2.1/turbo/…` + `qwen-image-2.1/vae/…`) matches; files from
+ *  unrelated folders (image-gen vs qwen-image-2.1) share nothing below the
+ *  models root and don't. Exported for the pack-tag tests. */
+export const samePackDir = (a: string, b: string): boolean => {
+  const da = dirSegments(a);
+  const db = dirSegments(b);
+  let n = 0;
+  while (n < da.length && n < db.length && da[n] === db[n]) n++;
+  return n >= 1;
+};
 
 /** One best package per GPU VRAM tier (the model's comfortable floor).
  *  Clicking a tier installs & activates that package — the shared-component
@@ -300,9 +319,24 @@ export function ImageGenPanel() {
     installed: boolean;
     selected: boolean;
     recommended?: boolean;
+    /** Belongs to the same manually-downloaded pack as the current default
+     *  diffusion (shares a folder with it) — the "pick this one next" tag. */
+    packRecommended?: boolean;
     download?: { id: string; downloadUrl: string; filename: string; role: string };
     manual?: DetectedImageFile;
   };
+
+  // The chosen diffusion, when it's a manually-placed SPLIT file: full
+  // checkpoints need no encoder/VAE, so the pack tags would be noise. Only
+  // manual files get pack matching — catalog families activate their own
+  // components through the package card.
+  const chosenPackDiffusion = (() => {
+    if (!status?.defaultModel) return null;
+    const f = status.detected.find(
+      (d) => d.role === "diffusion" && d.path === status.defaultModel,
+    );
+    return f && (f.layout ?? "split") === "split" ? f : null;
+  })();
 
   const buildGroup = (role: ImageModelRole): GroupRow[] => {
     if (!status) return [];
@@ -349,6 +383,11 @@ export function ImageGenPanel() {
           role === "diffusion"
             ? status.defaultModel === f.path
             : status.encoderPath === f.path || status.vaePath === f.path,
+        packRecommended:
+          role !== "diffusion" &&
+          !!chosenPackDiffusion &&
+          f.path !== chosenPackDiffusion.path &&
+          samePackDir(f.path, chosenPackDiffusion.path),
         manual: f,
       }));
     return [...catalogRows, ...manualRows];
@@ -766,6 +805,15 @@ export function ImageGenPanel() {
                             )}
                             {r.recommended && !r.selected && !r.installed && (
                               <span className="fit-badge fits" style={{ marginLeft: 8 }}>
+                                Recommended
+                              </span>
+                            )}
+                            {r.packRecommended && !r.selected && (
+                              <span
+                                className="fit-badge fits"
+                                style={{ marginLeft: 8 }}
+                                title={`Goes with ${chosenPackDiffusion?.name ?? "the default diffusion model"} — same folder in your models directory`}
+                              >
                                 Recommended
                               </span>
                             )}

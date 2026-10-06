@@ -77,34 +77,36 @@ pub const SD_CUDA_DIR: &str = "sd-cpp-cuda";
 pub const SD_VULKAN_DIR: &str = "sd-cpp-vulkan";
 pub const SD_CPU_DIR: &str = "sd-cpp";
 
-/// Pinned stable-diffusion.cpp auto-build (`master-872`). Pinned, not
+/// Pinned stable-diffusion.cpp auto-build (`master-890`). Pinned, not
 /// `latest/download`, so the asset name/contents can never shift under us;
 /// bump deliberately together with the URLs + SHAs below. Also the version
 /// the build updater (`check_build_updates`) compares installs against.
-pub const SD_RELEASE_TAG: &str = "master-872-cc515a0";
+/// Floor: master-890 is the first tag verified to load Qwen-Image-2.1
+/// ("get sd version from file failed" on 872 and earlier).
+pub const SD_RELEASE_TAG: &str = "master-890-74988b2";
 
 #[cfg(windows)]
-const SD_CUDA_ZIP_URL: &str = "https://github.com/leejet/stable-diffusion.cpp/releases/download/master-872-cc515a0/sd-master-cc515a0-bin-win-cuda12-x64.zip";
+const SD_CUDA_ZIP_URL: &str = "https://github.com/leejet/stable-diffusion.cpp/releases/download/master-890-74988b2/sd-master-74988b2-bin-win-cuda12-x64.zip";
 /// SECURITY: SHA-256 of the pinned zip — the download is executed, so TLS
 /// alone is not enough. Verified before extraction; bump with the tag.
 #[cfg(windows)]
-const SD_CUDA_ZIP_SHA256: &str = "7d64c44c1f3907dc9b2fe0932331d77499005d7b16cf654ea76674072b6d64b5";
+const SD_CUDA_ZIP_SHA256: &str = "e9b86c2166aaf3a89f3e13326312d34b79ec1a2b61101d0ccff2805e7ee7b269";
 #[cfg(windows)]
 /// The CUDA 12 runtime DLLs ship as a SEPARATE asset (same shape as
 /// llama.cpp's cudart bundle): cublas64_12, cublasLt64_12, cudart64_12.
-const SD_CUDART_ZIP_URL: &str = "https://github.com/leejet/stable-diffusion.cpp/releases/download/master-872-cc515a0/cudart-sd-bin-win-cu12-x64.zip";
+const SD_CUDART_ZIP_URL: &str = "https://github.com/leejet/stable-diffusion.cpp/releases/download/master-890-74988b2/cudart-sd-bin-win-cu12-x64.zip";
 #[cfg(windows)]
 const SD_CUDART_ZIP_SHA256: &str = "fe20366827d357c00797eebb58244dddab7fd9a348d70090c3871004c320f38d";
 #[cfg(windows)]
-const SD_VULKAN_ZIP_URL: &str = "https://github.com/leejet/stable-diffusion.cpp/releases/download/master-872-cc515a0/sd-master-cc515a0-bin-win-vulkan-x64.zip";
+const SD_VULKAN_ZIP_URL: &str = "https://github.com/leejet/stable-diffusion.cpp/releases/download/master-890-74988b2/sd-master-74988b2-bin-win-vulkan-x64.zip";
 #[cfg(windows)]
 const SD_VULKAN_ZIP_SHA256: &str =
-    "b8c6538f8948dfaa1adc25c463fb1617098d1ff307032e38f29648d5891ead8d";
+    "744c8f817c66ecfd02fbb9dc8b122e1f29f7240db1f6086dfde2669403c5d896";
 #[cfg(windows)]
-const SD_CPU_ZIP_URL: &str = "https://github.com/leejet/stable-diffusion.cpp/releases/download/master-872-cc515a0/sd-master-cc515a0-bin-win-cpu-x64.zip";
+const SD_CPU_ZIP_URL: &str = "https://github.com/leejet/stable-diffusion.cpp/releases/download/master-890-74988b2/sd-master-74988b2-bin-win-cpu-x64.zip";
 #[cfg(windows)]
 const SD_CPU_ZIP_SHA256: &str =
-    "43c9b5d2a2af61d65bf46e57c53b154067bccc82e84823eaee66ec4d20095875";
+    "24fcac70fadc41eb3524837893f1cb7ea54895fe4d807f88ef7afdeee8bd484b";
 
 /// Progress ids for the engine installs (the ServerBuildsCard rows key on
 /// these; `check_build_updates` shares them).
@@ -193,6 +195,16 @@ const FLUX_VAE_URL: &str =
 /// Classic SD 1.5 full checkpoint — official repo, ungated.
 const SD15_URL: &str =
     "https://huggingface.co/stable-diffusion-v1-5/stable-diffusion-v1-5/resolve/main";
+/// Viggle's distilled Qwen-Image-2.1 turbo (the full fine-tuned student, not
+/// the LoRA). The catalog stores it under the SHORT name
+/// `qwen_image_2.1_turbo_<quant>.gguf` — the name the manual setup guide and
+/// existing machines use — so a copy already on disk is detected and reused
+/// instead of re-downloaded; the URL carries the repo's versioned filename.
+const QWEN_TURBO_DIFFUSION_URL: &str =
+    "https://huggingface.co/Viggle/Qwen-Image-2.1-viggle-turbo/resolve/main";
+const QWEN3VL_TE_URL: &str =
+    "https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-GGUF/resolve/main";
+const QWEN21_VAE_URL: &str = "https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main";
 
 /// Curated catalog: three Z-Image Turbo quants (the 2026 efficiency pick —
 /// 6B params, 8 steps, runs from ~4GB VRAM), the SD 1.5 full checkpoint, and
@@ -337,6 +349,76 @@ pub fn catalog() -> Vec<ImageModelInfo> {
                    Z-Image quants). A copy already in your models folder is detected automatically"
                 .into(),
             recommended: true,
+            steps: 0,
+            cfg_scale: 0.0,
+            native_size: 0,
+        },
+        ImageModelInfo {
+            id: "image/diffusion-qwen-image-turbo-q5_k_m".into(),
+            family: "qwen-image-turbo".into(),
+            label: "Qwen-Image Turbo (Q5_K_M)".into(),
+            role: "diffusion".into(),
+            layout: "split".into(),
+            filename: "qwen_image_2.1_turbo_Q5_K_M.gguf".into(),
+            download_url: format!(
+                "{QWEN_TURBO_DIFFUSION_URL}/Qwen-Image-2.1-viggle-turbo-v0.3-6step-Q5_K_M.gguf"
+            ),
+            size_bytes: 5_141_237_920,
+            note: "Viggle's distilled turbo — sharp 1024px text rendering in 4 steps at cfg 1.0 \
+                   (the 6-step fine-tune runs distilled at 4). A copy already in your models \
+                   folder is detected automatically"
+                .into(),
+            recommended: true,
+            steps: 4,
+            cfg_scale: 1.0,
+            native_size: 1024,
+        },
+        ImageModelInfo {
+            id: "image/diffusion-qwen-image-turbo-q4_k_m".into(),
+            family: "qwen-image-turbo".into(),
+            label: "Qwen-Image Turbo (Q4_K_M)".into(),
+            role: "diffusion".into(),
+            layout: "split".into(),
+            filename: "qwen_image_2.1_turbo_Q4_K_M.gguf".into(),
+            download_url: format!(
+                "{QWEN_TURBO_DIFFUSION_URL}/Qwen-Image-2.1-viggle-turbo-v0.3-6step-Q4_K_M.gguf"
+            ),
+            size_bytes: 4_335_931_552,
+            note: "Alternate turbo quant — ~780 MB less DiT weight for a marginally faster run \
+                   at the same 4 steps / cfg 1.0 recipe".into(),
+            recommended: false,
+            steps: 4,
+            cfg_scale: 1.0,
+            native_size: 1024,
+        },
+        ImageModelInfo {
+            id: "image/te-qwen3vl-8b-q4_k_m".into(),
+            family: "qwen-image-turbo".into(),
+            label: "Text encoder — Qwen3-VL-8B (Q4_K_M)".into(),
+            role: "text-encoder".into(),
+            layout: "split".into(),
+            filename: "Qwen3VL-8B-Instruct-Q4_K_M.gguf".into(),
+            download_url: format!("{QWEN3VL_TE_URL}/Qwen3VL-8B-Instruct-Q4_K_M.gguf"),
+            size_bytes: 5_027_784_800,
+            note: "Prompt encoder for the Qwen-Image turbo family (the Z-Image pack uses the \
+                   smaller Qwen3-4B one — each family pairs with its own encoder)".into(),
+            recommended: false,
+            steps: 0,
+            cfg_scale: 0.0,
+            native_size: 0,
+        },
+        ImageModelInfo {
+            id: "image/vae-qwen-image-2-1".into(),
+            family: "qwen-image-turbo".into(),
+            label: "VAE — Qwen-Image 2.1 (bf16)".into(),
+            role: "vae".into(),
+            layout: "split".into(),
+            filename: "qwen_image_2.1_vae_bf16.safetensors".into(),
+            download_url: format!("{QWEN21_VAE_URL}/vae/qwen_image_2.1_vae_bf16.safetensors"),
+            size_bytes: 675_509_688,
+            note: "Decodes the latent into a PNG for Qwen-Image models. A copy already in your \
+                   models folder is detected automatically".into(),
+            recommended: false,
             steps: 0,
             cfg_scale: 0.0,
             native_size: 0,
@@ -512,6 +594,7 @@ fn guess_role(name: &str) -> &'static str {
         || lower.contains("text-encoder")
         || lower.contains("text_encoder")
         || lower.contains("qwen3-4b")
+        || lower.contains("qwen3vl")
         || lower.contains("qwen2.5-vl")
         || lower.contains("mistral")
     {
@@ -999,6 +1082,32 @@ fn resolve_dependency(root: &Path, role: &str, selected: Option<&str>) -> Option
         })
 }
 
+/// Role resolution with a family hint. When the active diffusion belongs to
+/// a catalog family, that family's OWN component (wherever it sits under the
+/// models root) is preferred over the role-generic catalog order: several
+/// families share a role (Z-Image's Qwen3-4B encoder vs Qwen-Image's
+/// Qwen3-VL-8B one) and pairing the wrong encoder silently produces garbage
+/// instead of erroring. An explicit selection still applies when the family
+/// has no copy of its own component on disk.
+fn resolve_dependency_for_family(
+    root: &Path,
+    role: &str,
+    selected: Option<&str>,
+    family: Option<&str>,
+) -> Option<PathBuf> {
+    if let Some(fam) = family {
+        if let Some(m) = catalog()
+            .into_iter()
+            .find(|m| m.family == fam && m.role == role)
+        {
+            if let Some(p) = find_installed(root, &m.filename) {
+                return Some(p);
+            }
+        }
+    }
+    resolve_dependency(root, role, selected)
+}
+
 fn pick_free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0")
         .ok()
@@ -1149,11 +1258,25 @@ pub async fn start_sidecar_core(
          Settings → Local Models → Images first",
     )?;
     // Split models need their encoder + VAE on disk; full checkpoints carry
-    // their own.
+    // their own. The dep resolution is family-aware: the default diffusion's
+    // catalog family decides WHICH encoder/VAE is the right one (Z-Image and
+    // Qwen-Image both use "text-encoder"-role files, but different ones).
+    let diffusion_family = diffusion
+        .path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .and_then(|n| catalog_entry_for_filename(&n))
+        .map(|e| e.family);
     let (text_encoder_path, vae_path) = if diffusion.layout == ImageLayout::Split {
         (
-            Some(resolve_dependency(&root, "text-encoder", encoder_sel.as_deref()).ok_or_else(
-                || {
+            Some(
+                resolve_dependency_for_family(
+                    &root,
+                    "text-encoder",
+                    encoder_sel.as_deref(),
+                    diffusion_family.as_deref(),
+                )
+                .ok_or_else(|| {
                     format!(
                         "The text encoder for a SPLIT-layout model is missing. Either download it \
                          in Settings → Local Models → Images, select one in the Text encoders \
@@ -1166,10 +1289,16 @@ pub async fn start_sidecar_core(
                             .map(|n| n.to_string_lossy().into_owned())
                             .unwrap_or_default()
                     )
-                },
-            )?),
+                })?,
+            ),
             Some(
-                resolve_dependency(&root, "vae", vae_sel.as_deref()).ok_or(
+                resolve_dependency_for_family(
+                    &root,
+                    "vae",
+                    vae_sel.as_deref(),
+                    diffusion_family.as_deref(),
+                )
+                .ok_or(
                     "The VAE is missing — download it in Settings → Local Models → Images, or \
                      select one in the VAE group",
                 )?,
@@ -2071,6 +2200,7 @@ pub async fn image_gen_select(
 fn family_label(family: &str) -> &'static str {
     match family {
         "z-image-turbo" => "Z-Image Turbo — split pipeline",
+        "qwen-image-turbo" => "Qwen-Image Turbo — 4-step distilled",
         "sd15" => "SD 1.5 — full checkpoint",
         "sdxl-base" => "SDXL Base — full checkpoint",
         "sdxl-turbo" => "SDXL Turbo — fast 4-step",
@@ -2195,7 +2325,13 @@ fn plan_family_use(
         } else {
             vae_sel
         };
-        let entry = match resolve_dependency(root, &m.role, sel) {
+        // The family's OWN component first: several families share a role
+        // (Z-Image's Qwen3-4B encoder vs Qwen-Image's Qwen3-VL-8B), and the
+        // generic role rule below would otherwise pin whichever family's
+        // file sorts first — pairing the Qwen-Image turbo with the wrong
+        // encoder. An explicitly selected file still wins when the family
+        // has no copy of its own on disk.
+        let entry = match find_installed(root, &m.filename).or_else(|| resolve_dependency(root, &m.role, sel)) {
             Some(p) => FamilyEntryPlan {
                 id: m.id.clone(),
                 label: m.label.clone(),
@@ -2779,9 +2915,9 @@ mod tests {
     #[test]
     fn catalog_roles_layouts_and_urls_are_well_formed() {
         let cat = catalog();
-        assert_eq!(cat.iter().filter(|m| m.role == "diffusion").count(), 7);
-        assert_eq!(cat.iter().filter(|m| m.role == "text-encoder").count(), 1);
-        assert_eq!(cat.iter().filter(|m| m.role == "vae").count(), 1);
+        assert_eq!(cat.iter().filter(|m| m.role == "diffusion").count(), 9);
+        assert_eq!(cat.iter().filter(|m| m.role == "text-encoder").count(), 2);
+        assert_eq!(cat.iter().filter(|m| m.role == "vae").count(), 2);
         for m in &cat {
             assert!(m.download_url.starts_with("https://huggingface.co/"));
             assert!(m.size_bytes > 0, "{} must declare a size", m.filename);
@@ -2796,9 +2932,10 @@ mod tests {
                 assert_eq!(m.steps, 0, "deps carry no steps");
             }
         }
-        // SECURITY regression: the VAE must come from the UNGATED mirror —
-        // the canonical black-forest-labs repos are gated on HuggingFace and
-        // every anonymous download from them fails.
+        // SECURITY regression: the default VAE (the first one role resolution
+        // picks) must come from the UNGATED mirror — the canonical
+        // black-forest-labs repos are gated on HuggingFace and every
+        // anonymous download from them fails.
         let vae = cat.iter().find(|m| m.role == "vae").unwrap();
         assert!(
             !vae.download_url.contains("black-forest-labs"),
@@ -2848,6 +2985,7 @@ mod tests {
         assert_eq!(guess_role("t5xxl-Q8_0.gguf"), "text-encoder");
         assert_eq!(guess_role("clip_l.safetensors"), "text-encoder");
         assert_eq!(guess_role("Qwen3-4B-Instruct-2507-Q4_K_M.gguf"), "text-encoder");
+        assert_eq!(guess_role("Qwen3VL-8B-Instruct-Q4_K_M.gguf"), "text-encoder");
         assert_eq!(guess_role("ae.safetensors"), "vae");
         assert_eq!(guess_role("sdxl_vae.safetensors"), "vae");
         assert_eq!(guess_role("cyberrealistic_v14.f16.gguf"), "diffusion");
@@ -2913,6 +3051,22 @@ mod tests {
             assert_eq!(entries.len(), 1, "{fam} is one self-contained file");
             assert_eq!(entries[0].layout, "full");
         }
+        let qt = catalog()
+            .into_iter()
+            .filter(|m| m.family == "qwen-image-turbo")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            qt.iter().filter(|m| m.role == "diffusion").count(),
+            2,
+            "turbo Q5_K_M + Q4_K_M quants"
+        );
+        assert_eq!(qt.iter().filter(|m| m.role == "text-encoder").count(), 1);
+        assert_eq!(qt.iter().filter(|m| m.role == "vae").count(), 1);
+        let q5 = qt
+            .iter()
+            .find(|m| m.filename == "qwen_image_2.1_turbo_Q5_K_M.gguf")
+            .unwrap();
+        assert_eq!((q5.steps, q5.cfg_scale, q5.native_size), (4, 1.0, 1024));
     }
 
     /// SMOKE TEST for "image packages work for ALL users": every catalog
@@ -3036,6 +3190,93 @@ mod tests {
     fn plan_family_use_unknown_family_is_none() {
         let dir = tempfile::tempdir().expect("tempdir");
         assert!(plan_family_use(dir.path(), "pony", None, None, None, None).is_none());
+    }
+
+    #[test]
+    fn qwen_turbo_family_plans_from_a_manual_pack_layout() {
+        // The manual full-pack layout this family exists for: diffusion in
+        // qwen-image-2.1/turbo/, encoder at the pack root, VAE in vae/ — and
+        // the Z-Image encoder ALSO present with an explicit selection. The
+        // plan must pair the family with ITS OWN encoder regardless.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("qwen-image-2.1/turbo")).unwrap();
+        std::fs::create_dir_all(root.join("qwen-image-2.1/vae")).unwrap();
+        std::fs::create_dir_all(root.join("image-gen")).unwrap();
+        std::fs::write(
+            root.join("qwen-image-2.1/turbo/qwen_image_2.1_turbo_Q5_K_M.gguf"),
+            b"x",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("qwen-image-2.1/Qwen3VL-8B-Instruct-Q4_K_M.gguf"),
+            b"x",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("qwen-image-2.1/vae/qwen_image_2.1_vae_bf16.safetensors"),
+            b"x",
+        )
+        .unwrap();
+        std::fs::write(root.join("image-gen/Qwen3-4B-Instruct-2507-Q4_K_M.gguf"), b"x").unwrap();
+
+        let plan = plan_family_use(
+            root,
+            "qwen-image-turbo",
+            None,
+            Some("image-gen/Qwen3-4B-Instruct-2507-Q4_K_M.gguf"),
+            None,
+            None,
+        )
+        .expect("qwen-image-turbo plans");
+        assert_eq!(plan.diffusion_id, "image/diffusion-qwen-image-turbo-q5_k_m");
+        assert_eq!(plan.variants[0].action, "use", "diffusion reused from disk");
+        let te = plan
+            .deps
+            .iter()
+            .find(|d| d.role == "text-encoder")
+            .expect("te dep");
+        assert_eq!(te.action, "use");
+        assert!(
+            te.path.as_deref().unwrap_or("").contains("Qwen3VL-8B"),
+            "the family's own encoder wins over the selected z-image one: {:?}",
+            te.path
+        );
+        let vae = plan
+            .deps
+            .iter()
+            .find(|d| d.role == "vae")
+            .expect("vae dep");
+        assert_eq!(vae.action, "use");
+        assert!(vae.path.as_deref().unwrap_or("").contains("qwen_image_2.1_vae"));
+    }
+
+    #[test]
+    fn generation_dep_resolution_is_family_aware() {
+        // resolve_dependency_for_family: each family pairs with its own
+        // encoder even when BOTH files exist; the no-hint path keeps the
+        // catalog order (z-image's Qwen3-4B first).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("qwen-image-2.1")).unwrap();
+        std::fs::create_dir_all(root.join("image-gen")).unwrap();
+        std::fs::write(
+            root.join("qwen-image-2.1/Qwen3VL-8B-Instruct-Q4_K_M.gguf"),
+            b"x",
+        )
+        .unwrap();
+        std::fs::write(root.join("image-gen/Qwen3-4B-Instruct-2507-Q4_K_M.gguf"), b"x").unwrap();
+
+        let z = resolve_dependency_for_family(root, "text-encoder", None, Some("z-image-turbo"))
+            .expect("z-image te");
+        assert!(z.to_string_lossy().contains("Qwen3-4B"), "got {z:?}");
+        let q =
+            resolve_dependency_for_family(root, "text-encoder", None, Some("qwen-image-turbo"))
+                .expect("qwen te");
+        assert!(q.to_string_lossy().contains("Qwen3VL-8B"), "got {q:?}");
+        let generic =
+            resolve_dependency_for_family(root, "text-encoder", None, None).expect("generic te");
+        assert!(generic.to_string_lossy().contains("Qwen3-4B"), "got {generic:?}");
     }
 
 

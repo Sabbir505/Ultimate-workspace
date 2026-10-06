@@ -10,6 +10,7 @@ import type {
   DocCorpus,
   DocsEmbeddingStatus,
   DocsIndexProgressPayload,
+  EmbeddingModelEntry,
 } from "../lib/ipc";
 
 const docsEmbeddingStatusMock = vi.fn();
@@ -19,6 +20,8 @@ const docsRemoveCorpusMock = vi.fn();
 const docsSetCorpusEnabledMock = vi.fn();
 const docsStartIndexMock = vi.fn();
 const docsCancelIndexMock = vi.fn();
+const docsListEmbeddingModelsMock = vi.fn();
+const docsSetEmbeddingModelMock = vi.fn();
 const onDocsIndexProgressMock = vi.fn();
 const onDocsCorpusUpdatedMock = vi.fn();
 const openMock = vi.fn();
@@ -42,6 +45,10 @@ vi.mock("../lib/ipc", () => ({
   docsSetCorpusEnabled: (...a: unknown[]) => docsSetCorpusEnabledMock(...a),
   docsStartIndex: (...a: unknown[]) => docsStartIndexMock(...a),
   docsCancelIndex: (...a: unknown[]) => docsCancelIndexMock(...a),
+  // Embedding-model picker (docs_list_embedding_models + the persisted choice).
+  docsListEmbeddingModels: (...a: unknown[]) => docsListEmbeddingModelsMock(...a),
+  docsSetEmbeddingModel: (...a: unknown[]) => docsSetEmbeddingModelMock(...a),
+  DOCS_EMBEDDING_MODEL_SETTING: "docs.embedding_model",
   onDocsIndexProgress: (...a: unknown[]) => onDocsIndexProgressMock(...a),
   onDocsCorpusUpdated: (...a: unknown[]) => onDocsCorpusUpdatedMock(...a),
   // Reranker row (docs.rerank toggle + sidecar warm-up).
@@ -49,6 +56,7 @@ vi.mock("../lib/ipc", () => ({
   setSetting: (...a: unknown[]) => setSettingMock(...a),
   docsStartReranker: (...a: unknown[]) => docsStartRerankerMock(...a),
   fetchModelCatalog: vi.fn().mockResolvedValue(null),
+  fetchModelFileSizes: vi.fn().mockResolvedValue(null),
   getGpuVram: vi.fn().mockResolvedValue(null),
   onModelDownloadProgress: vi.fn().mockResolvedValue(() => {}),
   startModelDownload: vi.fn().mockResolvedValue(undefined),
@@ -89,6 +97,17 @@ const sidecar = (over: Partial<DocsEmbeddingStatus> = {}): DocsEmbeddingStatus =
   ...over,
 });
 
+const embedModel = (over: Partial<EmbeddingModelEntry> = {}): EmbeddingModelEntry => ({
+  path: "C:/models/nomic-embed-text-v1.5.Q8_0.gguf",
+  filename: "nomic-embed-text-v1.5.Q8_0.gguf",
+  family: "nomic-embed-text-v1.5",
+  quantization: "Q8_0",
+  sizeBytes: 84_000_000,
+  architecture: "nomic-bert",
+  modifiedMs: 1_700_000_000,
+  ...over,
+});
+
 async function renderWithDefaults(list: DocCorpus[] | null, status: DocsEmbeddingStatus | null) {
   docsEmbeddingStatusMock.mockResolvedValue(status);
   docsListCorporaMock.mockResolvedValue(list);
@@ -104,6 +123,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   getSettingMock.mockResolvedValue(null);
   setSettingMock.mockResolvedValue(undefined);
+  docsListEmbeddingModelsMock.mockResolvedValue([]);
+  docsSetEmbeddingModelMock.mockResolvedValue(null);
   docsStartRerankerMock.mockResolvedValue(false);
   onDocsIndexProgressMock.mockImplementation(() => Promise.resolve(vi.fn()));
   onDocsCorpusUpdatedMock.mockImplementation(() => Promise.resolve(vi.fn()));
@@ -221,6 +242,69 @@ describe("KnowledgePanel", () => {
     fireEvent.click(screen.getByRole("checkbox", { name: /rerank search results/i }));
     await waitFor(() => expect(setSettingMock).toHaveBeenCalledWith("docs.rerank", "true"));
     await waitFor(() => expect(docsStartRerankerMock).toHaveBeenCalled());
+  });
+
+  it("lists discovered embedding models per family+quant and persists a choice", async () => {
+    docsListEmbeddingModelsMock.mockResolvedValue([
+      embedModel(),
+      embedModel({
+        path: "C:/models/embeddinggemma-2-F16.gguf",
+        filename: "embeddinggemma-2-F16.gguf",
+        family: "embeddinggemma-2",
+        quantization: "F16",
+        sizeBytes: 558_000_000,
+        architecture: "gemma-embedding2",
+      }),
+    ]);
+    docsSetEmbeddingModelMock.mockResolvedValue("C:/models/embeddinggemma-2-F16.gguf");
+    await renderWithDefaults([], sidecar());
+
+    const picker = screen.getByRole("combobox", { name: /embedding model/i });
+    // Auto is the default choice; each discovered file is a grouped option.
+    expect((picker as HTMLSelectElement).value).toBe("");
+    // The active model (sidecar.modelPath) is marked on its option.
+    expect(screen.getByRole("option", { name: /Q8_0 · 80 MB — active/ })).toBeTruthy();
+    expect(screen.getByRole("option", { name: /F16 · 532 MB/ })).toBeTruthy();
+
+    fireEvent.change(picker, { target: { value: "C:/models/embeddinggemma-2-F16.gguf" } });
+    await waitFor(() =>
+      expect(docsSetEmbeddingModelMock).toHaveBeenCalledWith("C:/models/embeddinggemma-2-F16.gguf"),
+    );
+  });
+
+  it("falls back to auto (null) when switching from a manual choice to Auto", async () => {
+    // Start on a manual pick, then switch back to Auto — a no-op change
+    // (Auto → Auto) never calls the backend, so seed the manual one first.
+    getSettingMock.mockImplementation((key: string) =>
+      key === "docs.embedding_model"
+        ? Promise.resolve("C:/models/embeddinggemma-2-F16.gguf")
+        : Promise.resolve(null),
+    );
+    docsListEmbeddingModelsMock.mockResolvedValue([embedModel()]);
+    await renderWithDefaults([], sidecar());
+    const picker = screen.getByRole("combobox", { name: /embedding model/i });
+    await waitFor(() =>
+      expect((picker as HTMLSelectElement).value).toBe("C:/models/embeddinggemma-2-F16.gguf"),
+    );
+    fireEvent.change(picker, { target: { value: "" } });
+    await waitFor(() => expect(docsSetEmbeddingModelMock).toHaveBeenCalledWith(null));
+  });
+
+  it("warns when the chosen embedding model file is gone", async () => {
+    getSettingMock.mockImplementation((key: string) =>
+      key === "docs.embedding_model"
+        ? Promise.resolve("C:/models/deleted-model.Q8_0.gguf")
+        : Promise.resolve(null),
+    );
+    docsListEmbeddingModelsMock.mockResolvedValue([embedModel()]);
+    await renderWithDefaults([], sidecar());
+    expect(screen.getByText(/chosen model file is gone/i)).toBeTruthy();
+  });
+
+  it("offers embeddinggemma-2 among the downloadable suggestions", async () => {
+    await renderWithDefaults([], sidecar({ modelPath: null }));
+    expect(screen.getByText(/embeddinggemma-2/i)).toBeTruthy();
+    expect(screen.getByText(/nomic-embed-text-v1\.5/i)).toBeTruthy();
   });
 });
 

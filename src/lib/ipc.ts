@@ -21,6 +21,7 @@ export type {
   DocCorpus,
   DocsEmbeddingStatus,
   DocsIndexProgressPayload,
+  EmbeddingModelEntry,
   RerankerStatus,
 } from "../types";
 

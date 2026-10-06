@@ -32,11 +32,16 @@ pub struct GgufMeta {
 /// Architectures that only make sense as embedding models (served with
 /// llama-server's `--embedding` flag). Used both to keep embedding GGUFs out
 /// of the chat-model picker and to find the corpus embedder on disk.
+///
+/// Beyond the classic bert/roberta encoder families, llama.cpp's newer
+/// decoder-based embedders stamp `*-embedding*` architectures
+/// (`gemma-embedding2` for EmbeddingGemma 2, `embeddinggemma`, …) — the
+/// substring match covers those without whitelisting every conversion.
 pub fn is_embedding_arch(arch: &str) -> bool {
     matches!(
         arch,
         "bert" | "nomic-bert" | "jina-bert-v2" | "jina-bert-v3" | "roberta" | "xlm-roberta"
-    )
+    ) || arch.contains("embedding")
 }
 
 /// Whether a GGUF's architecture is a CHAT model llama-server can run. Used to
@@ -3062,7 +3067,14 @@ mod tests {
 
     #[test]
     fn embedding_arches_are_recognized() {
-        for arch in ["bert", "nomic-bert", "jina-bert-v2", "jina-bert-v3"] {
+        for arch in [
+            "bert",
+            "nomic-bert",
+            "jina-bert-v2",
+            "jina-bert-v3",
+            "gemma-embedding2",
+            "embeddinggemma",
+        ] {
             assert!(is_embedding_arch(arch), "{arch}");
         }
         for arch in ["llama", "qwen2", "gemma3", "clip", "mmproj"] {

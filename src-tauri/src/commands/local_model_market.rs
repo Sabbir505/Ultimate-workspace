@@ -332,6 +332,20 @@ struct HfModel {
     /// GGUF filename. Size is estimated from quant + params.
     #[serde(default)]
     siblings: Vec<HfSibling>,
+    /// HF's server-side GGUF header parse (`gguf.total` = parameter count
+    /// across the repo's GGUF weights). Present on most GGUF repos and FAR
+    /// more reliable than the repo-id param guess — embedding repos carry no
+    /// "7B"-style token, and their generic fallback default undersizes
+    /// non-nomic embedders (embeddinggemma-2 ≈ 271M params estimated as
+    /// 0.14B → every quant shown at ~half its real size).
+    #[serde(default)]
+    gguf: Option<HfGgufInfo>,
+}
+
+#[derive(Deserialize)]
+struct HfGgufInfo {
+    #[serde(default)]
+    total: Option<u64>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -427,11 +441,18 @@ fn normalize_hf_model(m: HfModel) -> Vec<CatalogEntry> {
     let repo_vision = repo_tags_vision || repo_id_vision;
 
     let mut entries: Vec<CatalogEntry> = Vec::new();
+    // HF's parsed GGUF header param count, when the repo reports one.
+    let gguf_params: Option<u64> = m.gguf.as_ref().and_then(|g| g.total).filter(|&t| t > 0);
     for f in gguf_files {
         let lower = f.rfilename.to_ascii_lowercase();
         let quant = extract_quantization(&lower);
-        let size = if f.size.unwrap_or(0) > 0 { f.size.unwrap_or(0) }
-            else { estimate_gguf_size(params.as_deref(), quant.as_deref()) };
+        let size = if f.size.unwrap_or(0) > 0 {
+            f.size.unwrap_or(0)
+        } else if let Some(p) = gguf_params {
+            estimate_gguf_size_from_params(p, quant.as_deref())
+        } else {
+            estimate_gguf_size(params.as_deref(), quant.as_deref())
+        };
         // Per-file vision: an `mmproj` (multimodal projector) GGUF is by
         // definition a vision projector file (LLava-style stacks ship a
         // separate `*-mmproj-*.gguf` alongside the base model). We OR it
@@ -499,6 +520,12 @@ fn estimate_gguf_size(params_label: Option<&str>, quant: Option<&str>) -> u64 {
     let billions: f64 = params_label
         .and_then(|p| p.trim_end_matches('B').parse::<f64>().ok())
         .unwrap_or(7.0);
+    estimate_gguf_size_from_params((billions * 1_000_000_000.0) as u64, quant)
+}
+
+/// Estimate from an explicit parameter count (HF's `gguf.total` when the
+/// repo reports it, else the label/fallback path above).
+fn estimate_gguf_size_from_params(params: u64, quant: Option<&str>) -> u64 {
     let bpw: f64 = match quant.unwrap_or("Q4_K_M") {
         "Q2_K" | "IQ2_XXS" | "IQ2_XS" => 2.5,
         "Q3_K_S" | "Q3_K_M" | "Q3_K_L" | "IQ3_XXS" | "IQ3_XS" => 3.5,
@@ -509,24 +536,31 @@ fn estimate_gguf_size(params_label: Option<&str>, quant: Option<&str>) -> u64 {
         "F16" | "BF16" => 16.0,
         _ => 4.5,
     };
-    // Size ≈ params_billion * 1e9 * bpw / 8, plus ~5% overhead
-    ((billions * 1_000_000_000.0 * bpw / 8.0) * 1.05) as u64
+    // Size ≈ params * bpw / 8, plus ~5% overhead
+    ((params as f64 * bpw / 8.0) * 1.05) as u64
 }
 
 /// Pull a quantization label from a filename. Matches the common cases:
-/// "Q4_K_M", "Q4_0", "Q5_1", "Q8_0", "F16", "BF16", "IQ4_XS".
+/// "Q4_K_M", "Q4_0", "Q5_1", "Q8_0", "F16", "BF16", "IQ4_XS", plus the
+/// Unsloth dynamic quants ("UD-Q4_K_XL" → "UD-Q4_K_XL") whose `_XL` suffix
+/// the base needles miss.
 fn extract_quantization(lower_filename: &str) -> Option<String> {
     // Order matters: longer / more specific patterns first, because
-    // "bf16" contains "f16", and "q4_k_m" contains "q4_0" / "q4_k_s".
-    // If we tested "f16" before "bf16" we'd mislabel bf16 files as f16.
+    // "bf16" contains "f16", "q4_k_m" contains "q4_0" / "q4_k_s", and the
+    // Unsloth "_xl" quants contain their base needle ("q6_k" ⊂ "q6_k_xl").
     for needle in [
-        "q3_k_s", "q3_k_m", "q3_k_l", "q4_k_s", "q4_k_m", "q5_k_s", "q5_k_m", "q2_k", "q4_0",
-        "q4_1", "q5_0", "q5_1", "q6_k", "q8_0", "iq2_xxs", "iq3_xxs", "iq2_xs", "iq3_xs", "iq1_s",
-        "iq2_s", "iq3_s", "iq2_m", "iq3_m", "iq4_nl", "iq4_xs", "iq4_s", "iq4_m", "bf16", "f16",
-        "f32",
+        "q4_k_xl", "q5_k_xl", "q6_k_xl", "q3_k_s", "q3_k_m", "q3_k_l", "q4_k_s", "q4_k_m",
+        "q5_k_s", "q5_k_m", "q2_k", "q4_0", "q4_1", "q5_0", "q5_1", "q6_k", "q8_0", "iq2_xxs",
+        "iq3_xxs", "iq2_xs", "iq3_xs", "iq1_s", "iq2_s", "iq3_s", "iq2_m", "iq3_m", "iq4_nl",
+        "iq4_xs", "iq4_s", "iq4_m", "bf16", "f16", "f32",
     ] {
         if lower_filename.contains(needle) {
-            return Some(needle.to_ascii_uppercase());
+            let label = needle.to_ascii_uppercase();
+            // Unsloth dynamic-quant repos name files "…-UD-Q4_K_XL.gguf" —
+            // keep the UD marker so the label matches what the repo (and
+            // the model card) calls the quant.
+            let has_ud = lower_filename.starts_with("ud-") || lower_filename.contains("-ud-");
+            return Some(if has_ud { format!("UD-{label}") } else { label });
         }
     }
     None
@@ -2256,6 +2290,13 @@ mod tests {
             // extract_quantization's needle array.
             ("deepseek-v2-lite.bf16.gguf", "BF16"),
             ("model-name.bf16.gguf", "BF16"),
+            // Unsloth dynamic quants: the _XL needles must win over their
+            // base substrings ("q6_k" ⊂ "q6_k_xl"), and the UD- prefix is
+            // part of the label (embeddinggemma-2 ships exactly these).
+            ("embeddinggemma-2-UD-Q4_K_XL.gguf", "UD-Q4_K_XL"),
+            ("embeddinggemma-2-UD-Q5_K_XL.gguf", "UD-Q5_K_XL"),
+            ("embeddinggemma-2-UD-Q6_K_XL.gguf", "UD-Q6_K_XL"),
+            ("mistral-7b-ud-q4_k_m.gguf", "UD-Q4_K_M"),
         ] {
             assert_eq!(
                 extract_quantization(&filename.to_ascii_lowercase()),
@@ -2270,6 +2311,24 @@ mod tests {
         // No quant label present — should not guess.
         assert_eq!(extract_quantization("model.gguf"), None);
         assert_eq!(extract_quantization("llama-8b.bogus.gguf"), None);
+    }
+
+    #[test]
+    fn estimate_uses_hf_gguf_param_count() {
+        // embeddinggemma-2: 271,002,648 params per HF's gguf header parse.
+        // The old repo-id fallback guessed 0.14B and showed Q8_0 at ~149 MB
+        // — half the real ~310 MB file.
+        let p: u64 = 271_002_648;
+        let q8 = estimate_gguf_size_from_params(p, Some("Q8_0"));
+        assert!(
+            (q8 as f64 - 309_855_520.0).abs() / 309_855_520.0 < 0.05,
+            "Q8_0 estimate {q8} within 5% of the real 309,855,520"
+        );
+        let f16 = estimate_gguf_size_from_params(p, Some("F16"));
+        assert!(
+            (f16 as f64 - 557_950_240.0).abs() / 557_950_240.0 < 0.05,
+            "F16 estimate {f16} within 5% of the real 557,950,240"
+        );
     }
 
     // ---- extract_params_label ----
@@ -2349,6 +2408,7 @@ mod tests {
                     sha256: None,
                 },
             ],
+            gguf: None,
         };
         let entries = normalize_hf_model(m);
         assert_eq!(entries.len(), 2, "README.md should be skipped");
@@ -2392,10 +2452,56 @@ mod tests {
                 size: Some(100_000_000),
                 sha256: None,
             }],
+            gguf: None,
         };
         let entries = normalize_hf_model(m);
         assert_eq!(entries.len(), 1);
         assert!(entries[0].vision, "mmproj in filename → vision");
+    }
+
+    #[test]
+    fn normalizer_estimates_from_gguf_param_count_when_size_missing() {
+        // HF's models API often carries no per-file sizes (xet-backed repos
+        // like unsloth/embeddinggemma-2-GGUF); the gguf.total param count
+        // then drives the estimate instead of the repo-id guess.
+        let m = HfModel {
+            id: "unsloth/embeddinggemma-2-GGUF".to_string(),
+            author: Some("unsloth".to_string()),
+            downloads: 0,
+            likes: 18,
+            last_modified: None,
+            created_at: None,
+            description: None,
+            tags: vec!["gguf".to_string()],
+            pipeline_tag: None,
+            library_name: None,
+            siblings: vec![
+                HfSibling {
+                    rfilename: "embeddinggemma-2-Q8_0.gguf".to_string(),
+                    size: None,
+                    sha256: None,
+                },
+                HfSibling {
+                    rfilename: "embeddinggemma-2-UD-Q4_K_XL.gguf".to_string(),
+                    size: None,
+                    sha256: None,
+                },
+            ],
+            gguf: Some(HfGgufInfo {
+                total: Some(271_002_648),
+            }),
+        };
+        let entries = normalize_hf_model(m);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].quantization.as_deref(), Some("Q8_0"));
+        // 271M params × 8.5bpw ≈ 302 MB — within 5% of the real 310 MB file
+        // (the old 0.14B embed default produced 149 MB).
+        let q8 = entries[0].size_bytes;
+        assert!(
+            (q8 as f64 - 309_855_520.0).abs() / 309_855_520.0 < 0.05,
+            "Q8_0 estimate {q8} within 5% of the real file"
+        );
+        assert_eq!(entries[1].quantization.as_deref(), Some("UD-Q4_K_XL"));
     }
 
     // ---- urlencoding_lite ----

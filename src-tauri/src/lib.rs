@@ -1011,6 +1011,8 @@ pub fn run() {
             commands::local_model_market::delete_downloaded_model,
             commands::local_model_market::download_mmproj,
             docs_index::docs_embedding_status,
+            docs_index::docs_list_embedding_models,
+            docs_index::docs_set_embedding_model,
             docs_index::docs_start_reranker,
             docs_index::docs_add_corpus,
             docs_index::docs_remove_corpus,

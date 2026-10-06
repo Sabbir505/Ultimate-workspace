@@ -1,10 +1,12 @@
 // Settings → Knowledge: list/manage the user's local document corpora (the
 // "Knowledge" RAG layer). Mirrors LocalModelsPanel's folder-picker + chip-row
 // pattern but persists corpora through the DB-backed `docs_*` IPC instead of
-// the `localModels.folders` setting. The panel shows: sidecar status (model
-// installed? running?), the corpus list (each with enabled toggle, counts,
-// last-indexed, and Index/Cancel/Delete actions), and the live indexing
-// progress emitted by the `docs:index:progress` listener.
+// the `localModels.folders` setting. The panel shows: the embedding-model
+// picker (every discovered embedding GGUF grouped by family × quantization,
+// backed by the `docs.embedding_model` setting with auto-discovery fallback),
+// downloadable HF suggestions, the corpus list (each with enabled toggle,
+// counts, last-indexed, and Index/Cancel/Delete actions), and the live
+// indexing progress emitted by the `docs:index:progress` listener.
 //
 // Backend contract: src-tauri/src/docs_index.rs (commands) + src/db/docs.rs
 // (storage) + src/chat/docs.rs (chunker/walker). The `search_docs` model tool
@@ -23,6 +25,9 @@ import {
   docsStartIndex,
   docsCancelIndex,
   docsEmbeddingStatus,
+  docsListEmbeddingModels,
+  docsSetEmbeddingModel,
+  DOCS_EMBEDDING_MODEL_SETTING,
   docsStartReranker,
   getSetting,
   setSetting,
@@ -41,20 +46,27 @@ import {
   type DocsEmbeddingStatus,
   type DocsIndexProgressPayload,
   type DownloadProgress,
+  type EmbeddingModelEntry,
   type PerDownloadState,
 } from "../../lib/ipc";
 import { formatBytes, formatDateTime, shortName } from "../../lib/format";
 import { Modal } from "../common/Modal";
 
 /** Recommended Hugging Face embedding GGUFs — the small set the backend's
- *  `find_embedding_gguf` already prefers (nomic-embed) plus a couple of
- *  well-known alternatives. Clicking a suggestion jumps to Model Market with
- *  the repo id pre-filled so the user can install it in one place. */
+ *  `find_embedding_gguf` already prefers (nomic-embed) plus well-known
+ *  alternatives. Clicking a suggestion opens the detail sheet with real
+ *  quant variants; downloading uses the shared Model Market pipeline, and the
+ *  new file lands in the models dir where the picker's scan discovers it. */
 const EMBEDDING_SUGGESTIONS: { repo: string; label: string; note: string }[] = [
   {
     repo: "nomic-ai/nomic-embed-text-v1.5-GGUF",
     label: "nomic-embed-text-v1.5",
     note: "Recommended · best quality/size",
+  },
+  {
+    repo: "unsloth/embeddinggemma-2-GGUF",
+    label: "embeddinggemma-2",
+    note: "Google EmbeddingGemma 2 · 100+ languages",
   },
   {
     repo: "nomic-ai/nomic-embed-text-v1-GGUF",
@@ -105,6 +117,14 @@ export function KnowledgePanel() {
   // without it a rejected docsListCorpora renders as "No corpora yet".
   const [loadError, setLoadError] = useState(false);
 
+  // --- Embedding model picker (model + quantization) ---
+  // `embedModels` is a fresh scan of the model dirs on every refresh, so a
+  // newly downloaded GGUF shows up without leaving settings. `embedChoice`
+  // mirrors the `docs.embedding_model` setting ("" = auto-discovery).
+  const [embedModels, setEmbedModels] = useState<EmbeddingModelEntry[] | null>(null);
+  const [embedChoice, setEmbedChoice] = useState("");
+  const [switchingModel, setSwitchingModel] = useState(false);
+
   // --- Embedding suggestions → real catalog entries → detail modal + install.
   // Per-suggestion catalog: real HF entries (filename/size/sha/downloadUrl)
   // fetched by exact repo id so Download uses the same pipeline as the Model
@@ -128,6 +148,16 @@ export function KnowledgePanel() {
       .then((s) => setSidecar(s))
       .catch(() => {
         /* status is supplementary — the corpora list stays authoritative */
+      });
+    // Fresh discovery scan: covers the picker AND re-runs after every
+    // completed download, so new GGUFs are announced without a rescan press.
+    void docsListEmbeddingModels()
+      .then((m) => setEmbedModels(m ?? []))
+      .catch(() => setEmbedModels(null));
+    void getSetting(DOCS_EMBEDDING_MODEL_SETTING)
+      .then((v) => setEmbedChoice(v?.trim() ?? ""))
+      .catch(() => {
+        /* default stays auto */
       });
     void getSetting(RERANK_SETTING_KEY)
       .then((v) => setRerankEnabled(v === "true"))
@@ -153,7 +183,15 @@ export function KnowledgePanel() {
       void fetchModelCatalog({ query: s.repo, sort: "downloads", limit: 12 })
         .then(async (res) => {
           if (stale) return;
-          let entries = (res?.entries ?? []).filter((e) => e.repoId === s.repo && e.sizeBytes > 0);
+          let entries = (res?.entries ?? []).filter(
+            (e) =>
+              e.repoId === s.repo &&
+              e.sizeBytes > 0 &&
+              // mmproj-* files are vision/audio projectors, not corpus
+              // embedders — listing them produced duplicate quant rows
+              // (embeddinggemma-2 ships base + mmproj Q8_0/F16/BF16).
+              !e.filename.toLowerCase().startsWith("mmproj"),
+          );
           // The catalog listing carries ESTIMATED sizes (HF's models API has no
           // per-file sizes); correct them from the repo tree endpoint.
           try {
@@ -366,12 +404,55 @@ export function KnowledgePanel() {
   const rerankerPath = reranker?.modelPath ?? null;
   const rerankerRunning = !!reranker?.running;
 
-  // A suggestion counts as installed when the discovered embedding model's
-  // path contains its repo-name fragment ("nomic-embed-text-v1.5", …).
+  // Picker model: group the discovered GGUFs by family (backend pre-sorts by
+  // family, then size desc, so consecutive entries share a group).
+  const embedGroups = useMemo(() => {
+    const groups: { family: string; files: EmbeddingModelEntry[] }[] = [];
+    for (const m of embedModels ?? []) {
+      const last = groups[groups.length - 1];
+      if (last && last.family === m.family) last.files.push(m);
+      else groups.push({ family: m.family, files: [m] });
+    }
+    return groups;
+  }, [embedModels]);
+
+  // A suggestion counts as installed when ANY discovered embedding GGUF on
+  // disk comes from its repo ("nomic-embed-text-v1.5.Q8_0.gguf" ⊇
+  // "nomic-embed-text-v1.5") — not just when it happens to be the active
+  // model, so installing a second quant doesn't flip badges on the first.
   const isSuggestionInstalled = (repo: string): boolean => {
-    if (!sidecar?.modelPath) return false;
     const fragment = repo.split("/").pop()?.replace(/-gguf$/i, "").toLowerCase() ?? "";
-    return fragment.length > 0 && sidecar.modelPath.toLowerCase().includes(fragment);
+    if (fragment.length === 0) return false;
+    return (embedModels ?? []).some((m) => m.filename.toLowerCase().includes(fragment));
+  };
+
+  // The manual choice vanished from disk (deleted while selected): the
+  // backend silently falls back to auto-discovery, so say so here.
+  const choiceMissing =
+    !!embedChoice &&
+    embedModels !== null &&
+    !embedModels.some((m) => m.path === embedChoice);
+
+  const handleSelectEmbeddingModel = async (path: string) => {
+    setError(null);
+    const prev = embedChoice;
+    setEmbedChoice(path); // optimistic; reverted if the switch fails
+    if (path === prev) return;
+    setSwitchingModel(true);
+    try {
+      await docsSetEmbeddingModel(path || null);
+      if (sidecar?.running) {
+        toastSuccess(
+          path ? "Embedding model switched — sidecar restarted" : "Switched to auto — sidecar restarted",
+        );
+      }
+      refresh();
+    } catch (err) {
+      setEmbedChoice(prev);
+      toastError("Couldn't switch embedding model", err);
+    } finally {
+      setSwitchingModel(false);
+    }
   };
 
   const handleDownloadEmbedding = (entry: CatalogEntry) => {
@@ -406,71 +487,138 @@ export function KnowledgePanel() {
         embedding sidecar is running and at least one corpus is indexed.
       </p>
 
-      <div className="settings-note">
-        Embedding model:&nbsp;
-        {hasInstalledModel ? (
-          <>
-            <code className="mono" style={{ fontSize: 11 }}>
-              {shortName(sidecar?.modelPath ?? "")}
-            </code>{" "}
-            —{" "}
-            {sidecarReady ? (
-              <span style={{ color: "var(--success, #3fb950)" }}>running</span>
-            ) : (
-              <span style={{ color: "var(--warn, #d29922)" }}>
-                will start on next index
-              </span>
+      {/* Embedding model picker — every discovered embedding GGUF grouped by
+          family with its quantization. Choosing one persists it and restarts
+          the sidecar when it was running; downloads land in the same scan so
+          they appear here on the next refresh. */}
+      <div className="settings-note knowledge-embed-picker">
+        <div className="knowledge-embed-head">
+          <span style={{ fontWeight: 600, fontSize: 12 }}>Embedding model</span>
+          <button
+            type="button"
+            className="settings-inline-btn"
+            title="Rescan the model folders for new embedding GGUFs"
+            onClick={() => {
+              setEmbedModels(null);
+              refresh();
+            }}
+          >
+            Rescan
+          </button>
+        </div>
+        <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 2 }}>
+          Which local GGUF embeds your corpora. New downloads in your models
+          folders are discovered automatically.
+        </div>
+        <select
+          className="knowledge-embed-select"
+          aria-label="Embedding model"
+          value={embedChoice}
+          disabled={switchingModel}
+          onChange={(e) => void handleSelectEmbeddingModel(e.target.value)}
+        >
+          <option value="">Auto — best installed model (prefers nomic-embed)</option>
+          {/* The stored choice vanished from the scan (deleted while
+              selected): keep it visible so the select reflects reality —
+              the "file is gone" note below explains the fallback. */}
+          {embedChoice &&
+            embedModels !== null &&
+            !embedModels.some((m) => m.path === embedChoice) && (
+              <option value={embedChoice}>{shortName(embedChoice)} (missing)</option>
             )}
-          </>
-        ) : (
-          <span style={{ color: "var(--warn, #d29922)" }}>
-            not installed —
-          </span>
+          {embedModels === null ? (
+            <option value="" disabled>
+              scanning model folders…
+            </option>
+          ) : (
+            embedGroups.map((g) => (
+              <optgroup key={g.family} label={g.family}>
+                {g.files.map((f) => (
+                  <option key={f.path} value={f.path}>
+                    {f.quantization ?? "model"} · {formatBytes(f.sizeBytes)}
+                    {sidecar?.modelPath === f.path ? " — active" : ""}
+                  </option>
+                ))}
+              </optgroup>
+            ))
+          )}
+        </select>
+        <div style={{ fontSize: 11, marginTop: 2 }}>
+          {hasInstalledModel ? (
+            <>
+              <code className="mono" style={{ fontSize: 11 }}>
+                {shortName(sidecar?.modelPath ?? "")}
+              </code>{" "}
+              —{" "}
+              {sidecarReady ? (
+                <span style={{ color: "var(--success, #3fb950)" }}>running</span>
+              ) : (
+                <span style={{ color: "var(--warn, #d29922)" }}>
+                  will start on next index
+                </span>
+              )}
+            </>
+          ) : (
+            <span style={{ color: "var(--warn, #d29922)" }}>
+              not installed — download one below to enable Knowledge
+            </span>
+          )}
+        </div>
+        {choiceMissing && (
+          <div style={{ fontSize: 11, color: "var(--warn, #d29922)", marginTop: 2 }}>
+            Chosen model file is gone — using auto-discovery until you pick
+            another.
+          </div>
         )}
+        <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 2 }}>
+          Switching models restarts the sidecar. Existing chunks keep their old
+          dimensions, so re-index a corpus after a switch to make it searchable
+          with the new model.
+        </div>
       </div>
 
-      {!hasInstalledModel && (
-        <div className="settings-note" style={{ marginTop: 4 }}>
-          <div style={{ marginBottom: 8 }}>
-            Install an embedding model from Hugging Face to enable Knowledge:
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            {EMBEDDING_SUGGESTIONS.map((s) => {
-              const sug = suggestions[s.repo];
-              const sel = sug?.selected ?? null;
-              const installed = isSuggestionInstalled(s.repo);
-              const dl = sel ? downloads[sel.id] : undefined;
-              const active = !!dl && dl.state !== "done" && dl.state !== "cancelled" && dl.state !== "error";
-              const pct = dl?.total ? Math.min(100, Math.round((dl.downloaded / dl.total) * 100)) : null;
-              return (
-                <button
-                  key={s.repo}
-                  type="button"
-                  className="ghost knowledge-suggestion"
-                  onClick={() => setDetailRepo(s.repo)}
-                  title={`View details for ${s.repo}`}
-                >
-                  <span className="knowledge-suggestion-main">
-                    <span style={{ fontSize: 12, fontWeight: 600 }}>{s.label}</span>
-                    <span style={{ fontSize: 11, color: "var(--text-dim)" }}>{s.note}</span>
-                  </span>
-                  {installed ? (
-                    <span className="fit-badge fits" style={{ flexShrink: 0 }}>✓ Installed</span>
-                ) : active ? (
-                    <span style={{ fontSize: 11, color: "var(--text-dim)", flexShrink: 0 }}>
-                      {pct !== null ? `${pct}%` : "downloading…"}
-                    </span>
-                  ) : sel || sug?.loading ? (
-                    <span className="knowledge-suggestion-size mono">
-                      {sug?.loading ? "…" : formatBytes(sel!.sizeBytes)}
-                    </span>
-                  ) : null}
-                </button>
-              );
-            })}
-          </div>
+      <div className="settings-note" style={{ marginTop: 4 }}>
+        <div style={{ marginBottom: 8 }}>
+          {hasInstalledModel
+            ? "Get more embedding models from Hugging Face:"
+            : "Install an embedding model from Hugging Face to enable Knowledge:"}
         </div>
-      )}
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {EMBEDDING_SUGGESTIONS.map((s) => {
+            const sug = suggestions[s.repo];
+            const sel = sug?.selected ?? null;
+            const installed = isSuggestionInstalled(s.repo);
+            const dl = sel ? downloads[sel.id] : undefined;
+            const active = !!dl && dl.state !== "done" && dl.state !== "cancelled" && dl.state !== "error";
+            const pct = dl?.total ? Math.min(100, Math.round((dl.downloaded / dl.total) * 100)) : null;
+            return (
+              <button
+                key={s.repo}
+                type="button"
+                className="ghost knowledge-suggestion"
+                onClick={() => setDetailRepo(s.repo)}
+                title={`View details for ${s.repo}`}
+              >
+                <span className="knowledge-suggestion-main">
+                  <span style={{ fontSize: 12, fontWeight: 600 }}>{s.label}</span>
+                  <span style={{ fontSize: 11, color: "var(--text-dim)" }}>{s.note}</span>
+                </span>
+                {installed ? (
+                  <span className="fit-badge fits" style={{ flexShrink: 0 }}>✓ Installed</span>
+              ) : active ? (
+                  <span style={{ fontSize: 11, color: "var(--text-dim)", flexShrink: 0 }}>
+                    {pct !== null ? `${pct}%` : "downloading…"}
+                  </span>
+                ) : sel || sug?.loading ? (
+                  <span className="knowledge-suggestion-size mono">
+                    {sug?.loading ? "…" : formatBytes(sel!.sizeBytes)}
+                  </span>
+                ) : null}
+              </button>
+            );
+          })}
+        </div>
+      </div>
 
       {error && (
         <div className="settings-note" style={{ color: "var(--danger, #f85149)" }}>

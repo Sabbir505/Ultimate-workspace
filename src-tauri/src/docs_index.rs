@@ -39,6 +39,13 @@ const EMBED_BATCH: usize = 16;
 /// (~1 token/char) still fits our own sidecar's 2048 context.
 const EMBED_RETRY_CHAR_CAP: usize = 1800;
 
+/// Setting key holding the user-chosen embedding GGUF path (Knowledge →
+/// "Embedding model" picker). Empty/absent = auto-discovery: the walk prefers
+/// nomic-embed by filename, then the first embedding-arch file found. A
+/// configured path that no longer exists silently falls back to auto so a
+/// deleted file can't wedge indexing.
+pub const EMBEDDING_MODEL_SETTING: &str = "docs.embedding_model";
+
 #[cfg(test)]
 mod retry_budget_tests {
     use super::*;
@@ -143,10 +150,30 @@ pub(crate) fn model_scan_dirs(conn: &Connection) -> Vec<PathBuf> {
     dirs
 }
 
-/// Locate an embedding GGUF on disk. scan_folder deliberately hides embedding
-/// architectures from the chat picker, so this does its own walk with
-/// parse_gguf and picks embedding-arch files, preferring nomic-embed by name.
+/// The user's explicit picker choice, when it still points at a file on
+/// disk. `find_embedding_gguf` honours it before any auto-discovery, so a
+/// chosen quant/model survives scans that would otherwise prefer nomic.
+fn configured_embedding_gguf(conn: &Connection) -> Option<String> {
+    let raw = db::get_setting(conn, EMBEDDING_MODEL_SETTING)
+        .ok()
+        .flatten()?;
+    let path = raw.trim();
+    if path.is_empty() {
+        return None;
+    }
+    if Path::new(path).is_file() {
+        Some(path.to_string())
+    } else {
+        None
+    }
+}
+
+/// Locate an embedding GGUF on disk: the user's picker choice first, then
+/// auto-discovery (nomic-embed by name, else the first embedding-arch file).
 pub fn find_embedding_gguf(conn: &Connection) -> Option<String> {
+    if let Some(path) = configured_embedding_gguf(conn) {
+        return Some(path);
+    }
     let mut first: Option<String> = None;
     for dir in model_scan_dirs(conn) {
         for entry in walkdir::WalkDir::new(&dir)
@@ -166,11 +193,7 @@ pub fn find_embedding_gguf(conn: &Connection) -> Option<String> {
                 continue;
             }
             let meta = local_models::parse_gguf(entry.path());
-            if !meta
-                .architecture
-                .as_deref()
-                .is_some_and(local_models::is_embedding_arch)
-            {
+            if !is_embedding_candidate(name.as_ref(), meta.architecture.as_deref()) {
                 continue;
             }
             let path = entry.path().to_string_lossy().to_string();
@@ -183,6 +206,145 @@ pub fn find_embedding_gguf(conn: &Connection) -> Option<String> {
         }
     }
     first
+}
+
+/// Whether a scanned GGUF can serve as the corpus embedder. Architecture is
+/// the primary signal (bert/roberta families plus the `*-embedding*`
+/// decoder-embedders); the filename hint ("…embed…") widens coverage to
+/// conversions that reuse a chat arch header (Qwen3-Embedding ships `qwen3`),
+/// while diffusion/CLIP headers and headerless dumps stay out.
+fn is_embedding_candidate(lower_name: &str, architecture: Option<&str>) -> bool {
+    match architecture {
+        None => false,
+        Some(arch) => {
+            if matches!(arch, "clip" | "mmproj") || !local_models::is_chat_gguf_arch(Some(arch)) {
+                return false;
+            }
+            local_models::is_embedding_arch(arch) || lower_name.contains("embed")
+        }
+    }
+}
+
+/// One discovered embedding GGUF for the Knowledge picker — a (family,
+/// quantization) leaf like `nomic-embed-text-v1.5 · Q8_0`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbeddingModelEntry {
+    pub path: String,
+    pub filename: String,
+    /// Filename without the quantization suffix — groups variants of the
+    /// same model in the picker's optgroups.
+    pub family: String,
+    /// e.g. "Q8_0", "UD-Q4_K_XL"; None when the filename carries no label.
+    pub quantization: Option<String>,
+    pub size_bytes: u64,
+    pub architecture: Option<String>,
+    pub modified_ms: u64,
+}
+
+/// Split a GGUF file stem into (family, quantization). Handles the two
+/// on-disk conventions: dot-separated (`nomic-embed-text-v1.5.Q8_0`) and
+/// dash-separated with optional Unsloth `UD-` prefix
+/// (`embeddinggemma-2-UD-Q4_K_XL`). No quant label → (stem, None).
+fn split_quant(stem: &str) -> (String, Option<String>) {
+    fn looks_like_quant(t: &str) -> bool {
+        if matches!(t, "f16" | "bf16" | "f32" | "fp16" | "fp32") {
+            return true;
+        }
+        let leading_digit = |s: &str| s.chars().next().is_some_and(|c| c.is_ascii_digit());
+        (t.starts_with('q') && leading_digit(&t[1..]))
+            || (t.starts_with("iq") && leading_digit(&t[2..]))
+    }
+    let lower = stem.to_lowercase();
+    // Dot convention: the last dot-segment is the quant ("…v1.5.q8_0").
+    if let Some((head, tail)) = lower.rsplit_once('.') {
+        if looks_like_quant(tail) {
+            return (
+                // Byte-safe slice: lowercasing can change byte lengths on
+                // non-ASCII filenames, so fall back to the whole stem.
+                stem.get(..head.len())
+                    .unwrap_or(stem)
+                    .trim_end_matches(['.', '-', '_'])
+                    .to_string(),
+                Some(tail.to_ascii_uppercase()),
+            );
+        }
+    }
+    // Dash convention: the last dash-segment is the quant, optionally
+    // preceded by the "ud" unsloth dynamic-quant prefix.
+    let dash_parts: Vec<&str> = lower.split('-').collect();
+    if dash_parts.len() >= 2 && looks_like_quant(dash_parts[dash_parts.len() - 1]) {
+        let quant_start = if dash_parts[dash_parts.len() - 2] == "ud" && dash_parts.len() >= 3 {
+            dash_parts.len() - 2
+        } else {
+            dash_parts.len() - 1
+        };
+        let family = stem
+            .split('-')
+            .take(quant_start)
+            .collect::<Vec<_>>()
+            .join("-");
+        let quant = dash_parts[quant_start..].join("-");
+        return (family, Some(quant.to_ascii_uppercase()));
+    }
+    (stem.to_string(), None)
+}
+
+/// Walk every models folder and list all usable embedding GGUFs — the
+/// Knowledge picker's data source. Sorted by family, then largest first, so
+/// optgroups are stable and the full-precision variant leads each group.
+pub fn discover_embedding_models(conn: &Connection) -> Vec<EmbeddingModelEntry> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<EmbeddingModelEntry> = Vec::new();
+    for dir in model_scan_dirs(conn) {
+        for entry in walkdir::WalkDir::new(&dir)
+            .max_depth(6)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_lowercase();
+            if !name.ends_with(".gguf") || name.starts_with("mmproj") || name.contains("reranker") {
+                continue;
+            }
+            let path = entry.path();
+            if !seen.insert(path.to_path_buf()) {
+                continue; // overlapping scan dirs
+            }
+            let meta = local_models::parse_gguf(path);
+            if !is_embedding_candidate(name.as_ref(), meta.architecture.as_deref()) {
+                continue;
+            }
+            let filename = entry.file_name().to_string_lossy().to_string();
+            let stem = filename.strip_suffix(".gguf").unwrap_or(&filename);
+            let (family, quantization) = split_quant(stem);
+            let modified_ms = entry
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            out.push(EmbeddingModelEntry {
+                path: path.to_string_lossy().to_string(),
+                filename,
+                family,
+                quantization,
+                size_bytes: entry.metadata().map(|m| m.len()).unwrap_or(0),
+                architecture: meta.architecture,
+                modified_ms,
+            });
+        }
+    }
+    out.sort_by(|a, b| {
+        a.family
+            .to_lowercase()
+            .cmp(&b.family.to_lowercase())
+            .then(b.size_bytes.cmp(&a.size_bytes))
+    });
+    out
 }
 
 /// Base URL of a running chat sidecar whose loaded model has vision — used
@@ -253,6 +415,102 @@ pub fn docs_embedding_status(
             base_url: reranker_active.map(|a| a.base_url),
         },
     })
+}
+
+/// All embedding GGUFs found in the model scan dirs — the Knowledge panel's
+/// "Embedding model" picker (grouped by family, one leaf per quantization).
+/// Fresh on every call, so models downloaded after the panel opened show up
+/// on the next fetch (the panel re-fetches after each download completes and
+/// on manual rescan).
+#[tauri::command(async)]
+pub fn docs_list_embedding_models(
+    db: State<'_, DbState>,
+) -> CmdResult<Vec<EmbeddingModelEntry>> {
+    let conn = db.0.lock();
+    Ok(discover_embedding_models(&conn))
+}
+
+/// Persist the user's embedding-model choice (`None`/empty = auto). When the
+/// embedding sidecar is already running, restarts it on the newly effective
+/// model so the change takes effect immediately instead of "on next index".
+/// If the new model fails to load, the setting reverts to the previous value
+/// and the previous model (if any) is restarted — the DB is never left
+/// pointing at something that isn't running. Returns the effective model
+/// path after the switch (None when auto-discovery found nothing).
+#[tauri::command]
+pub async fn docs_set_embedding_model(
+    db: State<'_, DbState>,
+    local: State<'_, LocalModelState>,
+    path: Option<String>,
+) -> CmdResult<Option<String>> {
+    let (previous_setting, previous_effective) = {
+        let conn = db.0.lock();
+        (
+            db::get_setting(&conn, EMBEDDING_MODEL_SETTING)
+                .map_err(|e| e.to_string())?
+                .filter(|v| !v.trim().is_empty()),
+            find_embedding_gguf(&conn),
+        )
+    };
+    let chosen: Option<String> = match path.as_deref() {
+        Some(p) if !p.trim().is_empty() => {
+            if !Path::new(p.trim()).is_file() {
+                return Err(format!("model file not found: {p}"));
+            }
+            Some(p.trim().to_string())
+        }
+        _ => None,
+    };
+    {
+        let conn = db.0.lock();
+        db::set_setting(
+            &conn,
+            EMBEDDING_MODEL_SETTING,
+            chosen.as_deref().unwrap_or(""),
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    // Nothing to do while the sidecar is down — "will start on next index".
+    let was_running = local.0.embedding_status().is_some();
+    let effective = {
+        let conn = db.0.lock();
+        find_embedding_gguf(&conn)
+    };
+    if !was_running
+        || effective == previous_effective
+    {
+        return Ok(effective);
+    }
+
+    match &effective {
+        Some(new_path) => {
+            // start_embedding stops the previous embedding sidecar itself.
+            if let Err(e) = local.0.start_embedding(new_path).await {
+                // Roll back so the stored choice matches what's actually
+                // running, and warm the old model back up (best-effort).
+                {
+                    let conn = db.0.lock();
+                    let _ = db::set_setting(
+                        &conn,
+                        EMBEDDING_MODEL_SETTING,
+                        previous_setting.as_deref().unwrap_or(""),
+                    );
+                }
+                if let Some(old) = &previous_effective {
+                    let _ = local.0.start_embedding(old).await;
+                }
+                return Err(format!(
+                    "couldn't start the chosen embedding model: {e} — kept the previous model"
+                ));
+            }
+        }
+        None => {
+            // Chosen file gone / nothing discovered: leave the sidecar down.
+            // The next index attempt reports it clearly.
+        }
+    }
+    Ok(effective)
 }
 
 /// Start the reranker sidecar for the installed reranker GGUF. Invoked by the
@@ -917,6 +1175,136 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn find_embedding_gguf_honors_configured_choice() {
+        // Two embedding GGUFs on disk; the picker's stored choice must win
+        // over the nomic-by-name auto preference.
+        let tmp = std::env::temp_dir().join(format!("relay-docs-choice-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).expect("mkdir");
+        write_fake_gguf(&tmp.join("nomic-embed-text-v1.5.Q8_0.gguf"), "nomic-bert");
+        write_fake_gguf(&tmp.join("embeddinggemma-2-Q8_0.gguf"), "gemma-embedding2");
+
+        let conn = crate::db::mem();
+        crate::db::set_setting(&conn, "localModels.folders", "[]").expect("set setting");
+        crate::db::set_setting(&conn, "local_models.dir", &tmp.to_string_lossy())
+            .expect("set setting");
+
+        let chosen = tmp.join("embeddinggemma-2-Q8_0.gguf");
+        crate::db::set_setting(&conn, EMBEDDING_MODEL_SETTING, &chosen.to_string_lossy())
+            .expect("set choice");
+        let found = find_embedding_gguf(&conn).expect("should find the chosen model");
+        assert_eq!(PathBuf::from(&found), chosen);
+
+        // Auto mode (empty setting) goes back to the nomic preference.
+        crate::db::set_setting(&conn, EMBEDDING_MODEL_SETTING, "").expect("clear choice");
+        let auto = find_embedding_gguf(&conn).expect("auto pick");
+        assert!(auto.contains("nomic-embed"), "got {auto}");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn find_embedding_gguf_falls_back_when_choice_vanished() {
+        // A deleted model file must not wedge indexing: the stale path is
+        // ignored and auto-discovery takes over.
+        let tmp = std::env::temp_dir().join(format!("relay-docs-stale-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).expect("mkdir");
+        write_fake_gguf(&tmp.join("nomic-embed-text-v1.5.Q8_0.gguf"), "nomic-bert");
+
+        let conn = crate::db::mem();
+        crate::db::set_setting(&conn, "localModels.folders", "[]").expect("set setting");
+        crate::db::set_setting(&conn, "local_models.dir", &tmp.to_string_lossy())
+            .expect("set setting");
+        crate::db::set_setting(
+            &conn,
+            EMBEDDING_MODEL_SETTING,
+            tmp.join("deleted-model.Q8_0.gguf").to_string_lossy().as_ref(),
+        )
+        .expect("set stale choice");
+
+        let found = find_embedding_gguf(&conn).expect("should fall back to auto");
+        assert!(found.contains("nomic-embed"), "got {found}");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn discover_embedding_models_lists_family_and_quant() {
+        // The picker's data source: one entry per (family, quantization)
+        // leaf; rerankers, mmproj companions, and chat models stay out.
+        let tmp = std::env::temp_dir().join(format!("relay-docs-disc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).expect("mkdir");
+        write_fake_gguf(&tmp.join("nomic-embed-text-v1.5.Q8_0.gguf"), "nomic-bert");
+        write_fake_gguf(&tmp.join("embeddinggemma-2-F16.gguf"), "gemma-embedding2");
+        write_fake_gguf(
+            &tmp.join("embeddinggemma-2-UD-Q4_K_XL.gguf"),
+            "gemma-embedding2",
+        );
+        write_fake_gguf(&tmp.join("bge-reranker-v2-m3-Q8_0.gguf"), "xlm-roberta");
+        write_fake_gguf(&tmp.join("mmproj-F16.gguf"), "clip");
+        write_fake_gguf(&tmp.join("chat-model.gguf"), "llama");
+        // Name-hint arm: chat-arch header but "embedding" in the filename
+        // (Qwen3-Embedding conversions ship a qwen3 arch).
+        write_fake_gguf(&tmp.join("Qwen3-Embedding-0.6B-Q8_0.gguf"), "qwen3");
+
+        let conn = crate::db::mem();
+        crate::db::set_setting(&conn, "localModels.folders", "[]").expect("set setting");
+        crate::db::set_setting(&conn, "local_models.dir", &tmp.to_string_lossy())
+            .expect("set setting");
+
+        let marker = tmp.to_string_lossy().to_string();
+        let mine: Vec<EmbeddingModelEntry> = discover_embedding_models(&conn)
+            .into_iter()
+            .filter(|e| e.path.starts_with(&marker))
+            .collect();
+        assert_eq!(mine.len(), 4, "got {:?}", mine.iter().map(|e| &e.filename));
+
+        // Grouped by family with per-variant quant labels. Within a family
+        // the order is size-descending, but these fake files are byte-equal,
+        // so compare the quant SET rather than positions.
+        let gemma: Vec<Option<String>> = mine
+            .iter()
+            .filter(|e| e.family == "embeddinggemma-2")
+            .map(|e| e.quantization.clone())
+            .collect();
+        assert_eq!(gemma.len(), 2, "got {gemma:?}");
+        assert!(gemma.contains(&Some("F16".to_string())), "got {gemma:?}");
+        assert!(gemma.contains(&Some("UD-Q4_K_XL".to_string())), "got {gemma:?}");
+        // The name-hint arm is discovered despite the chat-arch header.
+        assert!(mine.iter().any(|e| e.quantization.as_deref() == Some("Q8_0")
+            && e.family == "Qwen3-Embedding-0.6B"
+            && e.architecture.as_deref() == Some("qwen3")));
+        assert!(mine
+            .iter()
+            .any(|e| e.family == "nomic-embed-text-v1.5"
+                && e.quantization.as_deref() == Some("Q8_0")));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn split_quant_handles_both_filename_conventions() {
+        // Dot convention (nomic-style).
+        let (family, quant) = split_quant("nomic-embed-text-v1.5.Q8_0");
+        assert_eq!(family, "nomic-embed-text-v1.5");
+        assert_eq!(quant.as_deref(), Some("Q8_0"));
+        // Dash convention with the Unsloth UD- dynamic-quant prefix.
+        let (family, quant) = split_quant("embeddinggemma-2-UD-Q4_K_XL");
+        assert_eq!(family, "embeddinggemma-2");
+        assert_eq!(quant.as_deref(), Some("UD-Q4_K_XL"));
+        // Plain dash quants, and no quant at all (version numbers are not
+        // quants).
+        let (family, quant) = split_quant("bge-small-en-v1.5");
+        assert_eq!(family, "bge-small-en-v1.5");
+        assert_eq!(quant, None);
+        let (family, quant) = split_quant("jina-embeddings-v2-base-F16");
+        assert_eq!(family, "jina-embeddings-v2-base");
+        assert_eq!(quant.as_deref(), Some("F16"));
     }
 
     /// Minimal valid-enough GGUF: magic + version + metadata KV with

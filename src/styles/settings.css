@@ -1196,6 +1196,34 @@
   flex-shrink: 0;
 }
 
+/* Knowledge embedding-model picker: head row (title + Rescan) and the
+   family/quant <select>, styled like the other settings selects. */
+.knowledge-embed-picker .knowledge-embed-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.knowledge-embed-picker .knowledge-embed-select {
+  margin-top: 6px;
+  width: 100%;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+  font-size: 12px;
+}
+.knowledge-embed-picker .knowledge-embed-select:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.knowledge-embed-picker .knowledge-embed-select option,
+.knowledge-embed-picker .knowledge-embed-select optgroup {
+  background: var(--surface);
+  color: var(--text);
+}
+
 /* Settings toggle row â€” label on left, toggle on right */
 .settings-toggle-row {
   display: flex;

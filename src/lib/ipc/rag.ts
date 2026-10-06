@@ -1,7 +1,12 @@
 // Extracted domain of lib/ipc.ts (see its header). Command names and
 // payload shapes are binding (CONTRACT.md).
 import { safeInvoke, safeListen } from "../ipcCore";
-import { DocCorpus, DocsEmbeddingStatus, DocsIndexProgressPayload } from "../ipc";
+import {
+  DocCorpus,
+  DocsEmbeddingStatus,
+  DocsIndexProgressPayload,
+  EmbeddingModelEntry,
+} from "../ipc";
 
 // ---- Local Knowledge (RAG corpora) ----
 //
@@ -13,6 +18,25 @@ import { DocCorpus, DocsEmbeddingStatus, DocsIndexProgressPayload } from "../ipc
 
 export const docsEmbeddingStatus = () =>
   safeInvoke<DocsEmbeddingStatus | null>("docs_embedding_status");
+
+/** All embedding GGUFs discovered in the model scan dirs, grouped by family
+ *  and sorted (family asc, size desc). Fresh on every call — a model
+ *  downloaded after the panel opened appears on the next fetch. */
+export const docsListEmbeddingModels = () =>
+  safeInvoke<EmbeddingModelEntry[] | null>("docs_list_embedding_models");
+
+/** Persist the embedding-model choice (Knowledge picker). `null`/undefined =
+ *  auto-discovery (nomic-embed preferred). When the sidecar is running it is
+ *  restarted on the new model immediately; a failed load rolls the setting
+ *  back. Resolves to the effective model path (null when nothing found). */
+export const docsSetEmbeddingModel = (path?: string | null) =>
+  safeInvoke<string | null>("docs_set_embedding_model", {
+    path: path?.trim() ? path.trim() : null,
+  });
+
+/** Setting key behind docsSetEmbeddingModel — the panel reads it directly to
+ *  distinguish "auto" from a chosen path (empty/absent = auto). */
+export const DOCS_EMBEDDING_MODEL_SETTING = "docs.embedding_model";
 
 /** Start the reranker sidecar for the installed reranker GGUF (Knowledge
  *  panel's "Rerank search results" toggle). Resolves `false` when it was

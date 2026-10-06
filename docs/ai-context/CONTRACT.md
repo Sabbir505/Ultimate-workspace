@@ -440,6 +440,8 @@ Commands:
 - `docs_start_index(corpusId) -> ()` / `docs_cancel_index(corpusId) -> ()` — embedding runs (`docs:index:progress` events).
 - `docs_start_reranker() -> ()` — downloads/starts the optional llama-server reranker sidecar (see the reranker bullet in the Commands section).
 - `docs_embedding_status(corpusId) -> DocsEmbeddingStatus`
+- `docs_list_embedding_models() -> EmbeddingModelEntry[]` — every embedding GGUF discovered in the model scan dirs, one entry per (family, quantization) leaf (`{ path, filename, family, quantization, sizeBytes, architecture, modifiedMs }`, sorted family asc then size desc). Fresh per call, so newly downloaded models appear on the next fetch.
+- `docs_set_embedding_model(path: string | null) -> string | null` — persists the Knowledge panel's embedding-model choice (null = auto: nomic-embed preferred, then first embedding-arch file) into the `docs.embedding_model` setting; restarts the embedding sidecar on the new model when it was running, rolling the setting back if the new model fails to load. Returns the effective model path (null when nothing is discovered).
 - `docs_attach_corpus_to_chat(chatSessionId, corpusId)` / `docs_detach_corpus_from_chat(chatSessionId, corpusId)` / `docs_attached_corpus_ids(chatSessionId) -> string[]`
 
 ## Project wiki (§6.15)

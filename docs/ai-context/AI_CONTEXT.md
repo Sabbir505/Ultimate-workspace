@@ -165,7 +165,8 @@ Docs index (docs_index::):             docs_list_corpora, docs_add_corpus, docs_
                                        docs_start_index, docs_cancel_index, docs_start_reranker,
                                        docs_set_corpus_enabled, docs_attached_corpus_ids,
                                        docs_attach_corpus_to_chat, docs_detach_corpus_from_chat,
-                                       docs_embedding_status
+                                       docs_embedding_status, docs_list_embedding_models,
+                                       docs_set_embedding_model
 Memory (memory_cmds::):                memory_list, memory_create, memory_update, memory_delete,
                                        memory_purge, memory_export, memory_status,
                                        memory_set_document, memory_document_history,
@@ -450,8 +451,9 @@ Secret-fallback tables (`secrets.rs`, created on demand when an OS-keychain writ
 
 ### 2.11 Docs Index (`docs_index.rs`)
 
-- **Commands (11):** `docs_list_corpora`, `docs_add_corpus`, `docs_remove_corpus`, `docs_start_index`, `docs_cancel_index`, `docs_start_reranker`, `docs_set_corpus_enabled`, `docs_attached_corpus_ids`, `docs_attach_corpus_to_chat`, `docs_detach_corpus_from_chat`, `docs_embedding_status`
+- **Commands (13):** `docs_list_corpora`, `docs_add_corpus`, `docs_remove_corpus`, `docs_start_index`, `docs_cancel_index`, `docs_start_reranker`, `docs_set_corpus_enabled`, `docs_attached_corpus_ids`, `docs_attach_corpus_to_chat`, `docs_detach_corpus_from_chat`, `docs_embedding_status`, `docs_list_embedding_models`, `docs_set_embedding_model`
 - Powers the document RAG feature: project docs are embedded and attached per-chat for retrieval-augmented generation. `search_docs` now runs **hybrid search** — `doc_chunks_fts` (keyword) + vector legs fused with Reciprocal Rank Fusion (k=60), degrading to keyword-only when the embedding sidecar is down; chunks carry a markdown heading trail in excerpts (corpus `chunk_version` forces a one-time re-index). The optional reranker stage (default off) re-scores the fused top-50 via `/v1/rerank` on a llama-server reranker sidecar (any `*reranker*.gguf` in the models folder), fail-open.
+- The embedding model is user-selectable (Settings → Knowledge picker): `docs_set_embedding_model` persists the chosen GGUF path into the `docs.embedding_model` setting (empty = auto-discovery, nomic-embed preferred), `docs_list_embedding_models` scans the model dirs for every embedding GGUF (bert/roberta-family or `*-embedding*` arch, plus `*embed*`-named files with chat-arch headers) grouped by family × quantization; a chosen path wins over auto-discovery until deleted, then falls back silently.
 
 ### 2.12 GitHub PR Commands (`github.rs`)
 

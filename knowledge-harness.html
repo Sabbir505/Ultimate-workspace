@@ -1,0 +1,18 @@
+<!doctype html>
+<!-- Static harness for the Settings → Knowledge panel: the REAL
+     KnowledgePanel on top of a stubbed docs_* IPC (two corpora, three
+     discovered embedding-model families with several quants each). Serve
+     `npx vite`, open http://localhost:1500/knowledge-harness.html. -->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Knowledge panel harness</title>
+    <script type="module" src="./src/dev/knowledgeHarness.tsx"></script>
+    <style>
+      body { margin: 0; background: var(--surface-1, #141517); }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>

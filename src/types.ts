@@ -268,6 +268,19 @@ export interface DocCorpus {
   chunkCount: number;
 }
 
+/** One discovered embedding GGUF (Knowledge → "Embedding model" picker) —
+ *  a (family, quantization) leaf like `nomic-embed-text-v1.5 · Q8_0`. */
+export interface EmbeddingModelEntry {
+  path: string;
+  filename: string;
+  /** Filename without the quantization suffix — groups variants. */
+  family: string;
+  quantization?: string | null;
+  sizeBytes: number;
+  architecture?: string | null;
+  modifiedMs: number;
+}
+
 /** Status of the local reranker sidecar (optional `docs.rerank` second-stage
  *  ranking for `search_docs`). */
 export interface RerankerStatus {

@@ -383,10 +383,9 @@ pub(super) fn detect_llama_server_path_blocking() -> Option<String> {
             }
         }
         // Also check common alternative locations
-        for alt in [r"C:\Program Files\llama.cpp\bin\llama-server.exe"] {
-            if std::path::Path::new(alt).is_file() {
-                return Some(alt.to_string());
-            }
+        let alt = r"C:\Program Files\llama.cpp\bin\llama-server.exe";
+        if std::path::Path::new(alt).is_file() {
+            return Some(alt.to_string());
         }
         // Check if llama-server is on PATH (Windows). Console binary — a GUI
         // process spawning it bare would flash a console window per probe.

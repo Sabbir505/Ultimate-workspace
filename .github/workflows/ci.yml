@@ -50,7 +50,12 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: "20"
+          # 22, not 20: pdfjs-dist's build reads the `Iterator` global at module
+          # load, which Node 20 does not define — every test file that imports
+          # the PDF viewer died with "ReferenceError: Iterator is not defined"
+          # before collecting a single test. Dev machines (and the Netlify site
+          # build) run 22+, which is why the suite was green locally.
+          node-version: "22"
           cache: npm
 
       - name: Install npm deps

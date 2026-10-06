@@ -170,7 +170,7 @@ function AssistantContent({
         return <ThinkingBlock key={i} thinking={seg.text} done={seg.done} />;
       case 'tool':
         return (
-          <ActivityRow key={i} data={seg.data} raw={seg.raw} done={seg.done} onPeekDiff={onPeekDiff} />
+          <ActivityRow key={i} data={seg.data} raw={seg.raw} done={seg.done} />
         );
       default:
         return (

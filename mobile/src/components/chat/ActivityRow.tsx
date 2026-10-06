@@ -5,36 +5,24 @@
  * segment parser in MessageBubble extracts each one and hands the parsed
  * payload here. This component is the ONLY place tool JSON renders.
  *
- * Collapsed (default): one quiet line — a status glyph (pulsing accent dot
- * while the call is in flight, a check once done), the tool title (or kind
- * fallback), the detail inline truncated, and a chevron. Subagent Task
- * tools (role + task present) render as "Subagent · <role>" rows.
+ * One quiet line: a status glyph (pulsing accent dot while the call is in
+ * flight, a check once done), the tool title (or kind fallback), and the
+ * detail inline truncated. Subagent Task tools (role + task present) render
+ * as "Subagent · <role>" rows.
  *
- * Expanded: the code body (mono, horizontal scroll), args, the target file
- * path, and — for edit payloads — the old/new content as red/green tinted
- * blocks (plain background tints, no diff library).
+ * No expansion for now — the phone's `<tool>` payloads don't carry the
+ * code/edit bodies the desktop shows, so there is nothing to reveal (the
+ * chevron opened an empty sheet). The desktop-side expansion machinery was
+ * removed with it; restore both together when tool details come to mobile.
  */
-import React, { useMemo, useState } from 'react';
-import {
-  View,
-  Text,
-  StyleSheet,
-  TouchableOpacity,
-  ScrollView,
-  Animated,
-} from 'react-native';
+import React from 'react';
+import { View, Text, StyleSheet, Animated } from 'react-native';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { theme } from '../../theme';
 
 // M4: Ionicons glyph-font wrappers preserving the lucide call-shapes.
 const Check = ({ size, color }: { size?: number; color?: string }) => (
   <Ionicons name="checkmark" size={size} color={color} />
-);
-const ChevronDown = ({ size, color }: { size?: number; color?: string }) => (
-  <Ionicons name="chevron-down" size={size} color={color} />
-);
-const ChevronUp = ({ size, color }: { size?: number; color?: string }) => (
-  <Ionicons name="chevron-up" size={size} color={color} />
 );
 
 /** Tool-call payload from the desktop's `<tool>` markers (proto tool_block).
@@ -62,43 +50,7 @@ export interface ActivityRowProps {
   raw?: string;
   /** False while the closing marker hasn't streamed in yet (still running). */
   done: boolean;
-  /** Diff peek (desktop DiffCard parity): called with the touched file's
-   *  path for file-mutating tools — the chat opens the git diff sheet. */
-  onPeekDiff?: (path: string) => void;
 }
-
-/** Derive `rgba(r,g,b,a)` from a token hex color — lets us tint edit blocks
- *  from the theme without hardcoding colors. */
-function withAlpha(hex: string, alpha: number): string {
-  const h = hex.startsWith('#') ? hex.slice(1) : hex;
-  const full = h.length === 3 ? h.split('').map((x) => x + x).join('') : h;
-  const r = parseInt(full.slice(0, 2), 16);
-  const g = parseInt(full.slice(2, 4), 16);
-  const b = parseInt(full.slice(4, 6), 16);
-  if (Number.isNaN(r) || Number.isNaN(g) || Number.isNaN(b)) return hex;
-  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
-}
-
-interface EditView {
-  path?: string;
-  old?: string;
-  new?: string;
-}
-
-/** Narrow an arbitrary edit payload — never trust the model-fed shape. */
-function renderEdit(edit: unknown, fallbackPath?: string): EditView | null {
-  if (edit == null || typeof edit !== 'object') return null;
-  const e = edit as Record<string, unknown>;
-  const oldStr = typeof e.old === 'string' ? e.old : undefined;
-  const newStr = typeof e.new === 'string' ? e.new : undefined;
-  const path = typeof e.path === 'string' ? e.path : fallbackPath;
-  if (oldStr === undefined && newStr === undefined && path === undefined) return null;
-  return { path, old: oldStr, new: newStr };
-}
-
-/** The tools whose rows may offer a git-diff peek (same set the desktop's
- *  always-allow rules engine governs). */
-const FILE_MUTATING_TOOLS = new Set(['write_file', 'edit_file', 'delete_file', 'move_file', 'copy_file']);
 
 function PulsingDot({ color }: { color: string }) {
   const opacity = React.useRef(new Animated.Value(0.35)).current;
@@ -119,9 +71,8 @@ function PulsingDot({ color }: { color: string }) {
   );
 }
 
-export default function ActivityRow({ data, raw, done, onPeekDiff }: ActivityRowProps) {
+export default function ActivityRow({ data, done }: ActivityRowProps) {
   const c = theme.colors;
-  const [expanded, setExpanded] = useState(false);
 
   const isSubagent = data?.role != null && data?.task != null;
   const title = isSubagent
@@ -129,45 +80,9 @@ export default function ActivityRow({ data, raw, done, onPeekDiff }: ActivityRow
     : (data?.title || data?.kind || (done ? 'Tool call' : 'Working…'));
   const detail = isSubagent ? data!.task : (data?.detail || data?.path || '');
 
-  const edit = useMemo(() => renderEdit(data?.edit, data?.path), [data]);
-  // A file the agent created/edited/deleted on disk — the peek's target.
-  // Gated on the FILE-MUTATING tools: read-type tools (read_file, grep, …)
-  // also carry `data.path`, and their "Diff" button opened a guaranteed-empty
-  // "No git changes for this file" sheet.
-  const peekPath =
-    data?.kind != null && FILE_MUTATING_TOOLS.has(data.kind)
-      ? edit?.path ?? data?.path ?? null
-      : null;
-  const argsText = useMemo(() => {
-    if (data?.args == null) return null;
-    try {
-      return JSON.stringify(data.args, null, 2);
-    } catch {
-      return null;
-    }
-  }, [data]);
-  const rawText = useMemo(() => {
-    if (data) return null;
-    if (!raw) return null;
-    try {
-      return JSON.stringify(JSON.parse(raw), null, 2);
-    } catch {
-      return raw;
-    }
-  }, [data, raw]);
-
-  const hasBody =
-    expanded &&
-    (edit != null || data?.code != null || data?.path != null || argsText != null || data?.result != null || rawText != null || isSubagent);
-
   return (
     <View style={[styles.card, { backgroundColor: c.surface2, borderColor: c.border }]}>
-      <TouchableOpacity
-        style={styles.head}
-        activeOpacity={0.7}
-        onPress={() => setExpanded((v) => !v)}
-        accessibilityLabel={expanded ? 'Hide tool details' : 'Show tool details'}
-      >
+      <View style={styles.head}>
         {done ? (
           <View style={styles.glyphBox}>
             <Check size={14} color={c.success} />
@@ -183,90 +98,7 @@ export default function ActivityRow({ data, raw, done, onPeekDiff }: ActivityRow
             {detail}
           </Text>
         ) : null}
-        {expanded ? (
-          <ChevronUp size={14} color={c.textSecondary} />
-        ) : (
-          <ChevronDown size={14} color={c.textSecondary} />
-        )}
-      </TouchableOpacity>
-
-      {hasBody ? (
-        <View style={styles.body}>
-          {data?.path ? (
-            <View style={styles.pathRow}>
-              <Text style={[styles.pathText, { color: c.textSecondary, flex: 1 }]} numberOfLines={2}>
-                {data.path}
-              </Text>
-              {onPeekDiff && peekPath && done ? (
-                <TouchableOpacity
-                  style={[styles.peekBtn, { backgroundColor: c.background, borderColor: c.border }]}
-                  activeOpacity={0.7}
-                  onPress={() => onPeekDiff(peekPath)}
-                  accessibilityRole="button"
-                  accessibilityLabel={`View git diff for ${peekPath}`}
-                >
-                  <Ionicons name="git-compare-outline" size={12} color={c.accent} />
-                  <Text style={[styles.peekText, { color: c.accent }]}>Diff</Text>
-                </TouchableOpacity>
-              ) : null}
-            </View>
-          ) : null}
-
-          {isSubagent ? (
-            <Text style={[styles.resultText, { color: c.textSecondary }]}>{data!.task}</Text>
-          ) : null}
-
-          {edit?.old != null ? (
-            <View style={[styles.diffBlock, { backgroundColor: withAlpha(c.error, 0.14) }]}>
-              <Text style={[styles.diffLabel, { color: c.error }]}>{'− Before'}</Text>
-              <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-                <Text style={[styles.codeText, { color: c.text }]}>{edit.old}</Text>
-              </ScrollView>
-            </View>
-          ) : null}
-
-          {edit?.new != null ? (
-            <View style={[styles.diffBlock, { backgroundColor: withAlpha(c.success, 0.14) }]}>
-              <Text style={[styles.diffLabel, { color: c.success }]}>{'+ After'}</Text>
-              <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-                <Text style={[styles.codeText, { color: c.text }]}>{edit.new}</Text>
-              </ScrollView>
-            </View>
-          ) : null}
-
-          {data?.code != null ? (
-            <View style={[styles.codeBlock, { backgroundColor: c.background, borderColor: c.border }]}>
-              {data.lang ? (
-                <Text style={[styles.codeLang, { color: c.textSecondary }]}>{data.lang}</Text>
-              ) : null}
-              <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-                <Text style={[styles.codeText, { color: c.text }]}>{data.code}</Text>
-              </ScrollView>
-            </View>
-          ) : null}
-
-          {argsText ? (
-            <View style={[styles.codeBlock, { backgroundColor: c.background, borderColor: c.border }]}>
-              <Text style={[styles.codeLang, { color: c.textSecondary }]}>args</Text>
-              <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-                <Text style={[styles.codeText, { color: c.textSecondary }]}>{argsText}</Text>
-              </ScrollView>
-            </View>
-          ) : null}
-
-          {data?.result ? (
-            <Text style={[styles.resultText, { color: c.textSecondary }]}>{data.result}</Text>
-          ) : null}
-
-          {rawText ? (
-            <View style={[styles.codeBlock, { backgroundColor: c.background, borderColor: c.border }]}>
-              <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-                <Text style={[styles.codeText, { color: c.textSecondary }]}>{rawText}</Text>
-              </ScrollView>
-            </View>
-          ) : null}
-        </View>
-      ) : null}
+      </View>
     </View>
   );
 }
@@ -295,61 +127,5 @@ const styles = StyleSheet.create({
   detail: {
     ...theme.type.secondary,
     flex: 1,
-  },
-  body: {
-    marginTop: 10,
-    gap: 8,
-  },
-  pathRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  pathText: {
-    fontFamily: 'monospace',
-    fontSize: 12,
-    lineHeight: 17,
-  },
-  peekBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: theme.radius.pill,
-    paddingHorizontal: 9,
-    paddingVertical: 4,
-  },
-  peekText: {
-    ...theme.type.label,
-    fontWeight: '600',
-  },
-  codeBlock: {
-    borderRadius: theme.radius.sm,
-    borderWidth: StyleSheet.hairlineWidth,
-    padding: 10,
-  },
-  codeLang: {
-    fontFamily: 'monospace',
-    fontSize: 10,
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-    marginBottom: 6,
-  },
-  codeText: {
-    fontFamily: 'monospace',
-    fontSize: 12,
-    lineHeight: 17,
-  },
-  diffBlock: {
-    borderRadius: theme.radius.sm,
-    padding: 10,
-  },
-  diffLabel: {
-    ...theme.type.label,
-    fontWeight: '700',
-    marginBottom: 4,
-  },
-  resultText: {
-    ...theme.type.secondary,
   },
 });

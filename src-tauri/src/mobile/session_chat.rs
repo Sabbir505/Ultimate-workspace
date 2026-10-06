@@ -536,7 +536,7 @@ fn handle_send_chat_message(
     // ACP agent used to fall through to the builtin provider path and hit a
     // cloud model instead of the local agent process (AgentSessionManager::
     // send dispatches `acp:<id>` ids to send_acp_turn, like the desktop).
-    step_trace("resolved session row");;
+    step_trace("resolved session row");
     let agent_id: Option<String> = match agent.as_deref() {
         Some(a) if a.starts_with("harness:") => {
             Some(a.strip_prefix("harness:").unwrap_or(a).to_string())
@@ -544,7 +544,7 @@ fn handle_send_chat_message(
         Some(a) if a.starts_with("acp:") => Some(a.to_string()),
         _ => None,
     };
-    step_trace("harness check done");;
+    step_trace("harness check done");
     let attachments_input = to_attachment_inputs(attachments);
     if let Some(agent_id) = agent_id {
         {
@@ -615,7 +615,7 @@ fn handle_send_chat_message(
         return Ok(vec![]);
     }
 
-    step_trace("agent branch done");;
+    step_trace("agent branch done");
     // 2. Resolve provider + credentials exactly like the desktop
     //    send_chat_message command. local_gguf is keyless; everything else
     //    reads the real key from the keychain. An Auto-routed session
@@ -684,7 +684,7 @@ fn handle_send_chat_message(
     let (extra_text, images) = crate::chat::commands::process_attachments(&attachments_input);
     let content = format!("{text}{extra_text}");
 
-    step_trace("provider resolved");;
+    step_trace("provider resolved");
     // 3. Persist the user message (with attachment-derived text inlined so the
     //    history matches what the model actually saw).
     {
@@ -695,7 +695,7 @@ fn handle_send_chat_message(
             .map_err(|e| format!("failed to touch chat session: {e}"))?;
     }
 
-    step_trace("user message persisted");;
+    step_trace("user message persisted");
     // 4. Load the conversation history from the DB so the model sees the
     //    whole session (previously an empty Vec was passed — the model
     //    received a blank conversation every turn). Mirrors the desktop
@@ -721,7 +721,7 @@ fn handle_send_chat_message(
             .collect()
     };
 
-    step_trace("history loaded");;
+    step_trace("history loaded");
     // 5. If this turn carries vision images, attach them to the final user
     //    message so the live request includes them. History rows loaded above
     //    never carry images (they're DB text only); only the live turn gets
@@ -732,7 +732,7 @@ fn handle_send_chat_message(
         }
     }
 
-    step_trace("images attached");;
+    step_trace("images attached");
     // 5b. Register chat -> phone BEFORE the stream starts: `chat_mgr.send`
     //     spawns the provider stream immediately, and the relay's forwarder
     //     needs the mapping for the very first token (a fast provider can
@@ -752,7 +752,7 @@ fn handle_send_chat_message(
         },
     );
 
-    step_trace("owner registered");;
+    step_trace("owner registered");
     // 5d. PROJECT CONTEXT (desktop send-path parity). The relay used to pass
     //     empty fs_roots and no system prompt, so a project-bound phone chat
     //     had no idea where it was scoped: the model answered "you're in
@@ -843,7 +843,7 @@ step_trace("5d: wiki done");
         if sys.is_empty() { None } else { Some(sys) }
     };
 
-    step_trace("fs_roots+system built");;
+    step_trace("fs_roots+system built");
     // 5e. LOCAL GGUF: make sure the RIGHT sidecar is up before the turn.
     //     The phone can't spawn sidecars, and the persisted base_url may
     //     point at a PREVIOUS model's dead sidecar — posting there hung the
@@ -884,7 +884,7 @@ step_trace("5d: wiki done");
         base_url
     };
 
-    step_trace("local warm-up done");;
+    step_trace("local warm-up done");
     step_trace("5d context done");
     // 6. Hand off to the chat pipeline. `ChatManager::send` cancels any
     //    in-flight stream for this `chat_session_id`, then spawns a tokio

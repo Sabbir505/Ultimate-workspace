@@ -17,6 +17,7 @@
     "stage:sidecars": "node scripts/stage-sidecar.mjs relay-browser-mcp && node scripts/stage-sidecar.mjs relay-automation",
     "test": "vitest run",
     "test:selfui": "node src-tauri/src/bridge_selfui.test.mjs",
+    "test:e2e:desktop": "node e2e-desktop/run-e2e.mjs",
     "release:latest-json": "node scripts/make-latest-json.mjs",
     "tauri:build:staging": "tauri build --config src-tauri/tauri.staging.conf.json",
     "release:latest-json:staging": "node scripts/release-staging.mjs --latest-json-only",

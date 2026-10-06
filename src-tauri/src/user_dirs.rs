@@ -49,9 +49,29 @@ pub(crate) fn default_models_dir(home: &Path) -> PathBuf {
 
 // ---- app data dir (bundle identifier) migration ----
 
+/// E2E/test isolation override: when `RELAY_APP_DATA_DIR` is set, the app
+/// uses that directory verbatim as its app data dir — no legacy migration,
+/// no touch of the real profile. The E2E harness launches the real exe with
+/// this pointing at a throwaway dir so test writes (chats, settings, vault
+/// bindings) can never land in the user's data.
+fn env_override() -> Option<PathBuf> {
+    pick_env_dir(std::env::var_os("RELAY_APP_DATA_DIR"))
+}
+
+/// Pure core of [`env_override`] so the empty-string rule is unit-testable
+/// without touching process-global env state from parallel test threads.
+fn pick_env_dir(value: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    value
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+}
+
 /// App data dir for GUI call sites: whatever Tauri resolves from the bundle
 /// identifier, passed through the once-per-process migration check.
 pub fn app_data_dir(app: &tauri::AppHandle) -> PathBuf {
+    if let Some(dir) = env_override() {
+        return dir;
+    }
     use tauri::Manager;
     let new_dir = app.path().app_data_dir().unwrap_or_else(|_| {
         dirs::data_dir()
@@ -65,6 +85,9 @@ pub fn app_data_dir(app: &tauri::AppHandle) -> PathBuf {
 /// GUI warm-up before the builder exists). Must match Tauri's resolution:
 /// `<OS data dir>/<identifier>`.
 pub fn app_data_dir_default() -> PathBuf {
+    if let Some(dir) = env_override() {
+        return dir;
+    }
     let base = dirs::data_dir().unwrap_or_else(|| std::env::temp_dir());
     resolve_app_data_dir(base.join(APP_IDENTIFIER))
 }
@@ -230,6 +253,22 @@ mod tests {
         assert!(new_dir.join("conduit.db").exists());
         assert!(legacy.join("conduit.db").exists(), "copy leaves the original");
         cleanup(&base);
+    }
+
+    #[test]
+    fn env_override_honored_when_set() {
+        assert_eq!(
+            pick_env_dir(Some("D:\\sandbox\\relay-e2e".into())),
+            Some(PathBuf::from("D:\\sandbox\\relay-e2e"))
+        );
+    }
+
+    #[test]
+    fn env_override_ignores_empty_string() {
+        // The harness may export the var unset-able only as empty — treat
+        // that as "no override" so the real profile is used.
+        assert_eq!(pick_env_dir(Some("".into())), None);
+        assert_eq!(pick_env_dir(None), None);
     }
 
     fn temp_base(tag: &str) -> PathBuf {

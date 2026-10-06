@@ -50,6 +50,7 @@ npm run tauri build    # NSIS installer in src-tauri/target/release/bundle/nsis/
 npm test                          # vitest, 215 files / 1702 tests
 cd src-tauri && cargo test --lib  # 1659 passed, 0 failed, 23 ignored
 npx tsc --noEmit                  # clean (also for mobile/: npx tsc --noEmit)
+npm run test:e2e:desktop          # 48-test black-box E2E over CDP (46 pass, 2 BUG-11 skips; see e2e-desktop/README.md)
 ```
 
 ## Repository layout
@@ -58,6 +59,8 @@ npx tsc --noEmit                  # clean (also for mobile/: npx tsc --noEmit)
 src/                React + TypeScript frontend (Zustand stores, components, lib)
   lib/ipc/         Typed IPC wrappers, one module per domain (26 modules)
   state/chat/      Chat state, split into 12 Zustand slices
+e2e-desktop/        Desktop E2E suite — drives the real app over CDP
+                    (puppeteer-core + sandboxed profile; see its README)
 src-tauri/          Rust backend (Tauri v2)
   src/lib.rs        Tauri command surface (425 registered commands)
   src/db/           SQLite schema + 40 chained migration steps (60 tables, WAL mode)

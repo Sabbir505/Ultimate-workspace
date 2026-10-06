@@ -57,6 +57,10 @@ Random Stuff/
 /e2e/artifacts/
 /e2e/results.json
 /e2e/.pairing-token
+# Desktop E2E: screenshots/results are generated per run (sandboxed profile —
+# no secrets, but pure test output).
+/e2e-desktop/artifacts/
+/e2e-desktop/results.json
 # Local image-generation outputs and one-off probe dumps
 fox_uri.txt
 src-tauri/fox_uri.txt
@@ -73,6 +77,10 @@ public/pdfjs-wasm/
 # Parallel agent builds redirect CARGO_TARGET_DIR into per-agent target-agentN/
 # directories at the repo root and under src-tauri/. Build output, not source.
 target-agent*/
+# The desktop E2E suite builds into target-e2e (the default target/debug is
+# often locked by a running `tauri dev`). Build output, not source.
+src-tauri/target-e2e/
+/target-e2e/
 
 # EAS builds pack every untracked-not-ignored file in the repo; this audit
 # target dir holds a broken libreoffice symlink that kills the tarball lstat.

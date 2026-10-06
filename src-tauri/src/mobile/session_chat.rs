@@ -158,7 +158,7 @@ pub fn fetch_page(
     let limit_plus_one = (limit + 1) as i64;
     let mut stmt = db
         .prepare(
-            "SELECT id, role, content, created_at, input_tokens, output_tokens, cost_usd
+            "SELECT id, role, content, created_at, input_tokens, output_tokens, cost_usd, started_at, completed_at
          FROM chat_messages
          WHERE chat_session_id = ?1 AND (?2 IS NULL OR id < ?2)
          ORDER BY id DESC
@@ -186,8 +186,8 @@ pub fn fetch_page(
                     provider: None,
                     model_key: None,
                     pricing_estimated_usd: None,
-                    started_at: None,
-                    completed_at: None,
+                    started_at: row.get(7)?,
+                    completed_at: row.get(8)?,
                     llm_time_ms: None,
                     tool_time_ms: None,
                     ttft_ms: None,
@@ -256,6 +256,8 @@ pub fn fetch_page(
                 cost_usd: r.cost_usd,
                 tool_calls: None,
                 artifact_paths: if paths.is_empty() { None } else { Some(paths) },
+                started_at: r.started_at,
+                completed_at: r.completed_at,
             }
         })
         .collect();
@@ -494,6 +496,10 @@ fn handle_send_chat_message(
     //    mobile turn picks it up). Previously this hardcoded Anthropic +
     //    the literal key "no-key" — every turn 401'd even with a real key
     //    configured, and non-Anthropic sessions were ignored entirely.
+    let step_trace = |step: &str| {
+        crate::relay_eprintln!("[mobile-relay] SendChatMessage[{}]: {}", owner_session_id, step);
+    };
+    step_trace("enter");
     let (chat_session_id, provider_str, model, sandbox_policy, approval_policy, agent) = {
         let conn = db.lock();
         let id = resolve_chat_session(
@@ -530,6 +536,7 @@ fn handle_send_chat_message(
     // ACP agent used to fall through to the builtin provider path and hit a
     // cloud model instead of the local agent process (AgentSessionManager::
     // send dispatches `acp:<id>` ids to send_acp_turn, like the desktop).
+    step_trace("resolved session row");;
     let agent_id: Option<String> = match agent.as_deref() {
         Some(a) if a.starts_with("harness:") => {
             Some(a.strip_prefix("harness:").unwrap_or(a).to_string())
@@ -537,6 +544,7 @@ fn handle_send_chat_message(
         Some(a) if a.starts_with("acp:") => Some(a.to_string()),
         _ => None,
     };
+    step_trace("harness check done");;
     let attachments_input = to_attachment_inputs(attachments);
     if let Some(agent_id) = agent_id {
         {
@@ -607,6 +615,7 @@ fn handle_send_chat_message(
         return Ok(vec![]);
     }
 
+    step_trace("agent branch done");;
     // 2. Resolve provider + credentials exactly like the desktop
     //    send_chat_message command. local_gguf is keyless; everything else
     //    reads the real key from the keychain. An Auto-routed session
@@ -675,6 +684,7 @@ fn handle_send_chat_message(
     let (extra_text, images) = crate::chat::commands::process_attachments(&attachments_input);
     let content = format!("{text}{extra_text}");
 
+    step_trace("provider resolved");;
     // 3. Persist the user message (with attachment-derived text inlined so the
     //    history matches what the model actually saw).
     {
@@ -685,6 +695,7 @@ fn handle_send_chat_message(
             .map_err(|e| format!("failed to touch chat session: {e}"))?;
     }
 
+    step_trace("user message persisted");;
     // 4. Load the conversation history from the DB so the model sees the
     //    whole session (previously an empty Vec was passed — the model
     //    received a blank conversation every turn). Mirrors the desktop
@@ -710,6 +721,7 @@ fn handle_send_chat_message(
             .collect()
     };
 
+    step_trace("history loaded");;
     // 5. If this turn carries vision images, attach them to the final user
     //    message so the live request includes them. History rows loaded above
     //    never carry images (they're DB text only); only the live turn gets
@@ -720,6 +732,7 @@ fn handle_send_chat_message(
         }
     }
 
+    step_trace("images attached");;
     // 5b. Register chat -> phone BEFORE the stream starts: `chat_mgr.send`
     //     spawns the provider stream immediately, and the relay's forwarder
     //     needs the mapping for the very first token (a fast provider can
@@ -739,6 +752,140 @@ fn handle_send_chat_message(
         },
     );
 
+    step_trace("owner registered");;
+    // 5d. PROJECT CONTEXT (desktop send-path parity). The relay used to pass
+    //     empty fs_roots and no system prompt, so a project-bound phone chat
+    //     had no idea where it was scoped: the model answered "you're in
+    //     Relay" (the desktop process cwd) and its file tools couldn't write
+    //     into the project. Mirror the desktop composer: granted roots =
+    //     every registered project + the artifacts dir + remembered grants;
+    //     system prompt = AGENTS.md + wiki page index + the working-directory
+    //     section for the bound project (or the artifacts fallback).
+step_trace("5d: fs_roots start");
+    let fs_roots: Vec<String> = {
+        let conn = db.lock();
+        let mut roots: Vec<String> = crate::db::list_projects(&conn)
+            .map(|ps| ps.into_iter().map(|p| p.path).collect())
+            .unwrap_or_default();
+        // `artifacts_dir(app)` re-locks DbState internally — calling it with
+        // this guard held is a SELF-DEADLOCK on the non-reentrant parking_lot
+        // mutex (the phone turn parked forever at "5d: fs_roots start" and
+        // every other relay op queued behind it). Use the locked variant.
+        roots.push(
+            crate::chat::dispatch::artifacts_dir_locked(&conn, app)
+                .to_string_lossy()
+                .to_string(),
+        );
+step_trace("5d: fs_roots listed");
+        let granted: Vec<String> = crate::db::get_setting(&conn, "permissions.grantedRoots")
+            .ok()
+            .flatten()
+            .and_then(|j| serde_json::from_str(&j).unwrap_or_default())
+            .unwrap_or_default();
+        for root in granted {
+            if !roots.iter().any(|r| r.eq_ignore_ascii_case(&root)) {
+                roots.push(root);
+            }
+        }
+        roots
+    };
+    let system: Option<String> = {
+        // Project path in its own short guard (blocking fs probes must not
+        // hold the DB mutex — desktop audit C1 pattern).
+step_trace("5d: project_path start");
+        let project_path: Option<String> = {
+            let conn = db.lock();
+            crate::db::get_chat_session(&conn, &chat_session_id)
+                .ok()
+                .flatten()
+                .and_then(|s| s.project_id)
+                .and_then(|pid| crate::db::get_project(&conn, &pid).ok().flatten())
+                .map(|p| p.path)
+        };
+        let mut sys = String::new();
+step_trace("5d: project_path resolved");
+        if let Some(path) = project_path.as_deref() {
+            // AGENTS.md rides the system prompt (capped in agents_md.rs).
+step_trace("5d: agents_md start");
+            if let Some(section) = crate::agents_md::prompt_section(path) {
+                sys.push_str(&section);
+            }
+            // Wiki page index beside AGENTS.md; pages stay behind the
+            // search_wiki / read_wiki_page tools. Gated like the desktop.
+            let wiki_layer = {
+                let conn = db.lock();
+                crate::db::get_setting(&conn, "wiki.layer_index")
+                    .ok()
+                    .flatten()
+                    .map(|v| v.trim() != "false")
+                    .unwrap_or(true)
+            };
+            // canonical_project_root returns the canonical path directly.
+step_trace("5d: agents_md done");
+            let canonical = crate::wiki::canonical_project_root(path);
+            if wiki_layer {
+                let conn = db.lock();
+step_trace("5d: wiki start");
+                if let Some(section) =
+                    crate::wiki::index_prompt_section_canonical(&conn, &canonical)
+                {
+                    sys.push_str(&section);
+                }
+            }
+step_trace("5d: wiki done");
+            sys.push_str(&crate::chat::commands::send::working_directory_section(path));
+        } else {
+            // Unbound chat still operates SOMEWHERE — the artifacts fallback,
+            // already in fs_roots. Name it so the model never guesses.
+            let root = crate::chat::dispatch::artifacts_dir(app).to_string_lossy().to_string();
+            sys.push_str(&crate::chat::commands::send::working_directory_section(&root));
+        }
+        if sys.is_empty() { None } else { Some(sys) }
+    };
+
+    step_trace("fs_roots+system built");;
+    // 5e. LOCAL GGUF: make sure the RIGHT sidecar is up before the turn.
+    //     The phone can't spawn sidecars, and the persisted base_url may
+    //     point at a PREVIOUS model's dead sidecar — posting there hung the
+    //     turn forever. Mirror handle_chat_turn's warm-up: reuse the running
+    //     sidecar when it matches the model, spawn the correct one
+    //     otherwise, and use the FRESH base_url for this turn.
+    let base_url = if provider_id == crate::chat::providers::ChatProviderId::LocalGguf {
+        // NO outer db.lock() here: known_models_cached takes the DB mutex
+        // itself — nesting them self-deadlocks (parking_lot is not
+        // reentrant), freezing the handler while it holds the mutex, which
+        // blanked the whole desktop on every local-model send.
+        let model_path = crate::mobile::relay::known_models_cached(db)
+            .into_iter()
+            .find(|f| {
+                f.meta.name.as_deref() == Some(model.as_str()) || f.filename == model
+            })
+            .map(|f| f.path);
+        let Some(gguf_path) = model_path else {
+            return Err(format!(
+                "unknown local model: {model} — rescan local models on the desktop"
+            ));
+        };
+        // warm_up_local_model is async but this handler is sync (called from
+        // the relay connection loop): run it on a joined OS thread — legal
+        // block_on context, and the connection waits for the CORRECT sidecar
+        // to be ready instead of posting into a previous model's dead port.
+        let app2 = app.clone();
+        let model2 = model.clone();
+        let warmed = std::thread::spawn(move || {
+            tauri::async_runtime::block_on(crate::mobile::relay::warm_up_local_model(
+                &app2, &gguf_path, &model2,
+            ))
+        })
+        .join()
+        .map_err(|_| "local model warm-up thread panicked".to_string())??;
+        Some(warmed)
+    } else {
+        base_url
+    };
+
+    step_trace("local warm-up done");;
+    step_trace("5d context done");
     // 6. Hand off to the chat pipeline. `ChatManager::send` cancels any
     //    in-flight stream for this `chat_session_id`, then spawns a tokio
     //    task that emits the same `chat:token` / `chat:status` /
@@ -759,10 +906,10 @@ fn handle_send_chat_message(
         true,
         sandbox,
         approval,
+        fs_roots,
         Vec::new(),
         Vec::new(),
-        Vec::new(),
-        None,
+        system,
         messages,
         Arc::clone(db),
         app.clone(),
@@ -1078,6 +1225,11 @@ fn handle_get_session_meta(
     let row = db::get_chat_session(&conn, &chat_session_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "chat session row missing".to_string())?;
+    let project_name = row
+        .project_id
+        .as_deref()
+        .and_then(|pid| crate::db::get_project(&conn, pid).ok().flatten())
+        .map(|p| p.name);
     Ok(vec![DesktopMessage::SessionMeta {
         session_id: owner_session_id,
         provider: row.provider,
@@ -1086,6 +1238,7 @@ fn handle_get_session_meta(
         effort: row.effort_level,
         permission_mode: Some(row.permission_mode),
         project_id: row.project_id,
+        project_name,
     }])
 }
 

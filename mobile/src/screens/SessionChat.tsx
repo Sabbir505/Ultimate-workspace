@@ -22,7 +22,7 @@
  * with a "Go back" button.
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import {
+import { Animated,
   View,
   Text,
   FlatList,
@@ -35,8 +35,10 @@ import {
   Modal,
   ActivityIndicator,
   RefreshControl,
+  type NativeSyntheticEvent,
+  type NativeScrollEvent,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import Ionicons from '@expo/vector-icons/Ionicons';
 // M4: lucide-react-native cannot be tree-shaken by Metro (one giant JS
@@ -46,9 +48,12 @@ const ArrowLeft = ({ size, color }: { size?: number; color?: string }) => <Ionic
 const ChevronDown = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="chevron-down" size={size} color={color} />;
 import { theme as themeMod } from '../theme';
 import { useScreenMountTiming } from '../lib/screenTiming';
+import { tapLight } from '../lib/haptics';
 // Shared token abbreviation (12480 → "12.5k") — same formatter the cost
 // dashboard uses.
-import { formatTokens as tokens } from '../lib/format';
+import { formatTokens as tokens , formatDuration } from '../lib/format';
+import { screenCacheGet, screenCacheSet } from '../lib/screenCache';
+import { onProjectList, type ProjectInfo } from '../hooks/useRelay';
 import { useRelay, onConnectorList, onSessionConnectors, onSessionConnectorsSet, type ConnectorInfo, type SessionArtifact, type SessionChatAttachment, type SessionMessageRecord, onAcpAgentList, type AcpAgentInfo} from '../hooks/useRelay';
 import { useSessionChat } from '../hooks/useSessionChat';
 import MessageBubble from '../components/chat/MessageBubble';
@@ -61,33 +66,49 @@ import ModelSheet from '../components/chat/ModelSheet';
 import ActionSheet, { type ActionSheetItem } from '../components/chat/ActionSheet';
 import ArtifactSheet, { extOf } from '../components/chat/ArtifactSheet';
 import DiffSheet from '../components/chat/DiffSheet';
+import ChatGitSheet from '../components/chat/ChatGitSheet';
+import { useDrawerActions } from '../components/AppDrawer';
 import * as Clipboard from 'expo-clipboard';
 
 export default function SessionChat() {
   useScreenMountTiming('SessionChat');
   const navigation = useNavigation<any>();
+  const { open: openSidebar } = useDrawerActions();
   const route = useRoute<any>();
-  const session = route.params?.session as { id: string; title?: string } | undefined;
+  const session = route.params?.session as { id: string; title?: string; projectName?: string } | undefined;
   const sessionId: string | null = (route.params?.sessionId as string | undefined) ?? session?.id ?? null;
 
   const c = themeMod.colors;
   const { providers, harnesses, connected, transcribeAudio, startLocalModel, listConnectors, getSessionConnectors, setSessionConnectors, listAcpAgents } = useRelay();
   const chat = useSessionChat(sessionId);
+  const insets = useSafeAreaInsets();
 
   const [modelSheetOpen, setModelSheetOpen] = useState(false);
   // ACP agents for the picker's Agents · ACP rail (desktop parity).
   const [acpAgents, setAcpAgents] = useState<AcpAgentInfo[]>([]);
+  // Listener wiring is mount-scoped: the callbacks are stable module consts,
+  // but under a render loop the effect could re-run per pass and fire a relay
+  // query each time (measured ~60 ListAcpAgents/ListConnectors/
+  // GetSessionConnectors per second — the storm that starved the desktop's DB
+  // mutex). Ref-guards keep the fetch to once per (connected) / (session).
+  const fetchedAcpFor = React.useRef<boolean | null>(null);
   React.useEffect(() => {
-    if (!connected) return;
+    if (!connected) { fetchedAcpFor.current = null; return; }
+    if (fetchedAcpFor.current === true) return;
+    fetchedAcpFor.current = true;
     listAcpAgents();
     const off = onAcpAgentList.on(({ agents }) => setAcpAgents(agents));
-    return off;
+    return () => { fetchedAcpFor.current = null; off(); };
   }, [connected, listAcpAgents]);
   // Composer @-menu state for THIS session.
   const [connectorList, setConnectorList] = useState<ConnectorInfo[]>([]);
   const [attachedConnectors, setAttachedConnectors] = useState<string[]>([]);
+  const fetchedConnectorsFor = React.useRef<string | null>(null);
   React.useEffect(() => {
     if (!connected || !sessionId) return;
+    const key = `${sessionId}`;
+    if (fetchedConnectorsFor.current === key) return;
+    fetchedConnectorsFor.current = key;
     listConnectors();
     getSessionConnectors(sessionId);
     const offList = onConnectorList.on(({ connectors }) => setConnectorList(connectors));
@@ -97,7 +118,7 @@ export default function SessionChat() {
     const offSet = onSessionConnectorsSet.on(({ sessionId: sid, connectorIds }) => {
       if (sid === sessionId) setAttachedConnectors(connectorIds);
     });
-    return () => { offList(); offGet(); offSet(); };
+    return () => { fetchedConnectorsFor.current = null; offList(); offGet(); offSet(); };
   }, [connected, sessionId, listConnectors, getSessionConnectors]);
   const toggleConnector = React.useCallback((id: string) => {
     if (!sessionId) return;
@@ -121,10 +142,31 @@ export default function SessionChat() {
   const lastAutoScrollRef = useRef(0);
 
   const title = chat.meta?.title ?? session?.title ?? 'Chat';
+  // Folder chip (desktop parity): the bound project's name, resolved from the
+  // cached project list (kept fresh by the connect prefetch + drawer).
+  const [projects, setProjects] = useState<ProjectInfo[]>(() =>
+    screenCacheGet<ProjectInfo[]>('projects.list') ?? [],
+  );
+  useEffect(() => onProjectList.on(({ projects: list }) => {
+    screenCacheSet('projects.list', list);
+    setProjects(list);
+  }), []);
+  // Instant-then-correct: meta.projectName arrives with GetSessionMeta
+  // (desktop resolves it), the route param carries it from the drawer, and
+  // the cached project list is the last fallback.
+  const projectName =
+    chat.meta?.projectName ??
+    session?.projectName ??
+    (chat.meta?.projectId
+      ? projects.find((p) => p.id === chat.meta?.projectId)?.name ?? null
+      : null);
 
   // Diff peek (desktop DiffCard/PeekPanel parity): a file-edit activity row
   // opens the git diff for that path against the session's bound project.
   const [diffPath, setDiffPath] = useState<string | null>(null);
+  // Chat-scoped git tool sheet (desktop GitToolsSidebar parity) — only for
+  // project-bound chats; there is nothing git-shaped to show otherwise.
+  const [gitSheetOpen, setGitSheetOpen] = useState(false);
   const handlePeekDiff = useCallback((path: string) => {
     if (!chat.meta?.projectId) return;
     setDiffPath(path);
@@ -152,8 +194,52 @@ export default function SessionChat() {
   // Auto-scroll to the newest content (normal top-down list → the end).
   // Throttled to one scroll per 100 ms so streaming tokens don't fight the
   // layout engine for the whole turn (PERFORMANCE_AUDIT.md M5).
+  // Live turn timer (desktop "Working for Xs" parity): stamp when the turn
+  // starts, tick once a second while streaming.
+  const [streamStartedAt, setStreamStartedAt] = useState<number | null>(null);
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  useEffect(() => {
+    if (chat.streaming) {
+      setStreamStartedAt((prev) => prev ?? Date.now());
+      const t = setInterval(() => setNowTick(Date.now()), 1000);
+      return () => clearInterval(t);
+    }
+    setStreamStartedAt(null);
+  }, [chat.streaming]);
+
+  // Scroll-to-bottom (desktop parity): track whether the user is at the
+  // newest content. Away from the bottom, the auto-scroll stands down (it
+  // must not yank the reader) and a floating button offers the jump back.
+  const [atBottom, setAtBottom] = useState(true);
+  const atBottomRef = useRef(true);
+  const scrollBtnOpacity = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    Animated.timing(scrollBtnOpacity, {
+      toValue: atBottom ? 0 : 1,
+      duration: 150,
+      useNativeDriver: true,
+    }).start();
+  }, [atBottom, scrollBtnOpacity]);
+  const handleListScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const { layoutMeasurement, contentOffset, contentSize } = e.nativeEvent;
+    const nearBottom =
+      layoutMeasurement.height + contentOffset.y >= contentSize.height - 140;
+    if (nearBottom !== atBottomRef.current) {
+      atBottomRef.current = nearBottom;
+      setAtBottom(nearBottom);
+    }
+  }, []);
+  const scrollToLatest = useCallback(() => {
+    tapLight();
+    atBottomRef.current = true;
+    setAtBottom(true);
+    requestAnimationFrame(() => listRef.current?.scrollToOffset({ offset: 100000, animated: true }));
+  }, []);
   useEffect(() => {
     if (chat.messages.length === 0 && chat.streamingContent.length === 0) return;
+    // The user scrolled up to read — do not yank them to the bottom on every
+    // token; the floating button offers the jump instead.
+    if (!atBottomRef.current) return;
     const scroll = () => {
       lastAutoScrollRef.current = Date.now();
       requestAnimationFrame(() => listRef.current?.scrollToOffset({ offset: 100000, animated: true }));
@@ -211,6 +297,11 @@ export default function SessionChat() {
       ) : null}
       {chat.streaming ? (
         <View style={styles.streamTail}>
+          {/* Live turn timer (desktop "Working for Xs" parity) — ticks once a
+              second from when the turn started. */}
+          <Text style={[styles.workingLabel, { color: c.textSecondary }]}>
+            Working for {formatDuration(Math.max(1, Math.floor((nowTick - (streamStartedAt ?? nowTick)) / 1000)))}
+          </Text>
           <MessageBubble
             role="assistant"
             content={chat.streamingContent}
@@ -220,7 +311,7 @@ export default function SessionChat() {
         </View>
       ) : null}
     </View>
-  ), [chat.loading, chat.hasMore, chat.messages.length, chat.streaming, chat.streamingContent, handlePeekDiff, c.textSecondary, c.surface2, c.border]);
+  ), [chat.loading, chat.hasMore, chat.messages.length, chat.streaming, chat.streamingContent, streamStartedAt, nowTick, handlePeekDiff, c.textSecondary, c.surface2, c.border]);
 
   const listEmpty = useMemo(() => (
     !chat.loading && !chat.streaming ? (
@@ -275,14 +366,28 @@ export default function SessionChat() {
   );
 
   const renderItem = useCallback(({ item }: { item: SessionMessageRecord }) => {
-    const paths = item.artifact_paths ?? [];
+    const paths = item.artifactPaths ?? [];
+    // Turn duration (desktop turn-rail parity): process turns show it INSIDE
+    // the collapsed "Worked for Xs" fold header; pure-text turns keep the
+    // plain caption below the bubble.
+    const workedForSec =
+      item.role === 'assistant' && item.startedAt != null && item.completedAt != null
+        ? Math.max(1, Math.floor(item.completedAt - item.startedAt))
+        : null;
+    const hasProcess = /<(think|tool)>/.test(item.content);
     const bubble = (
       <MessageBubble
         role={item.role as 'user' | 'assistant' | 'system'}
         content={item.content}
         onPeekDiff={handlePeekDiff}
+        liveImages={item.id < 0 ? item.localAttachments : undefined}
+        workedForSec={workedForSec}
       />
     );
+    const worked =
+      item.role === 'assistant' && !hasProcess && workedForSec != null
+        ? formatDuration(workedForSec)
+        : null;
     return (
       <TouchableOpacity
         activeOpacity={1}
@@ -294,6 +399,11 @@ export default function SessionChat() {
         accessibilityLabel={`Message options: ${item.content.slice(0, 40)}`}
       >
         {bubble}
+        {worked ? (
+          <Text style={[styles.workedLabel, { color: c.textSecondary }]}>
+            Worked for {worked}
+          </Text>
+        ) : null}
         {paths.length > 0 ? (
           <View style={styles.artifactChips}>
             {paths.map((p) => {
@@ -482,13 +592,15 @@ export default function SessionChat() {
       >
         {/* Header */}
         <View style={[styles.header, { backgroundColor: c.background, borderBottomColor: c.border }]}>
+          {/* Sidebar (desktop parity: the left rail is always reachable).
+              Android back still pops the screen natively. */}
           <TouchableOpacity
-            onPress={() => navigation.goBack()}
+            onPress={() => { tapLight(); openSidebar(); }}
             style={styles.headerBtn}
             hitSlop={{ top: 10, left: 10, right: 10, bottom: 10 }}
-            accessibilityLabel="Back"
+            accessibilityLabel="Open sidebar"
           >
-            <ArrowLeft size={22} color={c.text} />
+            <Ionicons name="menu" size={22} color={c.text} />
           </TouchableOpacity>
 
           <TouchableOpacity
@@ -501,6 +613,14 @@ export default function SessionChat() {
             <Text style={[styles.headerTitle, { color: c.text }]} numberOfLines={1}>
               {title}
             </Text>
+            {projectName ? (
+              <View style={styles.projectChip}>
+                <Ionicons name="folder" size={10} color={c.accent} />
+                <Text numberOfLines={1} style={[styles.projectChipText, { color: c.textSecondary }]}>
+                  {projectName}
+                </Text>
+              </View>
+            ) : null}
           </TouchableOpacity>
 
           {/* Model chip → ModelSheet */}
@@ -517,6 +637,18 @@ export default function SessionChat() {
             </Text>
             <ChevronDown size={13} color={c.textSecondary} />
           </TouchableOpacity>
+
+          {/* Git tool sheet — only when the chat is bound to a project. */}
+          {chat.meta?.projectId ? (
+            <TouchableOpacity
+              style={styles.headerBtn}
+              onPress={() => { tapLight(); setGitSheetOpen(true); }}
+              hitSlop={{ top: 10, left: 10, right: 10, bottom: 10 }}
+              accessibilityLabel="Git tools for this project"
+            >
+              <Ionicons name="git-branch-outline" size={19} color={c.text} />
+            </TouchableOpacity>
+          ) : null}
 
           {/* Terminal (desktop pane parity) + Undo (turn checkpoints) + chat
               overflow menu. The terminal mirrors the session's live pane. */}
@@ -563,6 +695,8 @@ export default function SessionChat() {
           ListFooterComponent={listFooter}
           ListEmptyComponent={listEmpty}
           renderItem={renderItem}
+          onScroll={handleListScroll}
+          scrollEventThrottle={100}
           refreshControl={
             <RefreshControl
               refreshing={chat.loading && chat.messages.length > 0}
@@ -572,6 +706,21 @@ export default function SessionChat() {
             />
           }
         />
+
+        {/* Scroll-to-latest (desktop parity) — fades in once the user is
+            away from the bottom, vanishes when they get there. */}
+        <Animated.View
+          pointerEvents={atBottom ? 'none' : 'auto'}
+          style={[styles.scrollDownBtn, { opacity: scrollBtnOpacity, backgroundColor: c.surface2, borderColor: c.border }]}
+        >
+          <TouchableOpacity
+            onPress={scrollToLatest}
+            accessibilityRole="button"
+            accessibilityLabel="Scroll to latest message"
+          >
+            <Ionicons name="chevron-down" size={20} color={c.text} />
+          </TouchableOpacity>
+        </Animated.View>
 
         {/* Pending approvals — between the list and the composer. */}
         {chat.pendingApprovals.map((a) => (
@@ -683,15 +832,20 @@ export default function SessionChat() {
           />
         ) : null}
 
-        <ChatComposer
-          connectors={{ list: connectorList, attached: attachedConnectors, onToggle: toggleConnector }}
-          onSend={handleSend}
-          onTranscribe={transcribeAudio}
-          onCancel={chat.cancel}
-          streaming={chat.streaming}
-          disabled={!connected}
-          placeholder={connected ? 'Message' : 'Not connected to desktop'}
-        />
+        {/* Bottom clearance: the SafeAreaView above only claims the TOP edge,
+            so the composer sat against the gesture bar (measured 26px to the
+            screen edge). Reserve the real inset plus breathing room. */}
+        <View style={{ paddingBottom: Math.max(insets.bottom, 12) + 14 }}>
+          <ChatComposer
+            connectors={{ list: connectorList, attached: attachedConnectors, onToggle: toggleConnector }}
+            onSend={handleSend}
+            onTranscribe={transcribeAudio}
+            onCancel={chat.cancel}
+            streaming={chat.streaming}
+            disabled={!connected}
+            placeholder={connected ? 'Message' : 'Not connected to desktop'}
+          />
+        </View>
 
         {/* Rename modal (long-press the header title). */}
         <Modal
@@ -778,6 +932,16 @@ export default function SessionChat() {
           path={diffPath}
           projectId={chat.meta?.projectId ?? null}
           onClose={() => setDiffPath(null)}
+        />
+
+        {/* Chat git tool sheet — status / changes / commit / push / branches /
+            log for the bound project; changed files open the DiffSheet. */}
+        <ChatGitSheet
+          visible={gitSheetOpen}
+          projectId={chat.meta?.projectId ?? null}
+          projectName={projectName}
+          onPeekFile={(path) => setDiffPath(path)}
+          onClose={() => setGitSheetOpen(false)}
         />
 
         {/* Edit & resend (edit-to-fork). */}
@@ -948,6 +1112,26 @@ const styles = StyleSheet.create({
     letterSpacing: 0.4,
     paddingBottom: 2,
   },
+  projectChip: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    alignSelf: 'center', marginTop: 2, maxWidth: '100%',
+  },
+  projectChipText: { fontSize: 10 },
+  scrollDownBtn: {
+    position: 'absolute',
+    right: 16,
+    bottom: 110,
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    elevation: 4,
+    zIndex: 20,
+  },
+  workingLabel: { fontSize: 11, marginBottom: 4, paddingLeft: 2 },
+  workedLabel: { fontSize: 11, marginTop: 4, paddingLeft: 2 },
   streamTail: { paddingTop: 6 },
     errorBanner: {
     flexDirection: 'row',

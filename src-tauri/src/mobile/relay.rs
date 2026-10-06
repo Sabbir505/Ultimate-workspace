@@ -970,6 +970,10 @@ async fn handle_connection(
         let req: MobileMessage = match serde_json::from_str(&text) {
             Ok(r) => r,
             Err(e) => {
+                crate::relay_eprintln!(
+                    "[mobile-relay] malformed request (deserialization failed): {e} — {}",
+                    &text[..text.len().min(160)]
+                );
                 let err = DesktopMessage::ChatError {
                     chat_session_id: "unknown".to_string(),
                     error: format!("malformed request: {e}"),
@@ -978,6 +982,20 @@ async fn handle_connection(
                 continue;
             }
         };
+        // Frame trace (poll noise skipped): every phone op is visible in the
+        // relay log, so "the phone did/didn't send X" stops being a guess.
+        if !matches!(
+            req,
+            MobileMessage::ListSessions
+                | MobileMessage::GetCostSummary
+                | MobileMessage::ListAvailableProviders
+        ) {
+            let t = serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(|s| s.to_string()))
+                .unwrap_or_else(|| "unknown".into());
+            crate::relay_eprintln!("[mobile-relay] <- {t}");
+        }
 
         // A phone that sends another Pair frame after pairing is a protocol
         // violation; reject it. (We do not kill the connection — the next
@@ -1039,8 +1057,21 @@ async fn handle_connection(
                 };
                 match rows {
                     Ok(rows) => {
+                        // The phone may only PREVIEW files under these roots
+                        // (the same containment gate as ReadArtifactPreview).
+                        // Listing entries the preview arm refuses gave the
+                        // user library tiles that error on tap ("artifact
+                        // path is outside the artifacts directory") — the
+                        // listing offers exactly what it can open.
+                        let artifacts_root = crate::chat::dispatch::artifacts_dir(&app);
+                        let generated_root = crate::user_dirs::app_data_dir(&app).join("generated-images");
+                        let granted = [
+                            artifacts_root.to_string_lossy().to_string(),
+                            generated_root.to_string_lossy().to_string(),
+                        ];
                         let artifacts = rows
                             .into_iter()
+                            .filter(|r| crate::chat::permission::path_within_scope(&r.path, &granted))
                             .map(|r| super::protocol::ArtifactLibraryEntry {
                                 chat_session_id: r.chat_session_id,
                                 filename: r.filename,
@@ -1177,10 +1208,17 @@ async fn handle_connection(
             MobileMessage::ReadArtifactPreview { path } => {
                 // Same containment gate as the full read — a preview op that
                 // skipped it would be an arbitrary-file-read primitive.
+                // chat-uploads is included so the phone can render thumbnails
+                // for attached images (their persisted content markers carry
+                // a path under this dir).
                 let granted = [
                     crate::chat::dispatch::artifacts_dir(&app).to_string_lossy().to_string(),
                     crate::user_dirs::app_data_dir(&app)
                         .join("generated-images")
+                        .to_string_lossy()
+                        .to_string(),
+                    crate::user_dirs::app_data_dir(&app)
+                        .join("chat-uploads")
                         .to_string_lossy()
                         .to_string(),
                 ];
@@ -1223,6 +1261,228 @@ async fn handle_connection(
                         }
                     }
                 }
+            }
+            MobileMessage::GetVaultState => {
+                let bound_root = crate::vault::current_root(&app).ok();
+                let stats = bound_root.as_ref().and_then(|_| {
+                    let conn = db.lock();
+                    crate::vault::stats_dto(&conn).ok()
+                });
+                let resp = DesktopMessage::VaultState {
+                    bound: bound_root.is_some(),
+                    root: bound_root.map(|r| r.to_string_lossy().to_string()),
+                    notes: stats.as_ref().map(|st| st.notes),
+                    files: stats.as_ref().map(|st| st.files),
+                };
+                let _ = send_msg(&write, &resp).await;
+            }
+            MobileMessage::GetVaultTree => match crate::vault::current_root(&app) {
+                Ok(root) => {
+                    // Blocking fs walk — must leave the relay runtime (4
+                    // workers shared by every connection) or a big vault
+                    // starves handshakes for everyone.
+                    let nodes = tokio::task::spawn_blocking(move || crate::vault::tree_core(&root))
+                        .await
+                        .unwrap_or_default();
+                    let _ = send_msg(&write, &DesktopMessage::VaultTree { nodes }).await;
+                }
+                Err(e) => {
+                    let _ = send_msg(
+                        &write,
+                        &DesktopMessage::VaultAck {
+                            op: "tree".into(),
+                            ok: false,
+                            message: Some(e),
+                        },
+                    )
+                    .await;
+                }
+            },
+            MobileMessage::ReadVaultNote { path } => match crate::vault::current_root(&app) {
+                Ok(root) => {
+                    match crate::vault::read_note_core(&db, &root, &path) {
+                        Ok(content) => {
+                            let _ = send_msg(
+                                &write,
+                                &DesktopMessage::VaultNoteContent { path, content },
+                            )
+                            .await;
+                        }
+                        Err(e) => {
+                            let _ = send_msg(
+                                &write,
+                                &DesktopMessage::VaultAck {
+                                    op: "read".into(),
+                                    ok: false,
+                                    message: Some(e),
+                                },
+                            )
+                            .await;
+                        }
+                    }
+                }
+                Err(e) => {
+                    let _ = send_msg(
+                        &write,
+                        &DesktopMessage::VaultAck {
+                            op: "read".into(),
+                            ok: false,
+                            message: Some(e),
+                        },
+                    )
+                    .await;
+                }
+            },
+            MobileMessage::CreateVaultNote { path, content } => {
+                op_vault_note(&app, &db, &write, "create", &path, || {
+                    let root = crate::vault::current_root(&app)?;
+                    crate::vault::create_note_core(&db, &root, &path, &content)
+                })
+                .await;
+            }
+            MobileMessage::WriteVaultNote { path, content } => {
+                op_vault_note(&app, &db, &write, "write", &path, || {
+                    let root = crate::vault::current_root(&app)?;
+                    crate::vault::write_note_core(&db, &root, &path, &content)
+                })
+                .await;
+            }
+            MobileMessage::DeleteVaultNote { path } => {
+                op_vault_note(&app, &db, &write, "delete", &path, || {
+                    let root = crate::vault::current_root(&app)?;
+                    crate::vault::delete_note_core(&db, &root, &path)
+                })
+                .await;
+            }
+            MobileMessage::ReadVaultFile { path } => match crate::vault::current_root(&app) {
+                Ok(root) => {
+                    // 3-30MB read + base64 encode — spawn_blocking, same reason
+                    // as the tree walk.
+                    let path2 = path.clone();
+                    let read = tokio::task::spawn_blocking(move || {
+                        crate::vault::read_binary_core(&root, &path2)
+                    })
+                    .await;
+                    match read.unwrap_or_else(|e| Err(format!("read task failed: {e}"))) {
+                        Ok((mime, data_base64)) => {
+                            let _ = send_msg(
+                                &write,
+                                &DesktopMessage::VaultFileContent { path, mime, data_base64 },
+                            )
+                            .await;
+                        }
+                        Err(e) => {
+                            let _ = send_msg(
+                                &write,
+                                &DesktopMessage::VaultAck {
+                                    op: "read-file".into(),
+                                    ok: false,
+                                    message: Some(e),
+                                },
+                            )
+                            .await;
+                        }
+                    }
+                }
+                Err(e) => {
+                    let _ = send_msg(
+                        &write,
+                        &DesktopMessage::VaultAck {
+                            op: "read-file".into(),
+                            ok: false,
+                            message: Some(e),
+                        },
+                    )
+                    .await;
+                }
+            },
+            MobileMessage::GetWikiList => {
+                let projects = {
+                    let conn = db.lock();
+                    crate::db::wiki_list_project_summaries(&conn).unwrap_or_default()
+                };
+                let _ = send_msg(&write, &DesktopMessage::WikiList { projects }).await;
+            }
+            MobileMessage::GetWiki { path } => {
+                let resp = match crate::wiki::canonical_root_str(&path) {
+                    Ok(canonical) => {
+                        let registry = app
+                            .state::<std::sync::Arc<crate::wiki::WikiJobRegistry>>()
+                            .inner()
+                            .clone();
+                        let db_state = crate::DbState(Arc::clone(&db));
+                        match crate::wiki::commands::status_for(&db_state, &registry, &canonical)
+                        {
+                            Ok(status) => DesktopMessage::WikiDetail { status },
+                            Err(e) => DesktopMessage::WikiAck {
+                                op: "status".into(),
+                                ok: false,
+                                message: Some(e),
+                            },
+                        }
+                    }
+                    Err(e) => DesktopMessage::WikiAck {
+                        op: "status".into(),
+                        ok: false,
+                        message: Some(e),
+                    },
+                };
+                let _ = send_msg(&write, &resp).await;
+            }
+            MobileMessage::ReadWikiPage { path, slug } => {
+                let resp = match crate::wiki::canonical_root_str(&path) {
+                    Ok(canonical) => {
+                        let conn = db.lock();
+                        let page = crate::db::wiki_get_project_by_path(&conn, &canonical)
+                            .ok()
+                            .flatten()
+                            .and_then(|project| {
+                                crate::db::wiki_get_page_full(&conn, &project.id, &slug)
+                                    .ok()
+                                    .flatten()
+                            });
+                        DesktopMessage::WikiPage { page }
+                    }
+                    Err(e) => DesktopMessage::WikiAck {
+                        op: "page".into(),
+                        ok: false,
+                        message: Some(e),
+                    },
+                };
+                let _ = send_msg(&write, &resp).await;
+            }
+            MobileMessage::UpdateWiki { path } => {
+                wiki_job_spawn(&app, &db, &write, "update", &path, false).await;
+            }
+            MobileMessage::RebuildWiki { path } => {
+                wiki_job_spawn(&app, &db, &write, "rebuild", &path, true).await;
+            }
+            MobileMessage::CancelWikiJob { path } => {
+                let mut delivered = false;
+                if let Ok(canonical) = crate::wiki::canonical_root_str(&path) {
+                    if let Some(registry) =
+                        app.try_state::<std::sync::Arc<crate::wiki::WikiJobRegistry>>()
+                    {
+                        let active = registry.active.lock();
+                        if let Some(slot) = active.get(&canonical) {
+                            slot.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                            delivered = true;
+                        }
+                    }
+                }
+                let _ = send_msg(
+                    &write,
+                    &DesktopMessage::WikiAck {
+                        op: "cancel".into(),
+                        ok: delivered,
+                        message: if delivered {
+                            None
+                        } else {
+                            Some("no running wiki job".into())
+                        },
+                    },
+                )
+                .await;
             }
             MobileMessage::ListConnectors => {
                 let app2 = app.clone();
@@ -2902,6 +3162,108 @@ pub(super) async fn handle_chat_turn(
     Ok(())
 }
 
+/// Run one vault note mutation (create/write/delete) and answer with a
+/// `VaultAck`. The core functions reindex the vault search store, so the
+/// vault's own DB handle is used, not the relay's.
+async fn op_vault_note<F>(
+    app: &AppHandle,
+    _db: &Arc<Mutex<Connection>>,
+    write: &super::relay_ws::SharedWsWrite,
+    op: &str,
+    path: &str,
+    f: F,
+) where
+    F: FnOnce() -> Result<String, String>,
+{
+    let resp = match crate::vault::current_root(app) {
+        Ok(_root) => match f() {
+            Ok(rel) => DesktopMessage::VaultAck {
+                op: op.to_string(),
+                ok: true,
+                message: Some(rel),
+            },
+            Err(e) => DesktopMessage::VaultAck {
+                op: op.to_string(),
+                ok: false,
+                message: Some(e),
+            },
+        },
+        Err(e) => DesktopMessage::VaultAck {
+            op: op.to_string(),
+            ok: false,
+            message: Some(e),
+        },
+    };
+    let _ = send_msg(write, &resp).await;
+}
+
+/// Spawn a wiki job (freshness `update` or full `rebuild`) the way the
+/// desktop's own Wiki panel does, then ack. The phone follows up with
+/// `GetWiki` polls — `job_running` flips false when the job ends.
+async fn wiki_job_spawn(
+    app: &AppHandle,
+    db: &Arc<Mutex<Connection>>,
+    write: &super::relay_ws::SharedWsWrite,
+    op: &str,
+    path: &str,
+    rebuild: bool,
+) {
+    let ack = |ok: bool, message: Option<String>| DesktopMessage::WikiAck {
+        op: op.to_string(),
+        ok,
+        message,
+    };
+    let canonical = match crate::wiki::canonical_root_str(path) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = send_msg(write, &ack(false, Some(e))).await;
+            return;
+        }
+    };
+    if rebuild {
+        // Same synchronous guards the desktop's Build button applies. The
+        // guard must drop before the await (parking_lot guards are !Send).
+        let model_check: Result<(), String> = {
+            let conn = db.lock();
+            crate::wiki::resolve_build_model(&conn).map(|_| ())
+        };
+        if let Err(e) = model_check {
+            let _ = send_msg(write, &ack(false, Some(e))).await;
+            return;
+        }
+        let registry = app
+            .state::<std::sync::Arc<crate::wiki::WikiJobRegistry>>()
+            .inner()
+            .clone();
+        if registry.active.lock().contains_key(&canonical) {
+            let _ = send_msg(
+                write,
+                &ack(false, Some("a wiki build or update is already running for this project".into())),
+            )
+            .await;
+            return;
+        }
+        let app2 = app.clone();
+        let root = std::path::PathBuf::from(&canonical);
+        tauri::async_runtime::spawn(async move {
+            if let Err(e) = crate::wiki::run_build(&app2, &root).await {
+                if e != "cancelled" {
+                    crate::relay_eprintln!("[wiki] build failed: {e}");
+                }
+            }
+        });
+        let _ = send_msg(write, &ack(true, None)).await;
+    } else {
+        // Freshness pass — usually fast, but still off the connection loop.
+        let app2 = app.clone();
+        let root = std::path::PathBuf::from(&canonical);
+        tauri::async_runtime::spawn(async move {
+            let _ = crate::wiki::run_update(&app2, &root).await;
+        });
+        let _ = send_msg(write, &ack(true, None)).await;
+    }
+}
+
 async fn send_done(
     write: &super::relay_ws::SharedWsWrite,
     sid: &str,
@@ -3553,7 +3915,7 @@ pub(crate) fn is_known_model_path(db: &Arc<Mutex<Connection>>, path: &str) -> bo
 /// runs inside the async relay handler per frame and used to full-walk every
 /// configured model dir on EVERY call. Cache the combined scan for 60s,
 /// keyed by the folder list so a settings change invalidates immediately.
-fn known_models_cached(db: &Arc<Mutex<Connection>>) -> Vec<crate::chat::local_models::GgufFile> {
+pub(crate) fn known_models_cached(db: &Arc<Mutex<Connection>>) -> Vec<crate::chat::local_models::GgufFile> {
     static CACHE: std::sync::OnceLock<
         Mutex<Option<(std::time::Instant, String, Vec<crate::chat::local_models::GgufFile>)>>,
     > = std::sync::OnceLock::new();
@@ -3624,6 +3986,7 @@ pub async fn warm_up_local_model(
             .ok()
             .flatten()
     };
+    crate::relay_eprintln!("[local] spawning sidecar…");
     let result = local_state
         .start(
             model_name.to_string(),
@@ -3633,7 +3996,11 @@ pub async fn warm_up_local_model(
             user_llama_path,
         )
         .await
-        .map_err(|e| format!("failed to start local model: {e}"))?;
+        .map_err(|e| {
+            crate::relay_eprintln!("[local] sidecar start FAILED: {e}");
+            format!("failed to start local model: {e}")
+        })?;
+    crate::relay_eprintln!("[local] sidecar ready at {}", result.base_url);
     {
         let conn = app.state::<crate::DbState>().inner().0.lock();
         crate::chat::local_models::save_last_good_ngl(&conn, &result.model_id, result.n_gpu_layers);

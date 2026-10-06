@@ -36,6 +36,7 @@ const nextOptimisticId = () => --optimisticIdCounter;
  * after a desktop restart.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { screenCacheGet, screenCacheSet } from '../lib/screenCache';
 import {
   onSessionChatDone,
   onSessionChatError,
@@ -97,6 +98,8 @@ export interface SessionMetaInfo {
   permissionMode?: string | null;
   /** The chat's bound project — keys the diff peek on file-edit rows. */
   projectId?: string | null;
+  /** Resolved display name (desktop meta) — instant header chip. */
+  projectName?: string | null;
 }
 
 /** Filesystem mutators the desktop approval-rules engine can auto-allow. */
@@ -186,6 +189,19 @@ export function useSessionChat(sessionId: string | null) {
   // A turn is in flight from the moment we SEND (not from its first token) —
   // otherwise a fast double-send started two concurrent desktop turns.
   const turnInFlight = useRef(false);
+  // Watchdog state: was ANY token received for the current turn?
+  const tokenReceived = useRef(false);
+  const turnWatchdog = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Slow-model retry loop (desktop fail-over parity): instead of erroring at
+  // the first timeout, re-send the SAME turn up to 10 times with backoff.
+  // Local sidecars (and busy providers) legitimately take minutes to start
+  // streaming — a hard 75s cut killed exactly those.
+  const retryAttempt = useRef(0);
+  const lastTurnRef = useRef<{ text: string; attachments: SessionChatAttachment[] } | null>(null);
+  // Turn timing for the "Worked for Xs" fold chip (unix seconds). Stamped at
+  // dispatch and at Done; fetched turns get theirs from the wire timestamps.
+  const turnStartedAt = useRef<number | null>(null);
+  const dispatchRef = useRef<((text: string, attachments: SessionChatAttachment[], isRetry?: boolean) => boolean) | null>(null);
   // Set by cancel(): the relay still broadcasts the cancelled turn's
   // Done/Error ack after our optimistic teardown. Without this, the stale
   // ack promoted the STEERED turn's partial tokens into a finalized bubble
@@ -279,6 +295,9 @@ export function useSessionChat(sessionId: string | null) {
   useEffect(() => {
     const offMessages = onSessionMessages.on(({ sessionId: sid, messages, hasMore, append }) => {
       if (sid !== currentSessionId.current) return;
+      // Persist the first page per chat: an offline reopen paints the cached
+      // conversation instead of a blank screen (stale-while-revalidate).
+      if (!append) screenCacheSet(`chat:${sid}`, messages);
       setState((s) => {
         // The CALLER says which this is: a pagination reply prepends, a
         // first-page reply replaces. Guessing from ids broke deletion — a
@@ -332,6 +351,11 @@ export function useSessionChat(sessionId: string | null) {
       }));
     });
     const offToken = onSessionChatToken.on(({ sessionId: sid, token }) => {
+      if (!tokenReceived.current) {
+        // First token of this attempt — the retry banner is stale now.
+        setState((x) => (x.status && x.status.startsWith('Model is slow') ? { ...x, status: null } : x));
+      }
+      tokenReceived.current = true;
       if (sid !== currentSessionId.current) return;
       tokenBuf.current += token;
       if (!streamActive.current) {
@@ -376,14 +400,17 @@ export function useSessionChat(sessionId: string | null) {
           };
         }
         // Promote the streaming buffer to a real assistant message.
+        const nowSec = Math.floor(Date.now() / 1000);
         const finalized: SessionMessageRecord = {
           id: nextOptimisticId(), // Negative = ephemeral, never sent to the desktop.
           role: 'assistant',
           content: s.streamingContent,
-          created_at: Math.floor(Date.now() / 1000),
-          input_tokens: usage?.input_tokens,
-          output_tokens: usage?.output_tokens,
-          cost_usd: usage?.cost_usd,
+          createdAt: nowSec,
+          startedAt: turnStartedAt.current ?? undefined,
+          completedAt: nowSec,
+          inputTokens: usage?.input_tokens,
+          outputTokens: usage?.output_tokens,
+          costUsd: usage?.cost_usd,
         };
         return {
           ...s,
@@ -463,9 +490,9 @@ export function useSessionChat(sessionId: string | null) {
       // permission mode until the next SessionMeta round-trip.
       setState((s) => ({ ...s, meta: { ...s.meta, provider: providerId, model, effort: effort ?? s.meta?.effort } }));
     });
-    const offMeta = onSessionMeta.on(({ sessionId: sid, provider, model, title, effort, permission_mode, projectId }) => {
+    const offMeta = onSessionMeta.on(({ sessionId: sid, provider, model, title, effort, permission_mode, projectId, projectName }) => {
       if (sid !== currentSessionId.current) return;
-      setState((s) => ({ ...s, meta: { provider, model, title, effort: effort ?? null, permissionMode: permission_mode ?? null, projectId: projectId ?? s.meta?.projectId ?? null } }));
+      setState((s) => ({ ...s, meta: { provider, model, title, effort: effort ?? null, permissionMode: permission_mode ?? null, projectId: projectId ?? s.meta?.projectId ?? null, projectName: projectName ?? s.meta?.projectName ?? null } }));
     });
     const offCheckpoints = onCheckpoints.on(({ sessionId: sid, checkpoints }) => {
       if (sid !== currentSessionId.current) return;
@@ -534,15 +561,31 @@ export function useSessionChat(sessionId: string | null) {
   // desktop turn) and no bubble (the message was invisible until the first
   // token, and vanished entirely if the turn never started).
   const dispatchTurn = useCallback(
-    (text: string, attachments: SessionChatAttachment[] = []): boolean => {
+    (text: string, attachments: SessionChatAttachment[] = [], isRetry = false): boolean => {
       if (!sessionId) return false;
+      tokenReceived.current = false;
+      turnStartedAt.current = Math.floor(Date.now() / 1000);
+      // A watchdog retry must NOT reset the attempt counter (infinite loop);
+      // every fresh user send does.
+      if (!isRetry) retryAttempt.current = 0;
+      lastTurnRef.current = { text, attachments };
       const sent = sendSessionChat(sessionId, text, attachments);
-      if (sent) turnInFlight.current = true;
+      if (sent) {
+        turnInFlight.current = true;
+        armTurnWatchdog(sessionId);
+      }
+      // Images render from the LOCAL bytes we already hold — the persisted
+      // marker + relay preview round-trip would leave a spinner up for
+      // seconds on a big photo.
+      const localAttachments = attachments
+        .filter((a) => a.kind === 'image' && a.data)
+        .map((a) => ({ name: a.name, dataUri: `data:${a.media_type ?? 'image/png'};base64,${a.data}` }));
       const userMsg: SessionMessageRecord = {
         id: nextOptimisticId(),
         role: 'user',
         content: text,
-        created_at: Math.floor(Date.now() / 1000),
+        createdAt: Math.floor(Date.now() / 1000),
+        localAttachments,
       };
       setState((s) => ({
         ...s,
@@ -555,6 +598,62 @@ export function useSessionChat(sessionId: string | null) {
     },
     [sessionId, sendSessionChat],
   );
+  dispatchRef.current = dispatchTurn;
+
+  /** Arm the no-token watchdog. Fires per window: local GGUF sidecars get a
+   *  longer first wait (model load into VRAM can take minutes); everything
+   *  else 75s.
+   *
+   *  On fire WITHOUT any token the watchdog now WAITS AND RECONCILES — it does
+   *  NOT cancel or re-send. It used to cancel the stream and re-dispatch the
+   *  same turn up to 10 times, which (a) appended a duplicate user bubble per
+   *  attempt to the transcript and (b) fired a second concurrent
+   *  SendChatMessage at the desktop per attempt — the pile-up that wedged the
+   *  desktop relay's send path (it parked on its own DB lock at
+   *  `5d: fs_roots`). A slow model is not a failure: tokens may still be
+   *  coming, and the transcript is the source of truth on the desktop.
+   *
+   *  Each window asks for the session's messages so a turn that finished
+   *  (with its tokens lost in a reconnect) reconciles instead of hanging.
+   *  After MAX windows the turn is surfaced as stalled — the user decides
+   *  whether to re-send; the app never posts duplicates on its own. */
+  const armTurnWatchdog = useCallback((sid: string) => {
+    if (turnWatchdog.current) clearTimeout(turnWatchdog.current);
+    const isLocal = metaRef.current?.provider === 'local_gguf';
+    const waitMs = isLocal ? 180_000 : 75_000;
+    turnWatchdog.current = setTimeout(() => {
+      if (currentSessionId.current !== sid) return;
+      if (tokenReceived.current) return;
+      const attempt = ++retryAttempt.current;
+      const MAX = 10;
+      if (attempt > MAX) {
+        // Stop waiting; leave the turn's optimistic bubble visible and say so
+        // honestly. No cancel storm, no re-sends.
+        turnInFlight.current = false;
+        streamActive.current = false;
+        setState((x) => ({
+          ...x,
+          streaming: false,
+          streamingContent: '',
+          status: null,
+          error: 'The model has not responded for a while. It may be rate-limited or down — tap the message to re-send, or pick another model.',
+        }));
+        return;
+      }
+      // Reconcile: pull the transcript. If the desktop finished the turn while
+      // the stream was lost, onSessionMessages renders it (and a ChatDone that
+      // raced in clears streaming).
+      getSessionMessages(sid);
+      setState((x) => ({
+        ...x,
+        status: x.streaming
+          ? `Still waiting for the model — ${attempt}/${MAX}…`
+          : x.status,
+      }));
+      // Keep watching the SAME turn — do not cancel, do not re-dispatch.
+      armTurnWatchdog(sid);
+    }, waitMs);
+  }, [cancelSessionStream, getSessionMessages]);
 
   // Queue flush: when a turn ends (Done, error, or cancel), dispatch the next
   // queued follow-up. Kept as an effect so every end-path is covered.

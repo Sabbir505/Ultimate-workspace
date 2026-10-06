@@ -16,12 +16,15 @@
  * `<tool>` markers back-to-back, so a repeated opener terminates the
  * current tool segment instead of being swallowed into its JSON.
  */
-import React, { useMemo, useRef, useEffect } from 'react';
-import { View, Text, StyleSheet, Animated } from 'react-native';
+import React, { useMemo, useRef, useEffect, useState } from 'react';
+import { View, Text, StyleSheet, Animated, TouchableOpacity } from 'react-native';
 import { theme } from '../../theme';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import MarkdownText from './MarkdownText';
 import ThinkingBlock from './ThinkingBlock';
 import ActivityRow, { type ToolData } from './ActivityRow';
+import { parseAttachments, MessageAttachmentCards, LocalImageCards } from './MessageAttachments';
+import { formatDuration } from '../../lib/format';
 
 export type { ToolData };
 
@@ -32,6 +35,12 @@ export interface MessageBubbleProps {
   streaming?: boolean;
   /** Diff peek (desktop DiffCard parity) — forwarded to file tool rows. */
   onPeekDiff?: (path: string) => void;
+  /** Images held locally for the optimistic just-sent message — rendered
+   *  from data URIs with zero round-trip. */
+  liveImages?: { name: string; dataUri: string }[];
+  /** Turn duration in seconds (desktop durationSec parity) — drives the
+   *  "Worked for Xs" fold header on process turns. */
+  workedForSec?: number | null;
 }
 
 export type Segment =
@@ -135,39 +144,104 @@ function AssistantContent({
   content,
   streaming,
   onPeekDiff,
+  workedForSec,
 }: {
   content: string;
   streaming: boolean;
   onPeekDiff?: (path: string) => void;
+  workedForSec?: number | null;
 }) {
   const segments = useMemo(() => parseSegments(content), [content]);
   const empty = content.length === 0;
 
   if (empty) return streaming ? <TypingDots /> : null;
 
+  // DESKTOP TURN-FOLD PARITY: process segments (thinking + tool calls) up to
+  // and including the LAST one fold into a collapsible "Worked for Xs"
+  // disclosure — auto-expanded while the turn streams, auto-collapsed when
+  // it ends. Text after the last process block (the final answer) renders
+  // outside, always visible — exactly the desktop's inside/outside split.
+  const lastProc = segments.reduce((last, seg, i) => (seg.type !== 'text' ? i : last), -1);
+  const hasProcess = lastProc !== -1;
+
+  const renderSeg = (seg: Segment, i: number, isLast: boolean) => {
+    switch (seg.type) {
+      case 'think':
+        return <ThinkingBlock key={i} thinking={seg.text} done={seg.done} />;
+      case 'tool':
+        return (
+          <ActivityRow key={i} data={seg.data} raw={seg.raw} done={seg.done} onPeekDiff={onPeekDiff} />
+        );
+      default:
+        return (
+          <View key={i} style={styles.textSeg}>
+            <MarkdownText content={seg.text} />
+            {streaming && isLast ? <Caret /> : null}
+          </View>
+        );
+    }
+  };
+
+  // Live turn: everything expanded (desktop parity — the live process is the
+  // "what's happening" view).
+  if (streaming || !hasProcess) {
+    return (
+      <View style={styles.assistantBody}>
+        {segments.map((seg, i) => renderSeg(seg, i, i === segments.length - 1))}
+        {/* Stream ends inside a think/tool block (no trailing text segment) —
+            hang the caret off the row so "still working" stays visible. */}
+        {streaming && segments[segments.length - 1]?.type !== 'text' ? <Caret /> : null}
+      </View>
+    );
+  }
+
+  // Finished turn with process: fold [0..lastProc], render the answer after.
+  const inside = segments.slice(0, lastProc + 1);
+  const outside = segments.slice(lastProc + 1);
   return (
     <View style={styles.assistantBody}>
-      {segments.map((seg, i) => {
-        const isLast = i === segments.length - 1;
-        switch (seg.type) {
-          case 'think':
-            return <ThinkingBlock key={i} thinking={seg.text} done={seg.done} />;
-          case 'tool':
-            return (
-              <ActivityRow key={i} data={seg.data} raw={seg.raw} done={seg.done} onPeekDiff={onPeekDiff} />
-            );
-          default:
-            return (
-              <View key={i} style={styles.textSeg}>
-                <MarkdownText content={seg.text} />
-                {streaming && isLast ? <Caret /> : null}
-              </View>
-            );
-        }
-      })}
-      {/* Stream ends inside a think/tool block (no trailing text segment) —
-          hang the caret off the row so "still working" stays visible. */}
-      {streaming && segments[segments.length - 1]?.type !== 'text' ? <Caret /> : null}
+      <TurnProcessFold workedForSec={workedForSec}>
+        {inside.map((seg, i) => renderSeg(seg, i, false))}
+      </TurnProcessFold>
+      {outside.map((seg, i) => renderSeg(seg, i, i === outside.length - 1))}
+    </View>
+  );
+}
+
+/** Collapsed "Worked for Xs" summary for a finished turn's process region —
+ *  the phone twin of the desktop's ProcessSummary toggle. The label IS the
+ *  timer (desktop parity); a duration-less turn reads plain "Worked". */
+function TurnProcessFold({
+  workedForSec,
+  children,
+}: {
+  workedForSec?: number | null;
+  children: React.ReactNode;
+}) {
+  const c = theme.colors;
+  const [open, setOpen] = useState(false);
+  const label = workedForSec != null && workedForSec > 0
+    ? `Worked for ${formatDuration(workedForSec)}`
+    : 'Worked';
+  return (
+    <View>
+      <TouchableOpacity
+        // Plain row, like the desktop's process summary: no card, no border —
+        // the label + caret are the whole affordance.
+        style={styles.foldHeader}
+        activeOpacity={0.7}
+        accessibilityRole="button"
+        accessibilityLabel={`${label} — show process`}
+        onPress={() => setOpen((v) => !v)}
+      >
+        <Text style={[styles.foldLabel, { color: c.textSecondary }]}>{label}</Text>
+        <Ionicons
+          name={open ? 'chevron-up' : 'chevron-down'}
+          size={14}
+          color={c.textSecondary}
+        />
+      </TouchableOpacity>
+      {open ? <View style={styles.foldBody}>{children}</View> : null}
     </View>
   );
 }
@@ -177,8 +251,13 @@ export default function MessageBubble({
   content,
   streaming = false,
   onPeekDiff,
+  liveImages,
+  workedForSec,
 }: MessageBubbleProps) {
   const c = theme.colors;
+  // Attachment markers live in the content for BOTH roles (user messages carry
+  // them; parse before any branch so hook order stays stable).
+  const { attachments, text: cleanedContent } = useMemo(() => parseAttachments(content), [content]);
 
   if (role === 'system') {
     return (
@@ -191,10 +270,14 @@ export default function MessageBubble({
   }
 
   if (role === 'user') {
+    // Render attachment preview cards above the text (desktop parity); the
+    // raw "[Attached image: …|C:\…]" marker never shows.
     return (
       <View style={styles.userRow}>
         <View style={[styles.userBubble, { backgroundColor: c.bubble }]}>
-          <Text style={[styles.userText, { color: c.text }]}>{content}</Text>
+          <LocalImageCards images={liveImages ?? []} />
+          <MessageAttachmentCards attachments={attachments} />
+          {cleanedContent ? <Text style={[styles.userText, { color: c.text }]}>{cleanedContent}</Text> : null}
         </View>
       </View>
     );
@@ -202,7 +285,12 @@ export default function MessageBubble({
 
   return (
     <View style={styles.assistantRow}>
-      <AssistantContent content={content} streaming={streaming} onPeekDiff={onPeekDiff} />
+      <AssistantContent
+        content={content}
+        streaming={streaming}
+        onPeekDiff={onPeekDiff}
+        workedForSec={workedForSec}
+      />
     </View>
   );
 }
@@ -233,6 +321,13 @@ const styles = StyleSheet.create({
     gap: 2,
   },
   textSeg: {},
+  foldHeader: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    alignSelf: 'flex-start',
+    paddingVertical: 4,
+  },
+  foldLabel: { fontSize: 13, fontWeight: '600' },
+  foldBody: { paddingTop: 6, gap: 2 },
   caret: {
     ...theme.type.body,
     fontWeight: '600',

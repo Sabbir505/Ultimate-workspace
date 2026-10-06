@@ -187,6 +187,25 @@ pub enum MobileMessage {
     ReadArtifactPreview {
         path: String,
     },
+
+    // -- Vault (the desktop's bound markdown notes folder; read/write over
+    //    the E2E relay, no secret material involved) --
+    GetVaultState,
+    GetVaultTree,
+    ReadVaultNote { path: String },
+    CreateVaultNote { path: String, content: String },
+    WriteVaultNote { path: String, content: String },
+    DeleteVaultNote { path: String },
+    /// Binary vault files (pdf/assets): mime + base64 for an in-app viewer.
+    ReadVaultFile { path: String },
+
+    // -- Project wiki (generated docs; jobs run desktop-side, phone polls) --
+    GetWikiList,
+    GetWiki { path: String },
+    ReadWikiPage { path: String, slug: String },
+    UpdateWiki { path: String },
+    RebuildWiki { path: String },
+    CancelWikiJob { path: String },
     /// Read one artifact's bytes for on-device preview. The path is
     /// containment-checked against the desktop's artifacts directory — the
     /// relay must never become an arbitrary-file-read primitive.
@@ -639,6 +658,47 @@ pub enum DesktopMessage {
     },
     /// A new session was successfully created.
     SessionCreated { session: SessionInfo },
+
+    // -- Vault --
+    VaultState {
+        bound: bool,
+        root: Option<String>,
+        notes: Option<i64>,
+        files: Option<i64>,
+    },
+    VaultTree {
+        nodes: Vec<crate::vault::TreeNode>,
+    },
+    VaultNoteContent {
+        path: String,
+        content: String,
+    },
+    VaultAck {
+        op: String,
+        ok: bool,
+        message: Option<String>,
+    },
+    VaultFileContent {
+        path: String,
+        mime: String,
+        data_base64: String,
+    },
+
+    // -- Wiki --
+    WikiList {
+        projects: Vec<crate::db::WikiProjectSummary>,
+    },
+    WikiDetail {
+        status: crate::wiki::commands::WikiStatus,
+    },
+    WikiPage {
+        page: Option<crate::db::WikiPageFull>,
+    },
+    WikiAck {
+        op: String,
+        ok: bool,
+        message: Option<String>,
+    },
     /// Aggregate spend response (today + rolling 7 days).
     /// `version: 2` = read-time priced (same source as the desktop rollup).
     CostSummary { today: f64, week: f64, version: u32 },
@@ -776,6 +836,10 @@ pub enum DesktopMessage {
         /// (file-edit activity rows fetch that project's git diff for path).
         #[serde(default)]
         project_id: Option<String>,
+        /// Resolved project display name, so the header chip renders without
+        /// waiting for the phone's project list to arrive.
+        #[serde(default)]
+        project_name: Option<String>,
     },
     /// Ack for `RegisterPushToken`.
     PushAck {
@@ -1160,6 +1224,13 @@ pub struct SessionMessageRecord {
     pub tool_calls: Option<serde_json::Value>,
     #[serde(default)]
     pub artifact_paths: Option<Vec<String>>,
+    /// Turn timing (unix seconds). The phone renders "Worked for Xs" from
+    /// these; dropping them made the fold chip fall back to a plain "Worked"
+    /// even though the desktop shows the duration.
+    #[serde(default)]
+    pub started_at: Option<i64>,
+    #[serde(default)]
+    pub completed_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

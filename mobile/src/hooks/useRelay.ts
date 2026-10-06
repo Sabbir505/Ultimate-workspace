@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { journalNotification } from '../lib/notificationJournal';
 import { Alert, Platform } from 'react-native';
+import { screenCacheSet } from '../lib/screenCache';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getSecureRelayUrl, setSecureRelayUrl } from '../lib/secureStore';
 import { b64UrlToBytes, bindSaltToChallenge, computePairProof, computePairProofWithNonce, deriveSessionKey, decryptFrame, encryptFrame } from '../lib/relayCrypto';
@@ -114,6 +115,15 @@ type DesktopMessage =
   | { type: 'DesktopStatus'; connected: boolean }
   | { type: 'Transcript'; session_id: string; text: string; cols: number; rows: number; unchanged?: boolean }
   | { type: 'SessionCreated'; session: SessionInfo }
+  | { type: 'VaultState'; bound: boolean; root?: string | null; notes?: number | null; files?: number | null }
+  | { type: 'VaultTree'; nodes: VaultNode[] }
+  | { type: 'VaultNoteContent'; path: string; content: string }
+  | { type: 'VaultAck'; op: string; ok: boolean; message?: string | null }
+  | { type: 'VaultFileContent'; path: string; mime: string; data_base64: string }
+  | { type: 'WikiList'; projects: WikiProjectSummary[] }
+  | { type: 'WikiDetail'; status: WikiStatusData }
+  | { type: 'WikiPage'; page: WikiPageFull | null }
+  | { type: 'WikiAck'; op: string; ok: boolean; message?: string | null }
   | { type: 'CostSummary'; today: number; week: number }
   | { type: 'CostDetails'; daily: DailyCostEntry[]; per_project: ProjectCostEntry[]; local_models: LocalModelUsageEntry[] }
   | { type: 'LocalModelReady'; model: string; base_url: string }
@@ -133,7 +143,7 @@ type DesktopMessage =
   | { type: 'SessionPlanProposal'; session_id: string; pending_id: string; title: string; plan: string }
   | { type: 'SessionModelSet'; session_id: string; provider_id: string; model: string; effort?: string | null }
   | { type: 'SessionDeleted'; session_id: string }
-  | { type: 'SessionMeta'; session_id: string; provider: string; model: string; title?: string; effort?: string | null; permission_mode?: string | null; project_id?: string | null }
+  | { type: 'SessionMeta'; session_id: string; provider: string; model: string; title?: string; effort?: string | null; permission_mode?: string | null; project_id?: string | null; project_name?: string | null }
   | { type: 'PushAck'; ok: boolean; error?: string }
   | { type: 'SessionMessageDeleted'; session_id: string; message_id: number }
   | { type: 'ChatSearchResults'; query: string; results: ChatSearchHit[] }
@@ -210,6 +220,19 @@ type MobileMessagePlain =
   | { type: 'RemoveProject'; project_id: string }
   | { type: 'ListConnectors' }
   | { type: 'ReadArtifactPreview'; path: string }
+  | { type: 'GetVaultState' }
+  | { type: 'GetVaultTree' }
+  | { type: 'ReadVaultNote'; path: string }
+  | { type: 'CreateVaultNote'; path: string; content: string }
+  | { type: 'WriteVaultNote'; path: string; content: string }
+  | { type: 'DeleteVaultNote'; path: string }
+  | { type: 'ReadVaultFile'; path: string }
+  | { type: 'GetWikiList' }
+  | { type: 'GetWiki'; path: string }
+  | { type: 'ReadWikiPage'; path: string; slug: string }
+  | { type: 'UpdateWiki'; path: string }
+  | { type: 'RebuildWiki'; path: string }
+  | { type: 'CancelWikiJob'; path: string }
   | { type: 'SetSessionConnectors'; session_id: string; connector_ids: string[] }
   | { type: 'GetSessionConnectors'; session_id: string }
   | { type: 'CreateAutomation'; input: Record<string, unknown> }
@@ -338,7 +361,7 @@ export const onSessionApprovalResolved = new EventBus<{ sessionId: string; pendi
 export const onSessionPlanProposal = new EventBus<{ sessionId: string; pendingId: string; title: string; plan: string }>();
 export const onSessionModelSet = new EventBus<{ sessionId: string; providerId: string; model: string; effort?: string | null }>();
 export const onSessionDeleted = new EventBus<{ sessionId: string }>();
-export const onSessionMeta = new EventBus<{ sessionId: string; provider: string; model: string; title?: string; effort?: string | null; permission_mode?: string | null; projectId?: string | null }>();
+export const onSessionMeta = new EventBus<{ sessionId: string; provider: string; model: string; title?: string; effort?: string | null; permission_mode?: string | null; projectId?: string | null; projectName?: string | null }>();
 export const onSessionArtifact = new EventBus<{ sessionId: string; messageId?: number; artifact: SessionArtifact }>();
 export const onSessionArtifacts = new EventBus<{ sessionId: string; artifacts: SessionArtifact[] }>();
 export const onArtifactContent = new EventBus<{ sessionId: string; path: string; filename: string; kind: string; text?: string; dataBase64?: string; truncated?: boolean }>();
@@ -364,6 +387,16 @@ export interface ArtifactPreview {
   truncated: boolean;
 }
 export const onArtifactPreview = new EventBus<{ preview: ArtifactPreview }>();
+export const onVaultState = new EventBus<VaultStateData>();
+export const onVaultTree = new EventBus<{ nodes: VaultNode[] }>();
+export const onVaultNote = new EventBus<{ path: string; content: string }>();
+export const onVaultAck = new EventBus<VaultAck>();
+export interface VaultFileContent { path: string; mime: string; dataBase64: string }
+export const onVaultFileContent = new EventBus<VaultFileContent>();
+export const onWikiList = new EventBus<{ projects: WikiProjectSummary[] }>();
+export const onWikiDetail = new EventBus<{ status: WikiStatusData }>();
+export const onWikiPage = new EventBus<{ page: WikiPageFull | null }>();
+export const onWikiAck = new EventBus<WikiAck>();
 export interface AgentQuestion {
   question: string;
   header?: string;
@@ -465,7 +498,7 @@ export interface ArtifactLibraryEntry {
 export interface CostRollupsData {
   totals: {
     rawTokenCostUsd: number; providerReportedUsd: number;
-    estimatedUsd: number; unpricedUsd: number;
+    estimatedUsd: number;
   };
   perProvider: { provider: string; costUsd: number; tokens: number; sharePct: number }[];
   daily: {
@@ -483,11 +516,76 @@ export interface CostRollupsData {
   rangeStart: string; rangeEnd: string; rangeDays: number;
 }
 
-export interface SessionMessageRecord {
-  id: number; role: string; content: string; created_at: number;
-  input_tokens?: number; output_tokens?: number; cost_usd?: number;
-  tool_calls?: unknown; artifact_paths?: string[];
+// -- Vault (desktop-bound markdown notes folder) --
+export interface VaultNode {
+  name: string; path: string; kind: 'folder' | 'note' | 'file';
+  children: VaultNode[];
 }
+export interface VaultStateData {
+  bound: boolean; root?: string | null; notes?: number | null; files?: number | null;
+}
+export interface VaultAck { op: string; ok: boolean; message?: string | null }
+
+// -- Project wiki (generated docs) --
+export interface WikiProjectSummary {
+  path: string; pageCount: number; staleCount: number;
+  builtAt?: number | null; buildModel?: string | null;
+}
+export interface WikiProject {
+  id: string; path: string; builtAt?: number | null;
+  lastUpdateAt?: number | null; buildModel?: string | null;
+}
+export type WikiPageStatus = 'fresh' | 'stale' | 'rebuilding' | 'failed';
+export interface WikiPage {
+  id: string; slug: string; title: string; kind: string; summary: string;
+  status: WikiPageStatus; staleReason?: string | null;
+  generatedAt: number; generatedBy?: string | null;
+}
+export interface WikiStatusData {
+  project: WikiProject | null; pages: WikiPage[];
+  autoUpdate: boolean; layerIndex: boolean; hasModel: boolean; jobRunning: boolean;
+}
+export interface WikiPageFull extends WikiPage { body: string; brief: string; files: string[]; }
+export interface WikiAck { op: string; ok: boolean; message?: string | null }
+
+/** Wire shape = the desktop's ChatMessageRecord (serde camelCase). The old
+ *  snake_case field names never matched the wire — tokens, artifact chips and
+ *  turn timings were all silently undefined. */
+export interface SessionMessageRecord {
+  id: number; role: string; content: string; createdAt: number;
+  startedAt?: number | null; completedAt?: number | null;
+  inputTokens?: number | null; outputTokens?: number | null; costUsd?: number | null;
+  artifactPaths?: string[];
+  /** Ephemeral (phone-only, negative ids): image attachments held in memory
+   *  between send and desktop persistence, so the bubble shows the real
+   *  picture instantly instead of a spinner while the preview round-trips. */
+  localAttachments?: { name: string; dataUri: string }[];
+}
+
+/** The desktop serializes SessionMessageRecord with serde's default field
+ *  naming (snake_case: `created_at`, `artifact_paths`, `started_at`, …) while
+ *  every phone consumer is typed camelCase — so those fields read `undefined`
+ *  on arrival (turn timings never reached the "Worked for Xs" chip, artifact
+ *  chips never rendered). Normalize once, here, at the wire boundary. */
+export function normalizeSessionMessage(m: SessionMessageRecord): SessionMessageRecord {
+  const src = m as unknown as Record<string, unknown>;
+  const out: Record<string, unknown> = { ...src };
+  const aliases: [string, string][] = [
+    ['createdAt', 'created_at'],
+    ['startedAt', 'started_at'],
+    ['completedAt', 'completed_at'],
+    ['artifactPaths', 'artifact_paths'],
+    ['inputTokens', 'input_tokens'],
+    ['outputTokens', 'output_tokens'],
+    ['costUsd', 'cost_usd'],
+    ['toolCalls', 'tool_calls'],
+  ];
+  for (const [camel, snake] of aliases) {
+    if (out[camel] == null && out[snake] != null) out[camel] = out[snake];
+  }
+  return out as unknown as SessionMessageRecord;
+}
+
 export interface SessionChatUsage { input_tokens: number; output_tokens: number; cost_usd?: number; }
 export interface SessionArtifact { path: string; filename: string; kind?: string; inline?: { kind: 'jsx' | 'tsx'; code: string }; }
 export interface ChatSearchHit {
@@ -511,6 +609,15 @@ export interface SessionChatAttachment {
 // JS memory for the app's lifetime. Eviction is insertion-oldest-first —
 // an evicted entry just re-fetches on next open.
 const PREVIEW_CACHE_MAX = 48;
+/** Full artifact contents, per path — re-opens paint instantly (and work
+ *  offline). Large entries simply exceed the screenCache disk cap and stay
+ *  memory-only. */
+const _contentCache = new Map<string, { text?: string | null; dataBase64?: string | null; truncated: boolean }>();
+
+export function getCachedArtifactContent(path: string) {
+  return _contentCache.get(path) ?? null;
+}
+
 const _previewCache = new Map<string, ArtifactPreview>();
 const _previewInFlight = new Set<string>();
 
@@ -651,6 +758,13 @@ function nc(v: boolean) { onConnected.emit(v); _cl.forEach(fn => fn(v)); }
  *  layouts — see the cold-open flash fix. */
 const _clConnecting = new Set<(v: boolean) => void>();
 function nconnecting(v: boolean) { _clConnecting.forEach(fn => fn(v)); }
+// Last connection failure reason (ws.onerror/catch), shown on the Desktop
+// Connection card. Android release builds reject cleartext ws:// with a
+// message that never reaches the user otherwise — the socket just dies
+// silently and the status pill reads "unreachable" forever.
+const _clErr = new Set<(v: string | null) => void>();
+let _lastError: string | null = null;
+function nerr(v: string | null) { _lastError = v; _clErr.forEach(fn => fn(v)); }
 let _providers: ProviderInfo[] = [];
 function np(v: ProviderInfo[]) { _providers = v; onProviderList.emit(v); _pl.forEach(fn => fn(v)); }
 function ns(v: Session[]) { onSessionList.emit(v); _sl.forEach(fn => fn(v)); }
@@ -673,6 +787,24 @@ function _send(msg: MobileMessagePlain): boolean {
     _ws.send(json);
   }
   return true;
+}
+
+/** Idempotent list query with a short coalescing window. Screens fetch these
+ *  from effects whose dep identities can churn under a render loop, and each
+ *  fetch is a round-trip the desktop answers under its DB mutex — a re-render
+ *  storm turned into a request storm (measured ~60 ListAcpAgents/ListConnectors
+ *  /GetSessionConnectors per second) that starved the desktop. Coalescing
+ *  makes a burst of identical queries cost ONE wire request; a genuine later
+ *  refresh (> 2 s) still goes through. */
+const COALESCE_MS = 2000;
+const _lastListSent = new Map<string, number>();
+function _sendCoalesced(msg: MobileMessagePlain, keyHint?: string): boolean {
+  const key = `${msg.type}:${keyHint ?? ''}`;
+  const now = Date.now();
+  const last = _lastListSent.get(key) ?? 0;
+  if (now - last < COALESCE_MS) return false;
+  _lastListSent.set(key, now);
+  return _send(msg);
 }
 
 function startPolling() {
@@ -732,9 +864,11 @@ function _doConnect(target: string) {
   _e2eKey = null; _outCounter = 0; _inCounter = 0; _decryptFailures = 0;
   _pairingToken = null; _pendingFrames = [];
   _pairChallenge = null; _pairSent = false;
+  _lastListSent.clear(); // fresh connection → list queries may go out again
   if (_pairFallbackTimer) { clearTimeout(_pairFallbackTimer); _pairFallbackTimer = null; }
   _connecting = true;
   nconnecting(true);
+  nerr(null);
   try {
     const ws = new WebSocket(target); _ws = ws;
     // Binary frames (E2E-encrypted payloads) arrive as ArrayBuffer; without
@@ -776,6 +910,29 @@ function _doConnect(target: string) {
       _send({ type: 'ListSessions' });
       _send({ type: 'GetCostSummary' });
       _send({ type: 'GetCostDetails' });
+      // WARM EVERY DATA SCREEN at connect (competitor-style): each screen's
+      // list query fires once here instead of waiting for its mount, so the
+      // reply is already in the event bus (and the screen cache) before the
+      // user navigates — screens paint instantly from cached data and the
+      // mount refetch just refreshes underneath. Cheap DB reads on the
+      // desktop, once per connect.
+      // STAGGERED: a single 8-request burst let GetCostRollups (a
+      // seconds-long aggregate over 250+ sessions) grab the desktop's DB
+      // mutex while everything else queued behind it — the desktop's own UI
+      // starved and every phone screen spun. 250ms apart keeps the mutex
+      // short-held; each reply still lands well before the user reaches the
+      // screen.
+      const warm: MobileMessagePlain[] = [
+        { type: 'ListProjects' },
+        { type: 'GetCostRollups', days: 30 },
+        { type: 'ListAutomations' },
+        { type: 'ListInstalledSkills', kind: 'skill' },
+        { type: 'ListArtifacts' },
+        { type: 'ListMemoryRecords', include_inactive: false },
+        { type: 'GetWikiList' },
+        { type: 'ListInstalledSkills', kind: 'loop' },
+      ];
+      warm.forEach((m, i) => setTimeout(() => { if (_ws?.readyState === WebSocket.OPEN) _send(m); }, 250 * i));
     };
     ws.onmessage = (event) => {
       try {
@@ -932,7 +1089,13 @@ function _doConnect(target: string) {
             nh(); nd();
             break;
           }
-          case 'SessionList': ns((msg.sessions || []).map(toSession)); break;
+          case 'SessionList': {
+            const list = (msg.sessions || []).map(toSession);
+            // Persist for offline: the drawer renders this when disconnected.
+            screenCacheSet('sessions.list', list);
+            ns(list);
+            break;
+          }
           case 'ChatToken': onChatToken.emit({ chatSessionId: msg.chat_session_id, token: msg.token }); break;
           case 'ChatDone': onChatDone.emit({ chatSessionId: msg.chat_session_id, usage: msg.usage }); break;
           case 'ChatError':
@@ -948,6 +1111,15 @@ function _doConnect(target: string) {
           case 'DesktopStatus': if (_e2eKey) nc(msg.connected); break;
           case 'Transcript': onTranscript.emit({ sessionId: msg.session_id, text: msg.text, cols: msg.cols ?? 0, rows: msg.rows ?? 0, unchanged: msg.unchanged }); break;
           case 'SessionCreated': onSessionCreated.emit(toSession(msg.session)); break;
+          case 'VaultState': onVaultState.emit({ bound: msg.bound, root: msg.root, notes: msg.notes, files: msg.files }); break;
+          case 'VaultTree': onVaultTree.emit({ nodes: msg.nodes }); break;
+          case 'VaultNoteContent': onVaultNote.emit({ path: msg.path, content: msg.content }); break;
+          case 'VaultAck': onVaultAck.emit({ op: msg.op, ok: msg.ok, message: msg.message }); break;
+          case 'VaultFileContent': onVaultFileContent.emit({ path: msg.path, mime: msg.mime, dataBase64: msg.data_base64 }); break;
+          case 'WikiList': onWikiList.emit({ projects: msg.projects || [] }); break;
+          case 'WikiDetail': onWikiDetail.emit({ status: msg.status }); break;
+          case 'WikiPage': onWikiPage.emit({ page: msg.page }); break;
+          case 'WikiAck': onWikiAck.emit({ op: msg.op, ok: msg.ok, message: msg.message }); break;
           case 'CostSummary': ncs({ today: msg.today, week: msg.week }); break;
           case 'CostDetails': ncd({
             daily: msg.daily || [],
@@ -957,7 +1129,7 @@ function _doConnect(target: string) {
           case 'LocalModelReady': onLocalModelReady.emit({ model: msg.model, baseUrl: msg.base_url }); break;
           case 'LocalModelError': onLocalModelError.emit({ model: msg.model, error: msg.error }); break;
           // Session-scoped chat events (Task 6). Route to the new event buses.
-          case 'SessionMessages': onSessionMessages.emit({ sessionId: msg.session_id, messages: msg.messages, hasMore: msg.has_more, append: routeMessageReply(msg.session_id) }); break;
+          case 'SessionMessages': onSessionMessages.emit({ sessionId: msg.session_id, messages: msg.messages.map(normalizeSessionMessage), hasMore: msg.has_more, append: routeMessageReply(msg.session_id) }); break;
           case 'SessionChatToken': onSessionChatToken.emit({ sessionId: msg.session_id, token: msg.token }); break;
           case 'SessionChatDone':
             onSessionChatDone.emit({ sessionId: msg.session_id, usage: msg.usage });
@@ -981,9 +1153,15 @@ function _doConnect(target: string) {
           case 'SessionPlanProposal': onSessionPlanProposal.emit({ sessionId: msg.session_id, pendingId: msg.pending_id, title: msg.title, plan: msg.plan }); break;
           case 'SessionModelSet': onSessionModelSet.emit({ sessionId: msg.session_id, providerId: msg.provider_id, model: msg.model, effort: msg.effort }); break;
           case 'SessionDeleted': onSessionDeleted.emit({ sessionId: msg.session_id }); break;
-          case 'SessionMeta': onSessionMeta.emit({ sessionId: msg.session_id, provider: msg.provider, model: msg.model, title: msg.title, effort: msg.effort, permission_mode: msg.permission_mode, projectId: msg.project_id }); break;
+          case 'SessionMeta': onSessionMeta.emit({ sessionId: msg.session_id, provider: msg.provider, model: msg.model, title: msg.title, effort: msg.effort, permission_mode: msg.permission_mode, projectId: msg.project_id, projectName: msg.project_name }); break;
           case 'SessionArtifacts': onSessionArtifacts.emit({ sessionId: msg.session_id, artifacts: msg.artifacts || [] }); break;
-          case 'ArtifactContent': onArtifactContent.emit({ sessionId: msg.session_id, path: msg.path, filename: msg.filename, kind: msg.kind, text: msg.text, dataBase64: msg.data_base64, truncated: msg.truncated }); break;
+          case 'ArtifactContent': {
+            const entry = { text: msg.text ?? null, dataBase64: msg.data_base64 ?? null, truncated: !!msg.truncated };
+            _contentCache.set(msg.path, entry);
+            screenCacheSet(`artifact.content:${msg.path}`, entry);
+            onArtifactContent.emit({ sessionId: msg.session_id, path: msg.path, filename: msg.filename, kind: msg.kind, text: msg.text, dataBase64: msg.data_base64, truncated: msg.truncated });
+            break;
+          }
           case 'Transcription': onTranscription.emit({ text: msg.text, error: msg.error }); break;
           case 'SessionArtifact':
             onSessionArtifact.emit({ sessionId: msg.session_id, messageId: msg.message_id, artifact: msg.artifact });
@@ -1008,7 +1186,11 @@ function _doConnect(target: string) {
               path: msg.path, filename: msg.filename, ext: msg.ext, kind: msg.kind,
               text: msg.text ?? null, data_uri: msg.data_uri ?? null, truncated: msg.truncated,
             }}); break;
-          case 'ProjectList': onProjectList.emit({ projects: msg.projects || [] }); break;
+          case 'ProjectList': {
+            screenCacheSet('projects.list', msg.projects || []);
+            onProjectList.emit({ projects: msg.projects || [] });
+            break;
+          }
           case 'AcpAgentList': onAcpAgentList.emit({ agents: msg.agents || [] }); break;
           case 'MemoryList': onMemoryList.emit({ records: msg.records || [] }); break;
           case 'MemoryUpdated': onMemoryMutated.emit({ memoryId: msg.memory_id }); break;
@@ -1087,8 +1269,14 @@ function _doConnect(target: string) {
         _reconnectTimer = setTimeout(() => { _reconnectTimer = null; if (_url) _doConnect(_url); }, jittered);
       }
     };
-    ws.onerror = () => { _connecting = false; nc(false); nconnecting(false); };
-  } catch (e) { _connecting = false; nc(false); nconnecting(false); }
+    ws.onerror = (ev: any) => {
+      _connecting = false; nc(false); nconnecting(false);
+      nerr(typeof ev?.message === 'string' && ev.message ? ev.message : 'Connection failed');
+    };
+  } catch (e) {
+    _connecting = false; nc(false); nconnecting(false);
+    nerr(e instanceof Error ? e.message : String(e));
+  }
 }
 function globalConnect(url?: string) {
   if (url) {
@@ -1156,6 +1344,7 @@ function refreshCostDetailsSend() { _send({ type: 'GetCostDetails' }); }
 export function useRelay() {
   const [connected, setConnected] = useState(_ws?.readyState === WebSocket.OPEN);
   const [connecting, setConnecting] = useState(_connecting);
+  const [lastError, setLastError] = useState<string | null>(_lastError);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [harnesses, setHarnessesState] = useState<HarnessInfo[]>(_harnesses);
@@ -1165,6 +1354,7 @@ export function useRelay() {
   useEffect(() => {
     const c = (v: boolean) => setConnected(v);
     const cg = (v: boolean) => setConnecting(v);
+    const err = (v: string | null) => setLastError(v);
     const p = (v: ProviderInfo[]) => setProviders(v);
     const s = (v: Session[]) => setSessions(v);
     const h = (v: HarnessInfo[]) => setHarnessesState(v);
@@ -1172,16 +1362,17 @@ export function useRelay() {
     const cs = (v: CostSummary) => setCostSummary(v);
     const cd = (v: CostDetails) => setCostDetails(v);
     _cl.add(c); _clConnecting.add(cg); _pl.add(p); _sl.add(s); _csl.add(cs); _cdl.add(cd);
-    _hl.add(h); _dl.add(d);
+    _hl.add(h); _dl.add(d); _clErr.add(err);
     setConnected(_ws?.readyState === WebSocket.OPEN);
     setConnecting(_connecting);
+    setLastError(_lastError);
     // Late-mounting screens (SessionChat's model sheet) must see the last
     // broadcast immediately — providers/harnesses only refresh every 30s,
     // so without this sync the sheet shows "no providers" for up to 30s.
     setProviders(_providers);
     setHarnessesState(_harnesses);
     setDefaultModelState(_defaults);
-    return () => { _cl.delete(c); _clConnecting.delete(cg); _pl.delete(p); _sl.delete(s); _csl.delete(cs); _cdl.delete(cd); _hl.delete(h); _dl.delete(d); };
+    return () => { _cl.delete(c); _clConnecting.delete(cg); _pl.delete(p); _sl.delete(s); _csl.delete(cs); _cdl.delete(cd); _hl.delete(h); _dl.delete(d); _clErr.delete(err); };
   }, []);
   const connect = useCallback((url?: string) => { globalConnect(url); }, []);
   const applyPairingToken = useCallback((token: string) => { globalApplyPairingToken(token); }, []);
@@ -1289,7 +1480,20 @@ const _requestHarnessModels = (harnessId: string) => { _send({ type: 'ListHarnes
 const _listChatSkills = () => { _send({ type: 'ListChatSkills' }); };
 const _listAutomations = () => { _send({ type: 'ListAutomations' }); };
 const _listProjects = () => { _send({ type: 'ListProjects' }); };
-const _listAcpAgents = () => { _send({ type: 'ListAcpAgents' }); };
+const _getVaultState = () => { _send({ type: 'GetVaultState' }); };
+const _getVaultTree = () => { _send({ type: 'GetVaultTree' }); };
+const _readVaultNote = (path: string) => { _send({ type: 'ReadVaultNote', path }); };
+const _createVaultNote = (path: string, content: string) => { _send({ type: 'CreateVaultNote', path, content }); };
+const _writeVaultNote = (path: string, content: string) => { _send({ type: 'WriteVaultNote', path, content }); };
+const _deleteVaultNote = (path: string) => { _send({ type: 'DeleteVaultNote', path }); };
+const _readVaultFile = (path: string) => { _send({ type: 'ReadVaultFile', path }); };
+const _getWikiList = () => { _send({ type: 'GetWikiList' }); };
+const _getWiki = (path: string) => { _send({ type: 'GetWiki', path }); };
+const _readWikiPage = (path: string, slug: string) => { _send({ type: 'ReadWikiPage', path, slug }); };
+const _updateWiki = (path: string) => { _send({ type: 'UpdateWiki', path }); };
+const _rebuildWiki = (path: string) => { _send({ type: 'RebuildWiki', path }); };
+const _cancelWikiJob = (path: string) => { _send({ type: 'CancelWikiJob', path }); };
+const _listAcpAgents = () => { _sendCoalesced({ type: 'ListAcpAgents' }); };
 const _listMemoryRecords = (includeInactive?: boolean) => { _send({ type: 'ListMemoryRecords', include_inactive: includeInactive }); };
 const _updateMemoryRecord = (memoryId: string, content: string, importance?: number) => { _send({ type: 'UpdateMemoryRecord', memory_id: memoryId, content, importance }); };
 const _deleteMemoryRecord = (memoryId: string) => { _send({ type: 'DeleteMemoryRecord', memory_id: memoryId }); };
@@ -1315,9 +1519,9 @@ const _unhideCostProject = (projectId: string) => { _send({ type: 'UnhideCostPro
 const _addProject = (path: string, name?: string) => { _send({ type: 'AddProject', path, name }); };
 const _renameProject = (projectId: string, name: string) => { _send({ type: 'RenameProject', project_id: projectId, name }); };
 const _removeProject = (projectId: string) => { _send({ type: 'RemoveProject', project_id: projectId }); };
-const _listConnectors = () => { _send({ type: 'ListConnectors' }); };
+const _listConnectors = () => { _sendCoalesced({ type: 'ListConnectors' }); };
 const _setSessionConnectors = (sessionId: string, connectorIds: string[]) => { _send({ type: 'SetSessionConnectors', session_id: sessionId, connector_ids: connectorIds }); };
-const _getSessionConnectors = (sessionId: string) => { _send({ type: 'GetSessionConnectors', session_id: sessionId }); };
+const _getSessionConnectors = (sessionId: string) => { _sendCoalesced({ type: 'GetSessionConnectors', session_id: sessionId }, sessionId); };
 const _createAutomation = (input: Record<string, unknown>) => { _send({ type: 'CreateAutomation', input }); };
 const _updateAutomation = (automationId: string, input: Record<string, unknown>) => { _send({ type: 'UpdateAutomation', automation_id: automationId, input }); };
 const _deleteAutomation = (automationId: string) => { _send({ type: 'DeleteAutomation', automation_id: automationId }); };
@@ -1341,10 +1545,23 @@ const _createSession = (pid: string, h: string, provider?: string, model?: strin
 const _spawnSession = (sid: string) => { _send({ type: 'SpawnSession', session_id: sid }); };
 const _startLocalModel = (model: string, ggufPath: string) => { _send({ type: 'StartLocalModel', model, gguf_path: ggufPath }); };
 
-  return { connected, desktopUnreachable: !connected, connecting, sessions, providers, harnesses, defaultModel, costSummary, costDetails, connect, applyPairingToken, disconnect, sendChatTurn, sendToSession, getTranscript,
+  return { connected, desktopUnreachable: !connected, connecting, lastError, sessions, providers, harnesses, defaultModel, costSummary, costDetails, connect, applyPairingToken, disconnect, sendChatTurn, sendToSession, getTranscript,
     cancelChatTurn: _cancelChatTurn,
     setSessionStarred: _setSessionStarred,
     listArtifacts: _listArtifacts,
+    getVaultState: _getVaultState,
+    getVaultTree: _getVaultTree,
+    readVaultNote: _readVaultNote,
+    createVaultNote: _createVaultNote,
+    writeVaultNote: _writeVaultNote,
+    deleteVaultNote: _deleteVaultNote,
+    readVaultFile: _readVaultFile,
+    getWikiList: _getWikiList,
+    getWiki: _getWiki,
+    readWikiPage: _readWikiPage,
+    updateWiki: _updateWiki,
+    rebuildWiki: _rebuildWiki,
+    cancelWikiJob: _cancelWikiJob,
     requestHarnessModels: _requestHarnessModels,
     listChatSkills: _listChatSkills,
     listAutomations: _listAutomations,

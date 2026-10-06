@@ -1,8 +1,8 @@
-import React, { useCallback, useMemo, useState } from 'react';
-import { ScrollView, StyleSheet, Text, TouchableOpacity, View, KeyboardAvoidingView, Platform } from 'react-native';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { ScrollView, StyleSheet, Text, TouchableOpacity, View, KeyboardAvoidingView, Platform, Image } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import Ionicons from '@expo/vector-icons/Ionicons';
-import { useRelay, onAcpAgentList, type AcpAgentInfo} from '../hooks/useRelay';
+import { useRelay, getRelayUrl, onAcpAgentList, type AcpAgentInfo} from '../hooks/useRelay';
 import { theme, useTheme } from '../theme';
 import { useScreenMountTiming } from '../lib/screenTiming';
 import ConnectionIndicator from '../components/ConnectionIndicator';
@@ -13,6 +13,7 @@ import ChatComposer from '../components/chat/ChatComposer';
 import type { SessionChatAttachment, ConnectorInfo } from '../hooks/useRelay';
 import { onConnectorList } from '../hooks/useRelay';
 import { tapLight } from '../lib/haptics';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 /**
  * Mobile mirror of the desktop's new-chat welcome (ChatView + ChatWelcome):
@@ -54,20 +55,30 @@ export default function HomeScreen() {
   // Actions only: subscribing to the drawer's STATE would re-render the
   // home screen on every open/close, including the close that accompanies a
   // navigation away from it.
-  const { open } = useDrawerActions();
+  const { open, pendingProject, setPendingProject } = useDrawerActions();
   useTheme(); // subscribe so theme.colors is reactive
   const c = theme.colors;
   const insets = useSafeAreaInsets();
 
+  // Paired-before gate: a phone with a saved pairing URL stays on the home
+  // screen even while offline (the composer shows an offline notice and the
+  // header dot flips) — it must never bounce back to the pairing screen on
+  // every reconnect retry.
+  const hasSavedPairing = useMemo(() => getRelayUrl() != null, []);
   const [qrVisible, setQrVisible] = useState(false);
   const [modelSheetOpen, setModelSheetOpen] = useState(false);
   // ACP agents for the picker's Agents · ACP rail (desktop parity).
   const [acpAgents, setAcpAgents] = useState<AcpAgentInfo[]>([]);
+  // Mount-scoped with a ref guard: under a render loop this effect used to
+  // re-fire per pass and flood the relay with ListAcpAgents (request storm).
+  const fetchedAcp = React.useRef(false);
   React.useEffect(() => {
-    if (!connected) return;
+    if (!connected) { fetchedAcp.current = false; return; }
+    if (fetchedAcp.current) return;
+    fetchedAcp.current = true;
     listAcpAgents();
     const off = onAcpAgentList.on(({ agents }) => setAcpAgents(agents));
-    return off;
+    return () => { fetchedAcp.current = false; off(); };
   }, [connected, listAcpAgents]);
   const start = useCreateSessionFlow();
 
@@ -76,17 +87,46 @@ export default function HomeScreen() {
   // "Deepseek V4.1 Flash"), then the first cloud provider; the pick rides
   // CreateSession → the chat is born on that model. Effort ('' = Def)
   // rides along, mirroring the desktop picker's slider.
-  const [picked, setPicked] = useState<{ provider: string; model: string } | null>(null);
-  const [pickedEffort, setPickedEffort] = useState('');
+  // Last model pick PERSISTS across restarts (the desktop remembers its own
+  // last-used model; without this the chip reset to the desktop's auto-route
+  // default on every cold start). Direct AsyncStorage (not the screen cache —
+  // hydration is async and this must win the very first render race).
+  const [picked, setPickedState] = useState<{ provider: string; model: string } | null>(null);
+  const [pickedEffort, setPickedEffortState] = useState('');
+  const setPicked = useCallback((v: { provider: string; model: string } | null) => {
+    setPickedState(v);
+    void AsyncStorage.setItem('home.pickedModel', JSON.stringify(v ?? null)).catch(() => {});
+  }, []);
+  const setPickedEffort = useCallback((v: string) => {
+    setPickedEffortState(v);
+    void AsyncStorage.setItem('home.pickedEffort', v).catch(() => {});
+  }, []);
+  useEffect(() => {
+    void (async () => {
+      try {
+        const [m, e] = await Promise.all([
+          AsyncStorage.getItem('home.pickedModel'),
+          AsyncStorage.getItem('home.pickedEffort'),
+        ]);
+        if (m) setPickedState(JSON.parse(m));
+        if (e != null) setPickedEffortState(e);
+      } catch {
+        // storage unavailable — the desktop default applies
+      }
+    })();
+  }, []);
   // Composer @-menu state: connector catalog + what's attached to the
   // not-yet-created chat (rides CreateSession).
   const [connectorList, setConnectorList] = useState<ConnectorInfo[]>([]);
   const [attachedConnectors, setAttachedConnectors] = useState<string[]>([]);
+  const fetchedConnectors = React.useRef(false);
   React.useEffect(() => {
-    if (!connected) return;
+    if (!connected) { fetchedConnectors.current = false; return; }
+    if (fetchedConnectors.current) return;
+    fetchedConnectors.current = true;
     listConnectors();
     const off = onConnectorList.on(({ connectors: list }) => setConnectorList(list));
-    return off;
+    return () => { fetchedConnectors.current = false; off(); };
   }, [connected, listConnectors]);
   const toggleConnector = React.useCallback((id: string) => {
     setAttachedConnectors((prev) =>
@@ -107,15 +147,21 @@ export default function HomeScreen() {
   // A harness pick (provider 'harness:<id>') maps onto CreateSession's
   // harness field — the desktop commits agent+model together too.
   const sendNewChat = useCallback((text: string, attachments?: SessionChatAttachment[]) => {
-    if (!connected || !text.trim()) return;
+    // No connected guard that silently returns: the starter cards render while
+    // CONNECTING too, and a silent tap-kills-the-tap read as "the chips are
+    // broken". Route through the create flow — it alerts when the socket
+    // isn't open (createSession returns false) instead of doing nothing.
+    if (!text.trim()) return;
     let harness = '';
     let provider = selected?.provider;
     if (provider?.startsWith('harness:')) {
       harness = provider.slice('harness:'.length);
       provider = undefined;
     }
-    start('', harness, text.trim(), provider, selected?.model, attachments, pickedEffort, attachedConnectors);
-  }, [connected, selected, pickedEffort, attachedConnectors, start]);
+    // A pending project (drawer row / new-chat sheet) binds the created chat.
+    start(pendingProject?.id ?? '', harness, text.trim(), provider, selected?.model, attachments, pickedEffort, attachedConnectors);
+    setPendingProject(null);
+  }, [selected, pickedEffort, attachedConnectors, start, pendingProject, setPendingProject]);
 
   return (
     <KeyboardAvoidingView
@@ -138,7 +184,7 @@ export default function HomeScreen() {
 
       <ScrollView contentContainerStyle={styles.body} bounces={false} keyboardShouldPersistTaps="handled">
         {/* Time-aware greeting — desktop ChatWelcome parity */}
-        {connected || connecting ? (
+        {hasSavedPairing ? (
           <View style={styles.greetingBlock}>
             <Text style={[styles.greetingHi, { color: c.text }]}>{greeting.hi}</Text>
             <Text style={[styles.greetingAsk, { color: c.textSecondary }]}>
@@ -147,9 +193,8 @@ export default function HomeScreen() {
           </View>
         ) : (
           <View style={styles.greetingBlock}>
-            <View style={[styles.glyph, { backgroundColor: c.accent }]}>
-              <Text style={[styles.glyphText, { color: c.white }]}>R</Text>
-            </View>
+            {/* The real app logo — not a letter placeholder. */}
+            <Image source={require('../../assets/icon.png')} style={styles.logo} />
             <Text style={[styles.greetingHi, { color: c.text }]}>Relay</Text>
             <Text style={[styles.greetingAsk, { color: c.textSecondary }]}>
               Pair with your desktop to take your agent anywhere.
@@ -157,7 +202,7 @@ export default function HomeScreen() {
           </View>
         )}
 
-        {connected || connecting ? (
+        {hasSavedPairing ? (
           <>
             {/* Starter cards — desktop WELCOME_PROMPTS; tap prefills. */}
             <View style={styles.prompts}>
@@ -212,7 +257,7 @@ export default function HomeScreen() {
 
       {/* Bottom composer — docked to the screen's bottom edge (desktop
           parity): model chip + the real ChatComposer (attach/input/mic/send). */}
-      {connected || connecting ? (
+      {hasSavedPairing ? (
         <View style={{ marginHorizontal: theme.spacing.md, marginBottom: Math.max(insets.bottom, 10) }}>
           <ChatComposer
             onSend={sendNewChat}
@@ -235,6 +280,25 @@ export default function HomeScreen() {
             }
             connectors={{ list: connectorList, attached: attachedConnectors, onToggle: toggleConnector }}
           />
+          {pendingProject ? (
+            <View style={styles.pendingProjectRow}>
+              <View style={[styles.pendingChip, { backgroundColor: c.surface2, borderColor: c.border }]}>
+                <Ionicons name="folder" size={12} color={c.accent} />
+                <Text numberOfLines={1} style={[styles.pendingChipText, { color: c.text }]}>
+                  {pendingProject.name}
+                </Text>
+                <TouchableOpacity
+                  onPress={() => { tapLight(); setPendingProject(null); }}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                  accessibilityRole="button"
+                  accessibilityLabel="Clear pending project"
+                >
+                  <Ionicons name="close-circle" size={14} color={c.textSecondary} />
+                </TouchableOpacity>
+              </View>
+              <Text style={[styles.pendingHint, { color: c.textSecondary }]}>next chat</Text>
+            </View>
+          ) : null}
         </View>
       ) : null}
 
@@ -286,15 +350,12 @@ const styles = StyleSheet.create({
   },
   // greeting
   greetingBlock: { alignItems: 'center', paddingTop: '14%', paddingBottom: theme.spacing.lg },
-  glyph: {
-    width: 52,
-    height: 52,
+  logo: {
+    width: 64,
+    height: 64,
     borderRadius: theme.radius.lg,
-    justifyContent: 'center',
-    alignItems: 'center',
     marginBottom: theme.spacing.md,
   },
-  glyphText: { fontSize: 24, fontWeight: '800' },
   greetingHi: { fontSize: 24, fontWeight: '800', marginBottom: 4 },
   greetingAsk: { fontSize: theme.fontSize.md },
   // starter cards
@@ -327,6 +388,18 @@ const styles = StyleSheet.create({
     padding: theme.spacing.md,
     gap: theme.spacing.sm,
   },
+  pendingProjectRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    paddingHorizontal: theme.spacing.md, paddingTop: 6,
+  },
+  pendingChip: {
+    flexDirection: 'row', alignItems: 'center', gap: 5,
+    borderRadius: theme.radius.pill, borderWidth: 1,
+    paddingLeft: 8, paddingRight: 6, paddingVertical: 4,
+    maxWidth: '60%',
+  },
+  pendingChipText: { fontSize: 12, fontWeight: '600' },
+  pendingHint: { fontSize: 11 },
   modelChip: {
     alignSelf: 'flex-start',
     flexDirection: 'row',

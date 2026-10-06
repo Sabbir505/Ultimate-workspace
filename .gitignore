@@ -52,6 +52,11 @@ __pycache__/
 # Scratch dir (QA screenshots, patch probes, a live pairing token — never ship it)
 Random Stuff/
 .zcode/plans/
+# Mobile E2E: screenshots/results are generated, and the pairing token is a
+# live secret read from the desktop keychain — never commit either.
+/e2e/artifacts/
+/e2e/results.json
+/e2e/.pairing-token
 # Local image-generation outputs and one-off probe dumps
 fox_uri.txt
 src-tauri/fox_uri.txt
@@ -68,3 +73,18 @@ public/pdfjs-wasm/
 # Parallel agent builds redirect CARGO_TARGET_DIR into per-agent target-agentN/
 # directories at the repo root and under src-tauri/. Build output, not source.
 target-agent*/
+
+# EAS builds pack every untracked-not-ignored file in the repo; this audit
+# target dir holds a broken libreoffice symlink that kills the tarball lstat.
+src-tauri/target-audit/
+# Built APK artifacts dropped at the repo root (93 MB each, pure build output).
+/relay-mobile-*.apk
+
+# Mobile E2E runtime log
+/e2e/resume-run.log
+# QR images can encode the live relay pairing URL — never commit them
+*-qr.png
+exp-qr.png
+# Scratch text dumps
+_short.txt
+doc_cmds2.txt

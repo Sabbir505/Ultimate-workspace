@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Relay",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "identifier": "dev.relay.app",
   "build": {
     "beforeDevCommand": "node scripts/dev-sidecars.mjs && npm run dev",

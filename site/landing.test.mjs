@@ -78,5 +78,12 @@ test('navigation anchors resolve and downloads use the real release page', () =>
       expect(link.href).toBe('https://github.com/Sabbir505/relay-releases/releases/latest');
     }
   }
+  // The mobile band ships the phone app from the same public releases repo —
+  // a versioned APK asset, not the /latest/ installer feed.
+  const android = [...document.querySelectorAll('a')].find((a) => a.textContent.includes('Android'));
+  expect(android, 'a download for Android').toBeTruthy();
+  expect(android.href).toMatch(
+    /^https:\/\/github\.com\/Sabbir505\/relay-releases\/releases\/download\/v[\d.]+(?:-[\w.]+)?\/relay-mobile-v[\d.]+\.apk$/,
+  );
   dom.window.close();
 });

@@ -3,7 +3,7 @@
     "name": "Relay Mobile",
     "slug": "relay-mobile",
     "scheme": "relay",
-    "version": "0.4.2",
+    "version": "0.7.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "automatic",
@@ -37,6 +37,7 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.relay.mobile",
+      "buildNumber": "1",
       "infoPlist": {
         "NSCameraUsageDescription": "Relay needs camera access to scan the desktop pairing QR code.",
         "UIBackgroundModes": [
@@ -46,6 +47,7 @@
     },
     "android": {
       "package": "com.relay.mobile",
+      "versionCode": 2,
       "permissions": [
         "android.permission.CAMERA",
         "android.permission.RECORD_AUDIO",

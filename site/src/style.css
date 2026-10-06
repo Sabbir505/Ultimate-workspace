@@ -281,6 +281,9 @@ html.js [data-reveal].is-visible { opacity: 1; transform: none; }
 .mobile-copy > p { font-size: 13.5px; line-height: 1.95; color: #8ea3a2; max-width: 440px; margin: 0; }
 .mobile-copy .story-details { color: #7f9a9c; }
 .mobile-copy .story-details > span { border-top: 1px solid #ffffff24; }
+.mobile-cta { display: flex; align-items: center; gap: 15px; flex-wrap: wrap; margin-top: 27px; }
+.mobile-cta .button-light { box-shadow: 0 3px 0 #00000045; }
+.mobile-cta-note { font-family: var(--font-mono); font-size: 8px; letter-spacing: .5px; color: #7f9a9c; }
 .phone-visual { display: flex; flex-direction: column; align-items: center; gap: 16px; margin: 0; }
 .phone { width: 272px; border-radius: 32px; border: 1px solid #38474d; background: #151d22; padding: 10px; box-shadow: 0 30px 60px #00000055; }
 .phone-screen { border-radius: 23px; overflow: hidden; background: #171614; }

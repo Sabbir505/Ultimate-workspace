@@ -24,6 +24,7 @@
     <symbol id="globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><ellipse cx="12" cy="12" rx="4" ry="9"/><path d="M3 12h18"/></symbol>
     <symbol id="mesh" viewBox="0 0 24 24"><rect x="9" y="9" width="6" height="6" rx="1"/><path d="M12 3v6m0 6v6M3 12h6m6 0h6M5 5l4 4m6 6 4 4M19 5l-4 4m-6 6-4 4"/></symbol>
     <symbol id="windows" viewBox="0 0 24 24"><path d="M3 4h8v7H3zm10 0h8v7h-8zM3 13h8v7H3zm10 0h8v7h-8z" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="android" viewBox="0 0 24 24"><path d="M17.523 15.3414c-.5511 0-.9993-.4486-.9993-.9997s.4483-.9993.9993-.9993c.5511 0 .9993.4483.9993.9993.0001.5511-.4482.9997-.9993.9997m-11.046 0c-.5511 0-.9993-.4486-.9993-.9997s.4483-.9993.9993-.9993c.5511 0 .9993.4483.9993.9993 0 .5511-.4483.9997-.9993.9997m11.4045-6.02l1.9973-3.4592a.416.416 0 00-.1521-.5676.416.416 0 00-.5676.1521l-2.0223 3.503C15.5902 8.2439 13.8533 7.8508 12 7.8508s-3.5902.3931-5.1367 1.0989L4.841 5.4477a.4161.4161 0 00-.5677-.1521.4157.4157 0 00-.1521.5676l1.9973 3.4592C2.6889 11.1867.3432 14.6589 0 18.761h24c-.3435-4.1021-2.6892-7.5743-6.1185-9.4396" fill="currentColor" stroke="none"/></symbol>
     <symbol id="plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
     <symbol id="book" viewBox="0 0 24 24"><path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></symbol>
     <symbol id="search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></symbol>
@@ -207,7 +208,7 @@
       <details><summary>Can I use local models?<svg class="icon"><use href="#plus"/></svg></summary><p>Yes. Browse and download GGUF models from Hugging Face and run them on your machine with llama-server. Local image generation and on-device voice are built in too. Performance depends on your hardware and the model you choose.</p></details>
       <details><summary>Where does my data live?<svg class="icon"><use href="#plus"/></svg></summary><p>Your workspace, chats, notes, and memory live on your machine, in a local database and folders you choose. The file tools stay inside the folders you grant. Cloud providers and connected services still receive whatever you send them.</p></details>
       <details><summary>Does Relay run on my operating system?<svg class="icon"><use href="#plus"/></svg></summary><p>Relay ships for Windows today — grab the installer from <a href="https://github.com/Sabbir505/relay-releases/releases/latest">GitHub Releases</a>. The stack is cross-platform, but Windows is the supported target for now.</p></details>
-      <details><summary>Is there a mobile app?<svg class="icon"><use href="#plus"/></svg></summary><p>Yes. Pair the companion app over a QR code or Tailscale to run chats, answer approvals, and get notifications from your phone. The connection is end-to-end encrypted and your API keys never leave the desktop.</p></details>
+      <details><summary>Is there a mobile app?<svg class="icon"><use href="#plus"/></svg></summary><p>Yes. Grab the Android APK from <a href="https://github.com/Sabbir505/relay-releases/releases/tag/v0.7.0">GitHub Releases</a>, then pair the companion app over a QR code or Tailscale to run chats, answer approvals, and get notifications from your phone. The connection is end-to-end encrypted and your API keys never leave the desktop.</p></details>
       <details><summary>How do I get started?<svg class="icon"><use href="#plus"/></svg></summary><p>Get the Windows installer from <a href="https://github.com/Sabbir505/relay-releases/releases/latest">GitHub Releases</a>, then connect a supported agent CLI or configure built-in chat.</p></details>
     </div>
   </section>
@@ -219,6 +220,10 @@
         <h2 id="mobile-title">Your workspace, <br />in your <em>pocket.</em></h2>
         <p>Pair once by QR code, then run chats, answer approvals, and get notifications from your phone. The models, the keys, and the files stay on your desktop.</p>
         <div class="story-details"><span>QR pairing</span><span>End-to-end encrypted</span><span>Keys stay on the desktop</span></div>
+        <div class="mobile-cta">
+          <a class="button button-light" href="https://github.com/Sabbir505/relay-releases/releases/download/v0.7.0/relay-mobile-v0.7.0.apk"><svg class="icon"><use href="#android"/></svg>Download for Android<svg class="icon"><use href="#arrow"/></svg></a>
+          <span class="mobile-cta-note">ANDROID APK · v0.7.0 · PAIRS WITH RELAY FOR WINDOWS</span>
+        </div>
       </div>
       <figure class="phone-visual">
         <div class="phone">

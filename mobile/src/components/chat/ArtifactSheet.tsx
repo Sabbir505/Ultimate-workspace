@@ -39,7 +39,7 @@ import { File, Paths } from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
 import { theme } from '../../theme';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useRelay, onArtifactContent, getCachedArtifactPreview, type ArtifactPreview, type SessionArtifact } from '../../hooks/useRelay';
+import { useRelay, onArtifactContent, getCachedArtifactPreview, type ArtifactPreview, type SessionArtifact, getCachedArtifactContent } from '../../hooks/useRelay';
 import { tapLight } from '../../lib/haptics';
 import MarkdownText from './MarkdownText';
 import CodePreview from './CodePreview';
@@ -170,6 +170,19 @@ export function ArtifactSheet({ visible, onClose, artifacts, sessionId, initialP
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, initialPath]);
 
+  // Cached copy paints the moment the selection changes (previously seen
+  // artifacts render instantly, even mid-turn or offline); the fetch then
+  // replaces it with the fresh read.
+  useEffect(() => {
+    if (!selKey) return;
+    const cached = getCachedArtifactContent(selKey);
+    if (cached && cached.text != null) {
+      setContent({ text: cached.text, dataBase64: undefined, truncated: cached.truncated });
+    } else if (cached && cached.dataBase64 != null) {
+      setContent({ text: undefined, dataBase64: cached.dataBase64, truncated: cached.truncated });
+    }
+  }, [selKey]);
+
   // Fetch the selected artifact's content over the relay and wait for the
   // matching ArtifactContent event (subscription lives inside the effect so
   // stale responses for a previous selection can't land).
@@ -193,7 +206,13 @@ export function ArtifactSheet({ visible, onClose, artifacts, sessionId, initialP
       return;
     }
     if (!connected) {
-      setError('Not connected to the desktop. Reconnect in Settings and try again.');
+      const cached = selKey ? getCachedArtifactContent(selKey) : null;
+      if (cached && (cached.text != null || cached.dataBase64 != null)) {
+        setContent({ text: cached.text ?? undefined, dataBase64: cached.dataBase64 ?? undefined, truncated: cached.truncated });
+        setError('Offline — showing the cached copy.');
+      } else {
+        setError('Not connected to the desktop. Reconnect in Settings and try again.');
+      }
       return;
     }
     let done = false;
@@ -203,7 +222,15 @@ export function ArtifactSheet({ visible, onClose, artifacts, sessionId, initialP
       if (!done) {
         done = true;
         setLoading(false);
-        setError('The desktop didn’t respond — it may be busy. Try again.');
+        const cached = getCachedArtifactContent(targetPath);
+        if (cached && (cached.text != null || cached.dataBase64 != null)) {
+          // Mid-turn reads get deferred by the desktop — a cached copy is
+          // better than an error wall. Mark it stale instead.
+          setContent({ text: cached.text ?? undefined, dataBase64: cached.dataBase64 ?? undefined, truncated: cached.truncated });
+          setError('Showing the cached copy — the desktop is busy; reopen later to refresh.');
+        } else {
+          setError('The desktop didn’t respond — it may be busy. Try again.');
+        }
       }
     }, FETCH_TIMEOUT_MS);
     const off = onArtifactContent.on((p) => {
@@ -218,6 +245,8 @@ export function ArtifactSheet({ visible, onClose, artifacts, sessionId, initialP
       setContent({ text: p.text, dataBase64: p.dataBase64, truncated: !!p.truncated });
     });
     readArtifact(sessionId, targetPath);
+    // NOTE: the reply handler above also runs for this request — the cache
+    // write happens in useRelay (per path), so this effect stays clean.
     return () => {
       done = true;
       clearTimeout(timeout);
@@ -287,7 +316,7 @@ export function ArtifactSheet({ visible, onClose, artifacts, sessionId, initialP
         </View>
       </ScrollView>
     );
-  } else if (error) {
+  } else if (error && !content) {
     body = (
       <View style={styles.centered}>
         <Text style={[styles.errorText, { color: c.error }]}>{error}</Text>
@@ -554,7 +583,12 @@ export function ArtifactSheet({ visible, onClose, artifacts, sessionId, initialP
                 </ScrollView>
               ) : null}
 
-              <View style={styles.previewArea}>{body}</View>
+              <View style={styles.previewArea}>
+                {body}
+                {error && content ? (
+                  <Text style={[styles.staleNote, { color: c.warning }]}>{error}</Text>
+                ) : null}
+              </View>
         </View>
       </View>
     </Modal>
@@ -683,6 +717,7 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
   },
   shareButtonText: { fontSize: theme.fontSize.sm, fontWeight: '600' },
+  staleNote: { fontSize: 11, textAlign: 'center', padding: 6 },
 });
 
 export default ArtifactSheet;

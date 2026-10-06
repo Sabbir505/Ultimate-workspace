@@ -12,7 +12,7 @@
 // the OS onto the composer card.
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { ArrowUpToLine, AudioLines, GripVertical, Info, Mic, Pencil, Plug, Puzzle, SquareSlash, Trash2, X } from "lucide-react";
+import { ArrowUp, ArrowUpToLine, AudioLines, GripVertical, Info, Mic, Pencil, Plug, Puzzle, SquareSlash, Trash2, X } from "lucide-react";
 import { AgentModelPicker, type AgentModelSelection } from "./AgentModelPicker";
 import { PermissionModeMenu } from "./PermissionModeMenu";
 import { ArtifactTypeSelector } from "./ArtifactTypeSelector";
@@ -1832,7 +1832,9 @@ export const ChatComposer = memo(function ChatComposer({
                   }
                   aria-label="Send message"
                 >
-                  ↑
+                  {/* Same stroke glyph spec as the mic / hands-free chips
+                      beside it (14px, 1.8 stroke) — one icon language. */}
+                  <ArrowUp size={14} strokeWidth={1.8} style={{ flexShrink: 0 }} aria-hidden />
                 </button>
               </>
             )}

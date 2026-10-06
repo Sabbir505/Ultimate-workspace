@@ -1,11 +1,14 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { ScrollView, StyleSheet, Text, TouchableOpacity, View, TextInput, Modal } from 'react-native';
+import { ScrollView, StyleSheet, Text, TouchableOpacity, View, TextInput, Modal, ActivityIndicator } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { theme } from '../theme';
 import { useScreenMountTiming } from '../lib/screenTiming';
 import { onBudgetList, onCostRollups, useRelay, type BudgetInfo, type CostRollupsData } from '../hooks/useRelay';
 import { useRelayList } from '../hooks/useRelayList';
+import { screenCacheGet, screenCacheSet, screenCacheHas } from '../lib/screenCache';
+import { ScreenLoading, FadeIn } from '../components/ScreenFeedback';
+import DailySpendChart from '../components/DailySpendChart';
 // Shared formatters — the hand-copied `usd`/`tokens` helpers used to drift
 // from the chat usage line's copy.
 import { formatUsd as usd, formatTokens as tokens } from '../lib/format';
@@ -28,7 +31,13 @@ export default function CostScreen() {
   const { getCostRollups, connected, listBudgets, setBudget, removeBudget } = useRelay();
   const c = theme.colors;
   const [rangeDays, setRangeDays] = useState<7 | 30 | 90>(30);
-  const [rollups, setRollups] = useState<CostRollupsData | null>(null);
+  const [rollups, setRollups] = useState<CostRollupsData | null>(() =>
+    screenCacheGet<CostRollupsData>('cost.rollups') ?? null,
+  );
+  const [loaded, setLoaded] = useState(() => screenCacheHas('cost.rollups'));
+  // Range switches fetch fresh rollups — a small inline spinner says it's
+  // working (the cached chart stays on screen underneath).
+  const [refreshing, setRefreshing] = useState(false);
   // Budgets (desktop BudgetPanel parity): per-project monthly caps edited
   // right here; the desktop reads the same store.
   const [budgets, setBudgets] = useState<BudgetInfo[]>([]);
@@ -52,7 +61,12 @@ export default function CostScreen() {
 
   // Refetch on mount, on a range change, and on reconnect.
   useRelayList(() => { getCostRollups(rangeDays); }, [rangeDays]);
-  useEffect(() => onCostRollups.on(({ rollups: r }) => setRollups(r)), []);
+  useEffect(() => onCostRollups.on(({ rollups: r }) => {
+    screenCacheSet('cost.rollups', r);
+    setRollups(r);
+    setLoaded(true);
+    setRefreshing(false);
+  }), []);
 
   // Cap the chart to the ACTIVE range, not a hardcoded 30 — the toggle
   // offers up to 90d and the hero says "last {rollups.rangeDays}d".
@@ -74,7 +88,7 @@ export default function CostScreen() {
             <TouchableOpacity
               key={r.value}
               style={[styles.rangeChip, rangeDays === r.value && { backgroundColor: c.accent }]}
-              onPress={() => setRangeDays(r.value as 7 | 30 | 90)}
+              onPress={() => { setRefreshing(true); setRangeDays(r.value as 7 | 30 | 90); }}
               accessibilityRole="button"
               accessibilityLabel={`Range ${r.label}`}
             >
@@ -85,11 +99,23 @@ export default function CostScreen() {
           ))}
         </View>
 
+        {refreshing ? (
+          <View style={styles.refreshRow}>
+            <ActivityIndicator size="small" color={c.accent} />
+            <Text style={{ color: c.textSecondary, fontSize: 11 }}>Fetching {rangeDays}d…</Text>
+          </View>
+        ) : null}
+
         {!connected ? (
           <Text style={[styles.note, { color: c.textSecondary }]}>Connect to your desktop to see spend.</Text>
         ) : !rollups ? (
-          <Text style={[styles.note, { color: c.textSecondary }]}>Loading…</Text>
+          !loaded ? (
+            <ScreenLoading label="Loading spend" />
+          ) : (
+            <Text style={[styles.note, { color: c.textSecondary }]}>No spend data yet.</Text>
+          )
         ) : (
+          <FadeIn>
           <>
             {/* Hero — desktop CostHero parity. */}
             <View style={[styles.hero, { backgroundColor: c.surface2, borderColor: c.border }]}>
@@ -107,22 +133,10 @@ export default function CostScreen() {
               </View>
             </View>
 
-            {/* Daily bars — desktop DailyChart parity. */}
+            {/* Daily spend — desktop DailyChart parity: stacked provider
+                areas, Cost/Tokens toggle, tap-to-inspect. */}
             <Text style={[styles.sectionTitle, { color: c.textSecondary }]}>Daily spend</Text>
-            <View style={styles.dailyWrap}>
-              {daily.map((d) => {
-                const pct = Math.max(2, (d.costUsd / maxDaily) * 100);
-                return (
-                  <View key={d.day} style={styles.dailyRow}>
-                    <Text style={[styles.dailyLabel, { color: c.textSecondary }]}>{d.day.slice(5)}</Text>
-                    <View style={[styles.dailyTrack, { backgroundColor: c.background }]}>
-                      <View style={[styles.dailyBar, { width: `${pct}%`, backgroundColor: c.accent }]} />
-                    </View>
-                    <Text style={[styles.dailyValue, { color: c.text }]}>{usd(d.costUsd)}</Text>
-                  </View>
-                );
-              })}
-            </View>
+            <DailySpendChart daily={daily} />
 
             {/* Token stats — desktop StatsRow parity. */}
             <Text style={[styles.sectionTitle, { color: c.textSecondary }]}>Tokens</Text>
@@ -142,9 +156,12 @@ export default function CostScreen() {
               ))}
             </View>
 
-            {/* Per-model breakdown — desktop ModelBreakdownTable parity. */}
+            {/* Per-model breakdown — desktop ModelBreakdownTable parity. A
+                fixed-height scroll area: 90d of models used to stretch the
+                whole page. */}
             <Text style={[styles.sectionTitle, { color: c.textSecondary }]}>By model</Text>
-            <View style={[styles.table, { backgroundColor: c.surface2, borderColor: c.border }]}>
+            <View style={[styles.table, { backgroundColor: c.surface2, borderColor: c.border, maxHeight: 260 }]}>
+              <ScrollView nestedScrollEnabled style={{ flexGrow: 0 }}>
               <View style={styles.tHead}>
                 <Text style={[styles.tCellHead, { flex: 1.6, color: c.textSecondary }]}>Model</Text>
                 <Text style={[styles.tCellHead, styles.tRight, { color: c.textSecondary }]}>Tokens</Text>
@@ -164,6 +181,7 @@ export default function CostScreen() {
               {rollups.perModel.length === 0 && (
                 <Text style={[styles.tEmpty, { color: c.textSecondary }]}>No model usage in this range.</Text>
               )}
+              </ScrollView>
             </View>
 
             {/* Per-project — desktop BudgetPanel parity (budgets when bound). */}
@@ -240,9 +258,10 @@ export default function CostScreen() {
             </View>
 
             <Text style={[styles.note, { color: c.textSecondary }]}>
-              Cache savings {usd(rollups.costQuality.cacheSavingsUsd)} · unpriced {usd(totals!.unpricedUsd)}
+              Cache savings {usd(rollups.costQuality.cacheSavingsUsd)}
             </Text>
           </>
+          </FadeIn>
         )}
       </ScrollView>
 
@@ -356,6 +375,19 @@ const styles = StyleSheet.create({
     fontSize: theme.fontSize.xs, fontWeight: '700', textTransform: 'uppercase',
     letterSpacing: 0.6, marginBottom: theme.spacing.sm, marginTop: theme.spacing.lg,
   },
+  refreshRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+    paddingVertical: 8,
+  },
+  chart: {
+    flexDirection: 'row', alignItems: 'flex-end', gap: 2,
+    borderRadius: theme.radius.md, borderWidth: 1,
+    paddingHorizontal: 8, paddingTop: 10, paddingBottom: 4,
+    height: 116,
+  },
+  barCol: { flex: 1, alignItems: 'center', justifyContent: 'flex-end', gap: 3 },
+  bar: { width: '100%', maxWidth: 18, borderRadius: 4 },
+  barLabel: { fontSize: 8, fontFamily: 'monospace' },
   dailyWrap: { gap: 6 },
   dailyRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   dailyLabel: { width: 40, fontSize: 10, fontFamily: 'monospace' },

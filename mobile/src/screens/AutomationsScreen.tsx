@@ -38,6 +38,7 @@ import {
   type AutomationRunInfo,
 } from '../hooks/useRelay';
 import { useRelayList } from '../hooks/useRelayList';
+import { screenCacheGet, screenCacheSet, screenCacheHas } from '../lib/screenCache';
 import { timeAgo } from '../lib/format';
 import { openChatById } from '../lib/navigation';
 import { tapLight } from '../lib/haptics';
@@ -73,8 +74,12 @@ export default function AutomationsScreen() {
     listAutomationRuns,
     spawnSession,} = useRelay();
 
-  const [items, setItems] = useState<AutomationInfo[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [items, setItems] = useState<AutomationInfo[]>(() =>
+    screenCacheGet<AutomationInfo[]>('automations.items') ?? [],
+  );
+  // No cached list yet → first load shows the spinner; a revisit with a
+  // cached list paints it instantly and refreshes underneath.
+  const [loading, setLoading] = useState(() => !screenCacheHas('automations.items'));
   const [editing, setEditing] = useState<AutomationInfo | 'new' | null>(null);
   const [runsFor, setRunsFor] = useState<AutomationInfo | null>(null);
   const [runs, setRuns] = useState<AutomationRunInfo[]>([]);
@@ -99,7 +104,11 @@ export default function AutomationsScreen() {
   });
 
   useEffect(() => {
-    const offList = onAutomationList.on(({ automations }) => { setItems(automations); setLoading(false); });
+    const offList = onAutomationList.on(({ automations }) => {
+      screenCacheSet('automations.items', automations);
+      setItems(automations);
+      setLoading(false);
+    });
     const offUpdated = onAutomationUpdated.on(() => refresh());
     const offDeleted = onAutomationDeleted.on(({ automationId }) => {
       setItems((prev) => prev.filter((a) => a.id !== automationId));

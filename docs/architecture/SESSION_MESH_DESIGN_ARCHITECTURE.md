@@ -1,13 +1,20 @@
 # Session Mesh — cross-session awareness, messaging, and spawning
 
-Status: **implemented** (P1+P2+P3 of §8; P4 hardening partially — settings
-toggle `sessionMesh.enabled` is read by the runtime, the Settings panel
-section and eval scenarios are still open). Companion docs:
+Status: **implemented, including P4** (§8 is complete as of 2026-10-05 — the Settings panel section shipped as `src/components/settings/MeshPanel.tsx`, and the P4 eval scenarios shipped as `src-tauri/src/session_fabric/eval.rs`). Companion docs:
 `MEMORY_DESIGN_ARCHITECTURE.md` (its §2.5 G1 gap — "No cross-session state" — is exactly
 this feature), `RESEARCH_MODE_IMPROVEMENTS_RESEARCH.md` (gap G4 / rec R11: orchestration
 is one-shot and static).
 
-**Implementation drift (verified against source 2026-09-21):** the §4.3 awareness design changed after implementation — the registry block is **not wired into any prompt path** (see §4.3 below; awareness ships as on-demand tools + a one-line per-turn identity hint). Other deviations from the text below: there is no `sessionMesh.summaryModel` setting and no per-capability `messaging`/`spawning` toggles — only `sessionMesh.enabled` (`session_fabric/mod.rs`); `FabricRuntime::on_turn_complete` does not exist (a per-target pump polls busy-state instead of turn-end hooks); `session_fabric/mail.rs` / `spawn.rs` / `eval.rs` do not exist — the whole runtime is `session_fabric/mod.rs`; `read_session` takes no `max_chars` (fixed 24k/8k budgets); the spawn depth guard `MAX_SPAWN_DEPTH = 2` blocks a depth-1 session from spawning (max chain = 1 child), and the "3 children" cap is 3 spawns **in the last 24h** (`CHILDREN_WINDOW_SECS`), not 3 live; the mail rate cap is per **sender** (10/hour), not per target; `spawn_session` has no `project_id` arg (children inherit the parent's project); the five tools are family-locked for built-in chats (`attach_connector("session-mesh")` or the keyword fast-path pre-unlocks) while harness relays always get them; UI wiring is `src/lib/ipc/sessionMesh.ts` + `src/state/chat/slices/meshSlice.ts` (no `SessionMailCard.tsx`); and the built-in prompt-budget guard is now `< 9,850` bytes (`chat/prompts.rs`).
+**Implementation drift (verified against source 2026-09-21; P4 status re-verified 2026-10-05):** the §4.3 awareness design changed after implementation — the registry block is **not wired into any prompt path** (see §4.3 below; awareness ships as on-demand tools + a one-line per-turn identity hint). Other deviations from the text below: there is no `sessionMesh.summaryModel` setting and no per-capability `messaging`/`spawning` toggles — only `sessionMesh.enabled` (`session_fabric/mod.rs`); `FabricRuntime::on_turn_complete` does not exist (a per-target pump polls busy-state instead of turn-end hooks); the runtime lives in `session_fabric/mod.rs`, with `session_fabric/eval.rs` added for the P4 eval scenarios (`mail.rs` and `spawn.rs` still do not exist); `read_session` takes no `max_chars` (fixed 24k/8k budgets); the spawn depth guard `MAX_SPAWN_DEPTH = 2` blocks a depth-1 session from spawning (max chain = 1 child), and the "3 children" cap is 3 spawns **in the last 24h** (`CHILDREN_WINDOW_SECS`), not 3 live; the mail rate cap is per **sender** (10/hour), not per target; `spawn_session` has no `project_id` arg (children inherit the parent's project); the five tools are family-locked for built-in chats (`attach_connector("session-mesh")` or the keyword fast-path pre-unlocks) while harness relays always get them; UI wiring is `src/lib/ipc/sessionMesh.ts` + `src/state/chat/slices/meshSlice.ts` (no `SessionMailCard.tsx`); and the built-in prompt-budget guard is now `< 9,850` bytes (`chat/prompts.rs`).
+
+> **Corrected 2026-10-05.** An earlier revision of this note stated that
+> `session_fabric/eval.rs` and the Settings panel section "do not exist / are still
+> open". Both shipped — `eval.rs` exercises the hook and question round-trips plus
+> every cap (`MAX_CHILDREN_PER_PARENT`, `MAX_FOLLOWUP_DEPTH`, `MAX_MAIL_CHARS`,
+> `MAX_MAIL_PER_HOUR`, `MAX_QUEUE_DEPTH`, `MAX_SPAWN_DEPTH`), and `MeshPanel.tsx` is the
+> P4 settings surface. The mesh also ships **lifecycle hooks** (`mesh_message` /
+> `mesh_turn_complete`), asserted end-to-end by `eval.rs` scenario 1 and not described
+> in this document — so this doc is incomplete on that point, not the feature absent.
 
 Working name **Session Mesh**. Three capabilities, in dependency order:
 

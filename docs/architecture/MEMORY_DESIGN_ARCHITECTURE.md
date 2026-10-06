@@ -43,7 +43,7 @@ Headline commitments:
 ### 2.2 Prompt assembly and budget machinery
 
 - `src-tauri/src/chat/prompts.rs` `build_system_prompt` :652 joins ordered parts: CORE (:98), datetime (:343), research (:418), skills catalog (:505), attach manifest (:562), plan mode (:625), user custom prompt. A memory section is just a new conditional part in this join.
-- **Note:** CORE currently asserts "No memory of other Relay sessions" (`prompts.rs:221-222`) and a phantom-tool test guards prompt/text consistency (`core_prompts_never_reference_phantom_tools`, `prompts.rs:783`). Both must change with this feature.
+- **Note (as originally written):** CORE asserted "No memory of other Relay sessions" (`prompts.rs:221-222`), and a phantom-tool test guards prompt/text consistency (`core_prompts_never_reference_phantom_tools`). Both had to change with this feature. **As of the 2026-10-05 re-verification the prompt line is already amended** — `chat/prompts.rs:982` now carries the note "Memory is real: the old 'No memory of other Relay sessions' line…".
 - Budget precedent: byte-cap tests (`core_prompts_stay_within_budget` :732), per-model context windows in `chat/context_windows.rs` :26 (+ frontend mirror `src/lib/contextWindow.ts`), `[prompt-audit]` size logging in `send_chat_message` (`chat/commands.rs:1703-1719`), cloud compaction + retry-on-overflow (`chat/mod.rs:565-599`). Memory injection plugs into this exact discipline.
 
 ### 2.3 Embeddings and retrieval infrastructure (reusable as-is)
@@ -570,7 +570,7 @@ Both spec builders (`specs.rs:12/:177`) get the schemas; dispatch in `execute_to
 
 ### 12.3 IPC surface
 
-Tauri commands `memory_list/memory_update/memory_delete/memory_purge/memory_export/status` in a new `commands/memory.rs`, registered in `lib.rs` `generate_handler!` :249; frontend wrappers in `src/lib/ipc.ts` (`safeInvoke` :43); state in `src/state/memory.ts`.
+Tauri commands `memory_list/memory_update/memory_delete/memory_purge/memory_export/status` live in `commands/memory_cmds.rs` (not `commands/memory.rs`), registered in `lib.rs` `generate_handler!` at lines 1142+; frontend wrappers are in the `src/lib/ipc/mcp.ts` domain module (e.g. `memoryList` at `mcp.ts:168`), not directly in `src/lib/ipc.ts`; and there is **no** `src/state/memory.ts` — the UI is `src/components/settings/MemoryPanel.tsx` plus `src/hooks/useMemoryEvents.ts`. *(Corrected 2026-10-05.)*
 
 ---
 

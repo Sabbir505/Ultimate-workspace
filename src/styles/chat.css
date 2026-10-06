@@ -14,9 +14,14 @@
   color: var(--text-dim);
 }
 
-/* Chat session rows in sidebar */
+/* Sidebar nav-button stack (Artifacts / Automations / Vault / Wiki /
+   Projects). One uniform 4px column rhythm: the gap below the Artifacts row
+   and below the Projects row used to be larger than the gaps between the
+   rows in between (leftover wrapper padding) — now every gap is identical. */
 .chat-new-btn-row {
-  padding: 2px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 .chat-session-row {
   position: relative;

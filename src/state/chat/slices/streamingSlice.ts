@@ -28,6 +28,7 @@ import {
   bufferTargetFor,
   bufferWriteBack,
   clearStreamState,
+  registerRemoteTurnDisarmer,
   cliAgentId,
   hasManuallyRenamed,
   isCliAgent,
@@ -66,7 +67,25 @@ function consumeStaleTerminal(
   return armed === live;
 }
 
+// HUNG REMOTE TURN WATCHDOG. A backend-initiated turn (phone, automation)
+// whose model never streams — or stalls mid-stream — never emits chat:done,
+// so its streaming entry (and every turn-gated surface it gates) stayed
+// stuck FOREVER. Each entry arms a stall timer; tokens re-arm it; a timer
+// that fires clears the dead entry so the UI unblocks. The turn itself is
+// untouched backend-side — this only stops RENDERING a dead stream.
+const REMOTE_TURN_STALL_MS = 120_000;
+const remoteStallTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
 export function createStreamingSlice(set: ChatStoreSet, get: ChatStoreGet) {
+  // clearStreamState (moduleState.ts) disarms per-turn stall timers through
+  // this hook — a direct import would cycle moduleState ↔ streamingSlice.
+  registerRemoteTurnDisarmer((id: string) => {
+    const t = remoteStallTimers.get(id);
+    if (t) {
+      clearTimeout(t);
+      remoteStallTimers.delete(id);
+    }
+  });
   return {
     sendMessage: async (content: string, attachments?: ChatAttachmentInput[], forceResearch?: boolean, sessionIdOverride?: string) => {
       const {
@@ -579,6 +598,19 @@ cancelStream: async (sessionIdOverride?: string) => {
       for (const delay of [500, 2500]) {
         setTimeout(() => void get().syncTranscript(chatSessionId), delay);
       }
+      // Arm the stall watchdog (re-armed by every token; disarmed by the
+      // terminal-event paths via clearStreamState).
+      const prev = remoteStallTimers.get(chatSessionId);
+      if (prev) clearTimeout(prev);
+      remoteStallTimers.set(
+        chatSessionId,
+        setTimeout(() => {
+          remoteStallTimers.delete(chatSessionId);
+          if (!(chatSessionId in get().streaming)) return;
+          console.warn('[stream] remote turn stalled with no tokens for', REMOTE_TURN_STALL_MS / 1000, 's — releasing UI:', chatSessionId);
+          set((st) => clearStreamState(st, chatSessionId));
+        }, REMOTE_TURN_STALL_MS),
+      );
     },
 
     // Refetch the displayed transcript for a session and merge it into the
@@ -646,6 +678,20 @@ cancelStream: async (sessionIdOverride?: string) => {
       // chat:done/chat:error must be acted on normally (audit H36).
       if (token.length > 0 && get().staleTerminalFor[chatSessionId] !== undefined) {
         set((s) => ({ staleTerminalFor: omitKey(s.staleTerminalFor, chatSessionId) }));
+      }
+      // Token activity — re-arm the hung-turn watchdog.
+      {
+        const t = remoteStallTimers.get(chatSessionId);
+        if (t) clearTimeout(t);
+        remoteStallTimers.set(
+          chatSessionId,
+          setTimeout(() => {
+            remoteStallTimers.delete(chatSessionId);
+            if (!(chatSessionId in get().streaming)) return;
+            console.warn('[stream] turn stalled mid-stream — releasing UI:', chatSessionId);
+            set((st) => clearStreamState(st, chatSessionId));
+          }, REMOTE_TURN_STALL_MS),
+        );
       }
       // No-op flush guard: harnesses close a stream with runs of EMPTY
       // deltas (dozens can land in one IPC sweep on teardown/restart). Each

@@ -76,6 +76,11 @@ export function useLocalModelSidecar({
   // /v1/models, local scan) directly.
   const [localModels, setLocalModels] = useState<GgufModel[]>([]);
   const [localLoading, setLocalLoading] = useState(false);
+  // The model the in-flight spawn is loading (name/filename form). The chip
+  // shows it while `localLoading` is true — the session's stored model only
+  // updates AFTER the spawn succeeds, so without this the chip would name
+  // the PREVIOUS model for the whole multi-second load.
+  const [loadingModelName, setLoadingModelName] = useState<string | null>(null);
   // id of the running local-model sidecar, or null if none. Drives the ⏏
   // button on the model pill — the button is only shown when a sidecar is
   // actually live (verified via local_model_status, not just inferred from
@@ -207,6 +212,7 @@ export function useLocalModelSidecar({
   const spawnLocalModel = useCallback(
     async (match: GgufModel, overrides?: LlamaOverrides): Promise<string | null> => {
       setLocalLoading(true);
+      setLoadingModelName(match.name || match.filename);
       try {
         await startLocalModel(match.id, match.path, match.mmprojPath, overrides);
         // Warm the prompt cache via the shared helper — the loading spinner
@@ -231,6 +237,7 @@ export function useLocalModelSidecar({
         return msg;
       } finally {
         setLocalLoading(false);
+        setLoadingModelName(null);
       }
     },
     [activeChatSessionId],
@@ -287,6 +294,7 @@ export function useLocalModelSidecar({
   return {
     localModels,
     localLoading,
+    loadingModelName,
     activeLocalModelId,
     setActiveLocalModelId,
     activeLocalModelCtx,

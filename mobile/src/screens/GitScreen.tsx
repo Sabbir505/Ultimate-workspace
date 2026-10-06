@@ -7,7 +7,7 @@
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  View, Text, StyleSheet, TextInput, TouchableOpacity, ScrollView, ActivityIndicator, Modal,
+  View, Text, StyleSheet, TextInput, TouchableOpacity, ScrollView, ActivityIndicator, Modal, Animated,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Ionicons from '@expo/vector-icons/Ionicons';
@@ -19,9 +19,45 @@ import {
 } from '../hooks/useRelay';
 import { useRelayList } from '../hooks/useRelayList';
 import { tapLight } from '../lib/haptics';
+import { screenCacheGet, screenCacheSet } from '../lib/screenCache';
 import ScreenHeader from '../components/ScreenHeader';
 
 type ChangedFile = { status: string; kind: string; path: string };
+type GitStatusData = {
+  is_repo: boolean; branch?: string | null; dirty: boolean; ahead: number; behind: number;
+  remote_url?: string | null; changed_files: ChangedFile[];
+};
+
+/** Per-project last-known status — switching project chips paints the cached
+ *  state instantly instead of blanking to a spinner, and a refresh keeps the
+ *  previous data on screen until the fresh reply replaces it. */
+const statusCache = new Map<string, GitStatusData>();
+
+/** Git replies carry NO project id, and the desktop answers requests in
+ *  order — so a FIFO of issued requests routes each reply to the project it
+ *  was asked for. Without this, an in-flight reply from project A landed on
+ *  project B's view (and poisoned B's cache entry) whenever the user switched
+ *  chips while a request was pending — read as "bound to a different
+ *  project". */
+const pendingRef = {
+  status: [] as string[],
+  branches: [] as string[],
+  log: [] as string[],
+};
+
+/** One full turn of the refresh icon, for the busy rotation loop. */
+function useRefreshSpin(busy: boolean) {
+  const rot = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    if (!busy) { rot.setValue(0); return; }
+    const loop = Animated.loop(
+      Animated.timing(rot, { toValue: 1, duration: 900, useNativeDriver: true }),
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [busy, rot]);
+  return rot;
+}
 
 export default function GitScreen() {
   useScreenMountTiming('GitScreen');
@@ -29,10 +65,11 @@ export default function GitScreen() {
   const { gitStatus, gitDiff, gitCommit, gitPush, gitBranches, gitLog, listProjects } = useRelay();
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
   const [projectId, setProjectId] = useState<string | null>(null);
-  const [status, setStatus] = useState<{
-    is_repo: boolean; branch?: string | null; dirty: boolean; ahead: number; behind: number;
-    remote_url?: string | null; changed_files: ChangedFile[];
-  } | null>(null);
+  const [status, setStatus] = useState<GitStatusData | null>(() =>
+    // Seeded on remount with the last project the screen showed, so coming
+    // back to the Git tab doesn't blank out.
+    screenCacheGet<GitStatusData>('git.lastStatus') ?? null,
+  );
   const [output, setOutput] = useState<{ title: string; text: string } | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [commitText, setCommitText] = useState('');
@@ -45,24 +82,55 @@ export default function GitScreen() {
   // retitling every reply to 'Result'.
   const pendingTitleRef = useRef('Result');
 
+  // Current-project mirror for event handlers (they close over stale state
+  // between re-subscriptions).
+  const projectIdRef = useRef<string | null>(projectId);
+  useEffect(() => { projectIdRef.current = projectId; }, [projectId]);
+
   // The project list must survive a lost first fetch too: the mount send is
   // dropped while the socket is still pairing, so refetch on reconnect.
-  useRelayList(() => { listProjects(); refresh(projectId); });
+  useRelayList(() => { listProjects(); refresh(projectIdRef.current); });
 
   useEffect(() => {
     const offP = onProjectList.on(({ projects: list }) => {
       setProjects(list);
-      if (!projectId && list.length > 0) setProjectId(list[0].id);
+      if (!projectId && list.length > 0) {
+        // Restore the LAST project this screen used; fall back to the first.
+        const remembered = screenCacheGet<string>('git.lastProject');
+        const pick = list.some((p) => p.id === remembered)
+          ? remembered!
+          : list[0].id;
+        setProjectId(pick);
+        setStatus(statusCache.get(pick) ?? null);
+      }
     });
-    const offS = onGitStatus.on(({ status: st }) => { setStatus(st); setBusy(false); });
+    const offS = onGitStatus.on(({ status: st }) => {
+      // Route the reply to the project it was REQUESTED for (FIFO); only a
+      // reply for the currently selected project drives the UI.
+      const requested = pendingRef.status.shift();
+      if (requested) statusCache.set(requested, st);
+      if (requested !== projectIdRef.current) return;
+      setStatus(st);
+      setBusy(false);
+      screenCacheSet('git.lastStatus', st);
+    });
     const offO = onGitOutput.on(({ output: text }) => {
       // Only overwrite the text — the title stays whatever the pending
       // request (diff path or a command result) set it to.
       setOutput((prev) => ({ title: prev?.title ?? pendingTitleRef.current, text }));
       setBusy(false);
     });
-    const offB = onGitBranches.on(({ branches: b }) => setBranches(b));
-    const offL = onGitLog.on(({ entries }) => { setLogEntries(entries); setBusy(false); });
+    const offB = onGitBranches.on(({ branches: b }) => {
+      const requested = pendingRef.branches.shift();
+      if (requested !== projectIdRef.current) return;
+      setBranches(b);
+    });
+    const offL = onGitLog.on(({ entries }) => {
+      const requested = pendingRef.log.shift();
+      if (requested !== projectIdRef.current) return;
+      setLogEntries(entries);
+      setBusy(false);
+    });
     // A failed git op answers with a git-domain ChatError (routed to the
     // DomainErrorBar below); busy must clear too, or the spinner never does.
     const offErr = onDomainError.on(({ domain }) => {
@@ -76,6 +144,7 @@ export default function GitScreen() {
     () => (id: string | null) => {
       if (!id) return;
       setBusy(true);
+      pendingRef.status.push(id);
       gitStatus(id);
     },
     [gitStatus],
@@ -85,6 +154,7 @@ export default function GitScreen() {
 
   const changed = status?.changed_files ?? [];
   const staged = changed.filter((f) => f.status[0] !== ' ' && f.status[0] !== '?').length;
+  const spin = useRefreshSpin(busy);
 
   const openDiff = (f: ChangedFile) => {
     if (!projectId) return;
@@ -103,12 +173,14 @@ export default function GitScreen() {
           <TouchableOpacity
             // No project selected → nothing to refresh; gitBranches('') is
             // rejected by the desktop, so no-op it exactly like refresh().
-            onPress={() => { refresh(projectId); if (projectId) gitBranches(projectId); }}
+            onPress={() => { refresh(projectId); if (projectId) { pendingRef.branches.push(projectId); gitBranches(projectId); } }}
             hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
             accessibilityRole="button"
             accessibilityLabel="Refresh git"
           >
-            <Ionicons name="refresh" size={20} color={c.textSecondary} />
+            <Animated.View style={{ transform: [{ rotate: spin.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] }) }] }}>
+              <Ionicons name="refresh" size={20} color={c.textSecondary} />
+            </Animated.View>
           </TouchableOpacity>
         }
       />
@@ -122,7 +194,16 @@ export default function GitScreen() {
             activeOpacity={0.7}
             accessibilityRole="button"
             accessibilityLabel={`Git for ${p.name}`}
-            onPress={() => { setProjectId(p.id); setStatus(null); setBranches([]); setLogEntries([]); }}
+            onPress={() => {
+              screenCacheSet('git.lastProject', p.id);
+              setProjectId(p.id);
+              // Stale-while-revalidate: paint the cached status for this
+              // project instantly (null only on first-ever view); the fresh
+              // GitStatusMsg replaces it when it lands.
+              setStatus(statusCache.get(p.id) ?? null);
+              setBranches([]);
+              setLogEntries([]);
+            }}
           >
             <Text style={{ color: projectId === p.id ? c.white : c.text, fontSize: 12, fontWeight: '700' }}>
               {p.name}
@@ -137,7 +218,10 @@ export default function GitScreen() {
       </ScrollView>
 
       <ScrollView style={styles.body} keyboardShouldPersistTaps="handled">
-        {busy && !output ? <ActivityIndicator color={c.accent} style={{ marginVertical: 8 }} /> : null}
+        {/* Big spinner ONLY on a first-ever load with nothing on screen; a
+            refresh with data present keeps the data visible and just spins
+            the header refresh icon. */}
+        {busy && !output && !status ? <ActivityIndicator color={c.accent} style={{ marginVertical: 8 }} /> : null}
         {message ? (
           <TouchableOpacity onPress={() => setMessage(null)}>
             <Text style={{ color: c.accent, fontSize: 12, marginBottom: 6 }}>{message} · tap to dismiss</Text>
@@ -232,7 +316,7 @@ export default function GitScreen() {
                   accessibilityLabel="Toggle git log"
                   onPress={() => {
                     setShowLog((v) => !v);
-                    if (!showLog && projectId) { setBusy(true); gitLog(projectId); }
+                    if (!showLog && projectId) { setBusy(true); pendingRef.log.push(projectId); gitLog(projectId); }
                   }}
                 >
                   <Ionicons name="list-outline" size={15} color={c.textSecondary} />

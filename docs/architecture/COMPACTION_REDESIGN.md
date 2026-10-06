@@ -349,9 +349,8 @@ extend `compactionSettings.test.ts` for the unified settings.
 ## 4. Implementation status (2026-09-02)
 
 All five phases are implemented and green: **614 Rust tests + 513 TS tests passing,
-`tsc` clean, `vite build` clean.** _(Counts updated 2026-09-21: the suite has grown to
-**1315 Rust tests** (0 failed, 16 ignored) and **1286 TS tests** across 174 files — the
-per-phase status below still reflects the original landing.)_
+`tsc` clean, `vite build` clean.** _(Counts re-verified 2026-10-05: the suite has since grown to
+**1659 Rust tests** (0 failed, 23 ignored) and **1702 TS tests** across 215 files, with `tsc --noEmit` clean for both `src/` and `mobile/`. Earlier snapshots: 1315 Rust / 1286 TS across 174 files at 2026-09-21. The per-phase status below still reflects the original landing.)_
 
 ### P0 — honesty ✅
 - `src-tauri/src/chat/context_windows.rs` + `src/lib/contextWindow.ts`: per-model window

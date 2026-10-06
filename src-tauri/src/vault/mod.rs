@@ -23,7 +23,7 @@ use std::sync::mpsc;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use parking_lot::Mutex;
 use rusqlite::Connection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::db;
@@ -643,7 +643,7 @@ pub fn delete_folder_core(db: &Mutex<Connection>, root: &Path, rel: &str) -> Res
 // Tree
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TreeNode {
     pub name: String,
     /// Vault-relative path ('/' separators). Folders have no extension.
@@ -913,7 +913,7 @@ pub struct VaultStatsDto {
     pub unresolved: i64,
 }
 
-fn stats_dto(conn: &Connection) -> std::result::Result<VaultStatsDto, rusqlite::Error> {
+pub(crate) fn stats_dto(conn: &Connection) -> std::result::Result<VaultStatsDto, rusqlite::Error> {
     index::stats(conn).map(|(notes, files, links, unresolved)| VaultStatsDto {
         notes,
         files,

@@ -25,26 +25,6 @@ import { useAfterPaint } from '../lib/afterPaint';
 import { tapLight } from '../lib/haptics';
 import ConnectionIndicator from '../components/ConnectionIndicator';
 import QrScanModal from './QrScanModal';
-import {
-  authenticate,
-  appLockPlatformName,
-  deviceCanAuthenticate,
-  isAppLockEnabled,
-  setAppLockEnabled,
-} from '../lib/appLock';
-
-// Desktop SettingsView parity: the agent harness families, with install
-// state — the same registry the desktop Settings → Harnesses panel lists.
-function HarnessRow({ id, displayName, installed }: { id: string; displayName: string; installed: boolean }) {
-  const c = theme.colors;
-  return (
-    <View style={styles.harnessRow}>
-      <View style={[styles.harnessDot, { backgroundColor: installed ? c.success : c.border }]} />
-      <Text style={[styles.harnessName, { color: c.text }]}>{displayName}</Text>
-      <Text style={[styles.harnessState, { color: c.textSecondary }]}>{installed ? 'Installed' : 'Not installed'}</Text>
-    </View>
-  );
-}
 
 // ---------------------------------------------------------------------------
 // SettingRow — a grouped-list row: icon, title, subtitle, optional switch
@@ -196,7 +176,7 @@ function ModeSegmented({ mode, onChange }: { mode: ThemeMode; onChange: (m: Them
 export default function SettingsScreen() {
   useScreenMountTiming('SettingsScreen');
   const navigation = useNavigation<any>();
-    const { connected, connect, disconnect, harnesses } = useRelay();
+    const { connected, connect, disconnect, lastError } = useRelay();
   const { mode, setMode } = useTheme();
   const c = theme.colors;
 
@@ -213,30 +193,6 @@ export default function SettingsScreen() {
   // Connection card. The scanned payload is a `ws://host:port/#token` or
   // `wss://host/#token` URL emitted by the desktop's Remote settings panel.
   const [qrScanning, setQrScanning] = useState(false);
-
-  // App lock toggle (audit H39): the biometric gate existed (App.tsx arms it
-  // on background / cold start) but NOTHING could ever enable it — no UI
-  // wrote the flag, so `isAppLockEnabled()` was permanently false and the
-  // whole lock was dead code. Toggle + a capability check (a device without
-  // enrolled biometrics shows the row dimmed).
-  const [appLockEnabled, setAppLockEnabledState] = useState(false);
-  const [appLockAvailable, setAppLockAvailable] = useState(false);
-  useEffect(() => {
-    void isAppLockEnabled().then(setAppLockEnabledState);
-    void deviceCanAuthenticate().then(setAppLockAvailable);
-  }, []);
-  const toggleAppLock = useCallback((on: boolean) => {
-    void (async () => {
-      if (on) {
-        // Prove the user can actually unlock before arming the gate —
-        // otherwise they enable it and are immediately locked out.
-        const ok = await authenticate(`Enable ${appLockPlatformName}`);
-        if (!ok) return;
-      }
-      await setAppLockEnabled(on);
-      setAppLockEnabledState(on);
-    })();
-  }, []);
 
   // Progressive render: the first paint carries the header plus the sections
   // that fit in the viewport; the rest arrive after that frame is on screen.
@@ -287,6 +243,12 @@ export default function SettingsScreen() {
             </View>
             <ConnectionIndicator connected={connected} size={12} />
           </View>
+
+          {!connected && lastError ? (
+            <Text style={[styles.relayError, { color: c.error }]} numberOfLines={3}>
+              {lastError}
+            </Text>
+          ) : null}
 
           {!connected && (
             <TextInput
@@ -371,6 +333,18 @@ export default function SettingsScreen() {
           />
           <View style={[styles.divider, { backgroundColor: c.border }]} />
           <NavRow
+            icon={<Ionicons name="book-outline" size={18} color={c.textSecondary} />}
+            label="Project wiki"
+            onPress={() => navigation.navigate('Wiki')}
+          />
+          <View style={[styles.divider, { backgroundColor: c.border }]} />
+          <NavRow
+            icon={<Ionicons name="folder-open-outline" size={18} color={c.textSecondary} />}
+            label="Vault"
+            onPress={() => navigation.navigate('Vault')}
+          />
+          <View style={[styles.divider, { backgroundColor: c.border }]} />
+          <NavRow
             icon={<Ionicons name="cash-outline" size={18} color={c.textSecondary} />}
             label="Cost dashboard"
             onPress={() => navigation.navigate('CostDashboard')}
@@ -385,43 +359,6 @@ export default function SettingsScreen() {
               <ModeSegmented mode={mode} onChange={setMode} />
             </View>
           </View>
-        </Section>
-        ) : null}
-
-        {showRest ? (
-        <Section title="Agents" hint="CLI harnesses installed on your desktop.">
-          {harnesses.length > 0 ? (
-            harnesses.map((h) => (
-              <HarnessRow key={h.id} id={h.id} displayName={h.display_name} installed={h.installed} />
-            ))
-          ) : (
-            <Text style={[styles.emptyLine, { color: c.textSecondary }]}>
-              {connected ? 'Connect to see the desktop’s agents.' : 'Connect to your desktop to see agents.'}
-            </Text>
-          )}
-        </Section>
-        ) : null}
-
-        {showRest ? (
-        <Section
-          title="Security"
-          hint={`Lock Relay behind ${appLockPlatformName} when you return after 30s away. The phone can approve shell commands on the desktop.`}
-        >
-          <SettingRow
-            icon={<Ionicons name="lock-closed-outline" size={18} color={c.textSecondary} />}
-            title="App lock"
-            subtitle={
-              appLockAvailable
-                ? appLockEnabled
-                  ? 'On — you will be asked to unlock after leaving the app'
-                  : 'Off'
-                : 'Requires biometrics or a device passcode to be enrolled'
-            }
-            value={appLockEnabled}
-            onValueChange={toggleAppLock}
-            switchDisabled={!appLockAvailable}
-            dimmed={!appLockAvailable}
-          />
         </Section>
         ) : null}
 
@@ -520,6 +457,10 @@ const styles = StyleSheet.create({
   },
   connectionActions: {
     flexDirection: 'row', padding: theme.spacing.sm, paddingTop: theme.spacing.xs, gap: theme.spacing.sm,
+  },
+  relayError: {
+    marginHorizontal: theme.spacing.sm, marginBottom: theme.spacing.xs,
+    fontSize: theme.fontSize.xs, fontFamily: 'monospace',
   },
   primaryButton: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center',

@@ -120,30 +120,37 @@ export default function DiffSheet({ visible, path, projectId, onClose }: DiffShe
             </Text>
           ) : (
             <ScrollView style={styles.body} horizontal={false}>
-              {lines.map((l, i) => (
-                <View
-                  key={i}
-                  style={[
-                    styles.line,
-                    l.kind === 'add' && { backgroundColor: `${c.success}1A` },
-                    l.kind === 'del' && { backgroundColor: `${c.error}1A` },
-                  ]}
-                >
-                  <Text
-                    numberOfLines={1}
+              {lines.map((l, i) => {
+                const sign =
+                  l.kind === 'add' ? '+' : l.kind === 'del' ? '-' : l.kind === 'hunk' ? '@' : ' ';
+                return (
+                  <View
+                    key={i}
                     style={[
-                      styles.lineText,
-                      { color: c.text },
-                      l.kind === 'hunk' && { color: c.accent, fontWeight: '600' },
-                      l.kind === 'add' && { color: c.success },
-                      l.kind === 'del' && { color: c.error },
-                      l.kind === 'meta' && { color: c.textSecondary, fontWeight: '600' },
+                      styles.line,
+                      l.kind === 'add' && { backgroundColor: `${c.success}1A` },
+                      l.kind === 'del' && { backgroundColor: `${c.error}1A` },
+                      l.kind === 'hunk' && { backgroundColor: c.surface2 },
                     ]}
                   >
-                    {l.text || ' '}
-                  </Text>
-                </View>
-              ))}
+                    {/* Gutter sign column — desktop diff parity. */}
+                    <Text
+                      style={[
+                        styles.lineSign,
+                        { color: c.textSecondary },
+                        l.kind === 'add' && { color: c.success },
+                        l.kind === 'del' && { color: c.error },
+                        l.kind === 'hunk' && { color: c.accent },
+                      ]}
+                    >
+                      {sign}
+                    </Text>
+                    <Text style={[styles.lineText, { color: c.text }, styles.mono]}>
+                      {l.text.replace(/^[+-@]\s?/, '') || ' '}
+                    </Text>
+                  </View>
+                );
+              })}
             </ScrollView>
           )}
         </View>
@@ -186,8 +193,10 @@ const styles = StyleSheet.create({
   body: { maxHeight: 520 },
   line: { paddingHorizontal: 6 },
   lineText: {
-    fontFamily: 'monospace',
-    fontSize: 11,
-    lineHeight: 16,
+    flex: 1,
+    fontSize: 11.5,
+    lineHeight: 17,
   },
+  mono: { fontFamily: 'monospace' },
+  lineSign: { width: 14, fontSize: 11.5, lineHeight: 17, fontFamily: 'monospace' },
 });

@@ -40,7 +40,7 @@ LLM tool call: generate_document { format, language: js|html|python, code }
   ▼
 dispatch.rs run_tool → db::insert_artifact (SQLite, 30-day TTL) → "chat:artifact" event
   ▼
-ArtifactPreviewPane.tsx → read_artifact_preview (commands.rs:3008)
+ArtifactPreviewPane.tsx → read_artifact_preview (in `chat/commands/preview.rs` — `chat/commands.rs` is now a 42-line module root)
   ├─ docx → docx-preview (DocxViewer.tsx), "PDF view" = LibreOffice → pdf.js
   ├─ pptx → auto LibreOffice → PDF → pdf.js   (fallback: lossy pptx_to_html scanner)
   └─ pdf  → pdf.js (PdfViewer.tsx)
@@ -414,9 +414,9 @@ Each system compiles to all engines, so a DOCX report and its companion deck fro
 
 ## 11. File/module map
 
-**New (frontend, `src/lib/docdesign/`)** — `ir.ts` (schemas + zod-style validation), `tokens.ts` + `tokens/*.json`, `catalog/*.json`, `compile-deck.ts`, `compile-doc.ts`, `compile-pdf.ts`, `qa.ts` (L1–L2 + geometry helpers), `systems/*.json`. Tests alongside (vitest).
+**New (frontend, `src/lib/docdesign/`)** — the shipped layout is flat, with no subdirectories: `ir.ts` (schemas + validation), `irDoc.ts`, `tokens.ts` + `tokens.json`, `systems.ts` + `systems.json`, `catalog.ts`, `compileDoc.ts`, `compileDeck.ts`, `compilePdfHtml.ts`, `rasterize.ts`. *(Corrected 2026-10-05: this map previously listed `tokens/*.json`, `catalog/*.json`, `systems/*.json`, and kebab-case `compile-deck.ts` / `compile-doc.ts` / `compile-pdf.ts` / `qa.ts`, none of which exist. Each JSON file sits beside its `.ts` module rather than in a folder, and the geometry/QA helpers live in Rust, not in a `qa.ts`.)* Tests alongside (vitest).
 
-**New (Rust, `src-tauri/src/chat/docdesign/`)** — `mod.rs` (plan validation mirror + IR types w/ serde), `plan.rs` (the `plan_document`/`revise_document` tool impls, planner prompt), `qa.rs` (L3 geometry checks, QA report assembly, `chat:doc-qa` event), `tokens.rs` (embed JSON, emit theme-part XML for OOXML).
+**New (Rust, `src-tauri/src/chat/docdesign/`)** — `mod.rs` (plan validation mirror + IR types w/ serde), `plan.rs` (the `plan_document`/`revise_document` tool impls, planner prompt), `qa.rs` (L3 geometry checks, QA report assembly, `chat:doc-qa` event). *(There is no `tokens.rs` — the theme-part XML emission described in the original design was never implemented.)*
 
 **Modified** — `chat/tools/mod.rs` + `specs.rs` (new tool schemas, rewritten descriptions); `chat/dispatch.rs` (route plan tool); `chat/pdfprint.rs` (BASE_CSS ← tokens; print-window pool of 2); `pygen.rs`/`docgen_helper.py` (load token JSON); `skills/*.md` (drop token-derived rules, keep idioms); `ArtifactPreviewPane.tsx` (outline/plan view + QA strip); `src/state/chat.ts` + `useChatEvents.ts` (`doc-qa` event, mirroring `citation-report`).
 
@@ -434,7 +434,7 @@ Each system compiles to all engines, so a DOCX report and its companion deck fro
 | **3 — Visual loop** (≈1 wk) | rasterize pipeline, VLM critic, revision loop, `doc-qa` UI strip | a seeded bad deck (overflow, low contrast) is detected and fixed without user involvement |
 | **4 — Systems + polish** (≈3–4 d) | 4 design systems; system picker in UI; plan outline view; `revise_document` tool; print-window pool; Python compiler parity | system switch re-brands an existing artifact in one action |
 
-Rollback safety: the compiled path ships behind a setting (`docgen.mode: "staged" | "legacy"`, default staged); the legacy tool contract remains functional throughout.
+Rollback safety: **not built.** This design called for a `docgen.mode: "staged" | "legacy"` setting gating the compiled path, but no such setting exists in the code (verified 2026-10-05 — `docgen.mode` / `docgen_mode` return no hits anywhere under `src-tauri/src/`), and §15 does not record it as skipped. The compiled path is therefore unconditional, and the legacy `pygen.rs` / `artifacts.rs` fallbacks remain the only rollback surface.
 
 ## 13. Risks & open questions
 
@@ -494,4 +494,4 @@ The architecture is built and tested. What shipped, and the two deliberate devia
 | Print-window pool (2 windows) | ❌ Intentionally not built — `with_webview` COM calls are UI-thread-affine, so prints cannot overlap anyway; the lock only orders them | — |
 | Python plan compiler (headless parity) | ❌ Not built — headless runs steer to `generate_document language="python"` (existing behavior); full Python compiler deferred | — |
 
-Tests: Rust `chat::docdesign` (24) + token/contrast/CSS tests, TS `docdesignTokens/Deck/Doc/Qa/Systems` (~50), plus the full pre-existing suites (`cargo test --lib` 734, `vitest` 663) green.
+Tests: Rust `chat::docdesign` (24) + token/contrast/CSS tests, TS `docdesignTokens/Deck/Doc/Qa/Systems` (~50), plus the full pre-existing suites green. *(Suite counts re-verified 2026-10-05: `cargo test --lib` is **1659 passed / 0 failed / 23 ignored** and `npm test` is **215 files / 1702 tests** — the 734 / 663 figures in the original text were from this feature's landing.)*

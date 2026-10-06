@@ -30,6 +30,7 @@ import {
   type TextStyle,
 } from 'react-native';
 import { theme } from '../../theme';
+import MermaidView from '../MermaidView';
 
 // ---------------------------------------------------------------------------
 // Parsing (pure)
@@ -318,6 +319,11 @@ function MarkdownTextImpl({ content }: { content: string }) {
       {blocks.map((b, i) => {
         switch (b.type) {
           case 'code':
+            // Mermaid diagrams render as real diagrams (WebView + mermaid
+            // CDN), desktop parity — a raw code block read as broken.
+            if ((b.lang ?? '').trim().toLowerCase() === 'mermaid') {
+              return <MermaidView key={i} code={b.code} />;
+            }
             return <CodeBlock key={i} lang={b.lang} code={b.code} />;
           case 'h': {
             const style =

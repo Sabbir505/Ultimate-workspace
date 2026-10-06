@@ -446,8 +446,9 @@ export function Sidebar() {
       </div>
 
       {/* â”€â”€ Recent History â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
-      {/* Label stays pinned; only the chat list below scrolls. */}
-      <div className="px-2 pt-0.5 pb-1 flex-shrink-0">
+      {/* Label stays pinned; only the chat list below scrolls. pt-1 keeps the
+          gap below Projects identical to the 4px rhythm of the nav stack. */}
+      <div className="px-2 pt-1 pb-1 flex-shrink-0">
           <div className="sidebar-section-header flex items-center gap-1 mb-1">
             <span className="sidebar-section-label">
               <MessageSquare size={14} strokeWidth={1.8} className="sidebar-section-label-icon" />

@@ -285,8 +285,14 @@
   height: 13px;
   display: block;
 }
-/* Spinner shown on the agent chip while a harness's config/models load. */
+/* Spinner shown on the agent chip while a harness's config/models load.
+   display is load-bearing: inside the flex chip a bare span is blockified and
+   sizes fine, but in the model list's "Loading models…" row (a plain div)
+   an inline span ignores width/height and collapses to a 3px border sliver
+   that reads as a stray caret. */
 .agent-chip-spinner {
+  display: inline-block;
+  vertical-align: middle;
   width: 10px;
   height: 10px;
   border-radius: 50%;

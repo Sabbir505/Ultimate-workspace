@@ -8,6 +8,7 @@ import { ThemeProvider, useTheme, theme } from './src/theme';
 import { navigationRef } from './src/lib/navigation';
 import AppDrawer, { DrawerProvider } from './src/components/AppDrawer';
 import { tapMedium } from './src/lib/haptics';
+import { hydrateScreenCache } from './src/lib/screenCache';
 import { initDeepLinkHandling } from './src/lib/deepLinks';
 import { authenticate, clearAwayStamp, markBackgrounded, shouldLockOnResume, deviceCanAuthenticate, appLockPlatformName } from './src/lib/appLock';
 import { useRelay } from './src/hooks/useRelay';
@@ -28,6 +29,8 @@ import TerminalScreen from './src/screens/TerminalScreen';
 // meaningful — and QrScanModal's lazy import already loaded on Settings mount
 // anyway, so the old deferral never actually deferred anything.
 import SettingsScreen from './src/screens/SettingsScreen';
+import WikiScreen from './src/screens/WikiScreen';
+import VaultScreen from './src/screens/VaultScreen';
 
 const HomeStack = createNativeStackNavigator();
 
@@ -39,8 +42,22 @@ const HomeStack = createNativeStackNavigator();
  * also linked from the drawer's bottom rows.
  */
 function HomeStackScreen() {
+  // Scene background must match the app palette: the native stack's default
+  // is the OS white, which flashed between every push on the dark theme.
+  const c = theme.colors;
   return (
-    <HomeStack.Navigator screenOptions={{ headerShown: false, animation: "none" }}>
+    <HomeStack.Navigator
+      screenOptions={{
+        headerShown: false,
+        // OPAQUE slide (native default). A cross-fade animates scene alpha,
+        // and for a frame the translucent scenes reveal whatever is beneath
+        // them — in Expo Go that's the activity's WHITE window (the
+        // app.json window background only applies to built apps). An opaque
+        // slide never exposes anything beneath the scenes.
+        animation: "default",
+        contentStyle: { backgroundColor: c.background },
+      }}
+    >
       <HomeStack.Screen name="HomeMain" component={HomeScreen} />
       <HomeStack.Screen name="SessionDetail" component={SessionChat} />
       <HomeStack.Screen name="Artifacts" component={ArtifactsScreen} />
@@ -52,6 +69,8 @@ function HomeStackScreen() {
       <HomeStack.Screen name="Notifications" component={NotificationsScreen} />
       <HomeStack.Screen name="Settings" component={SettingsScreen} />
       <HomeStack.Screen name="CostDashboard" component={CostScreen} />
+      <HomeStack.Screen name="Wiki" component={WikiScreen} />
+      <HomeStack.Screen name="Vault" component={VaultScreen} />
     </HomeStack.Navigator>
   );
 }
@@ -189,6 +208,11 @@ function AppShell() {
   );
 }
 
+// Hydrate the persistent screen cache BEFORE the first screen mounts so
+// every list paints its last-known data on cold start (stale-while-revalidate
+// — the same paint-from-disk-first model the ChatGPT/Claude/Gmail apps use).
+void hydrateScreenCache();
+
 export default function App() {
   return (
     <ThemeProvider>
@@ -205,7 +229,9 @@ export default function App() {
 }
 
 const styles = StyleSheet.create({
-  shell: { flex: 1 },
+  // Painted: during screen transitions the scenes go translucent for a
+  // frame — anything unpainted here (or in the window below) flashes white.
+  shell: { flex: 1, backgroundColor: theme.colors.background },
   lockGate: {
     position: 'absolute',
     top: 0,

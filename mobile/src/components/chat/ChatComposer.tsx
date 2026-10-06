@@ -36,8 +36,8 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import Ionicons from '@expo/vector-icons/Ionicons';
-import * as DocumentPicker from 'expo-document-picker';
-import * as FileSystem from 'expo-file-system/legacy';
+import { File as ExponentFile } from 'expo-file-system';
+import CameraCaptureSheet from './CameraCaptureSheet';
 import {
   useAudioRecorder,
   RecordingPresets,
@@ -66,11 +66,11 @@ const CloseIcon = ({ size, color }: { size?: number; color?: string }) => (
   <Ionicons name="close-circle" size={size} color={color} />
 );
 
-// Match the desktop composer's size caps so the relay's 64 MiB default
-// message cap is never the gate.
-const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
-const MAX_DOC_BYTES = 10 * 1024 * 1024;
-const MAX_TEXT_BYTES = 512 * 1024;
+// ONE per-file cap, matching the desktop's send-path check
+// (src-tauri/src/chat/commands/send.rs MAX_ATTACHMENT_BYTES = 25 MB) so the
+// phone rejects exactly what the desktop rejects — the old 15/10/0.5 MB split
+// silently refused files the desktop accepts.
+const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 
 const IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'];
 const DOC_EXTS = ['pdf', 'docx', 'pptx', 'xlsx', 'txt', 'md', 'csv', 'json', 'ts', 'tsx', 'js', 'jsx', 'py', 'rs', 'go', 'java', 'c', 'cpp', 'h'];
@@ -107,6 +107,26 @@ const RECORDING_MIME = 'audio/mp4';
 const CANCEL_SLIDE_DISTANCE = 56;
 /** Give up waiting for the desktop's Transcription reply after this long. */
 const TRANSCRIBE_TIMEOUT_MS = 30_000;
+
+/**
+ * Native on-device speech recognition (the phone's own mic + OS recognizer).
+ * Resolves ONLY when the native module is compiled in — i.e. the EAS dev /
+ * release APK. Expo Go doesn't bundle it, so there the composer falls back to
+ * the record-then-transcribe-on-desktop flow (the lazy require must not be a
+ * static import: the package throws at import time when the native side is
+ * missing, which would take the whole composer down).
+ */
+function getNativeStt(): typeof import('expo-speech-recognition') | null {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const mod = require('expo-speech-recognition');
+    if (mod?.ExpoSpeechRecognitionModule?.start && mod?.ExpoSpeechRecognitionModule?.stop) return mod;
+    return null;
+  } catch {
+    return null;
+  }
+}
+const NativeStt = getNativeStt();
 
 interface ChatComposerProps {
   onSend: (text: string, attachments?: SessionChatAttachment[]) => void;
@@ -203,10 +223,57 @@ export default function ChatComposer({
     [connectors],
   );
   const [attachments, setAttachments] = useState<SessionChatAttachment[]>([]);
+  // Attach source picker: the + opens a small menu (camera vs files) instead
+  // of going straight to the document picker.
+  const [attachMenuOpen, setAttachMenuOpen] = useState(false);
+  const [cameraOpen, setCameraOpen] = useState(false);
   const [recording, setRecording] = useState(false);
   const [recordSeconds, setRecordSeconds] = useState(0);
   const [transcribing, setTranscribing] = useState(false);
   const [voiceError, setVoiceError] = useState<string | null>(null);
+
+  // --- native speech recognition (phone's own mic) ---
+  // The hold-to-talk gesture drives it exactly like the recording flow:
+  // pressIn starts the OS recognizer (interim results stream live into the
+  // input), pressOut stops and finalizes. Slide-off aborts and restores the
+  // pre-dictation text. Only used when the native module exists (dev/release
+  // APK) — Expo Go falls back to the desktop transcription flow below.
+  const sttListeningRef = useRef(false);
+  const sttBaseRef = useRef('');
+  const sttFinalRef = useRef('');
+
+  useEffect(() => {
+    const stt = NativeStt;
+    if (!stt) return;
+    const mod = stt.ExpoSpeechRecognitionModule as {
+      addListener?: (event: string, cb: (e: never) => void) => { remove: () => void } | undefined;
+    };
+    const subs: { remove: () => void }[] = [];
+    subs.push(mod.addListener?.('result', (e: { isFinal: boolean; results?: { transcript: string }[] }) => {
+      if (!sttListeningRef.current) return;
+      const transcript = (e.results ?? []).map((r) => r.transcript).join(' ').trim();
+      if (e.isFinal) {
+        sttFinalRef.current = [sttFinalRef.current, transcript].filter(Boolean).join(' ');
+        setText((sttBaseRef.current ? `${sttBaseRef.current} ` : '') + sttFinalRef.current);
+      } else if (transcript) {
+        const interim = [sttBaseRef.current, sttFinalRef.current, transcript].filter(Boolean).join(' ');
+        setText(interim);
+      }
+    }) ?? { remove: () => {} });
+    subs.push(mod.addListener?.('error', (e: { error?: string }) => {
+      // 'aborted' is the deliberate slide-off cancel — not an error.
+      if (e?.error === 'aborted') return;
+      setVoiceError(`Speech recognition error: ${e?.error ?? 'unknown'}`);
+      sttListeningRef.current = false;
+      setRecording(false);
+    }) ?? { remove: () => {} });
+    subs.push(mod.addListener?.('end', () => {
+      sttListeningRef.current = false;
+      setRecording(false);
+    }) ?? { remove: () => {} });
+    return () => subs.forEach((s) => s.remove());
+  }, []);
+
 
   const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
   const recPulse = useRecPulse();
@@ -240,53 +307,40 @@ export default function ChatComposer({
   const handleAttach = useCallback(async () => {
     if (streaming || disabled) return;
     tapLight();
+    setAttachMenuOpen(false);
     try {
-      const result = await DocumentPicker.getDocumentAsync({
-        copyToCacheDirectory: true,
-        multiple: true,
-      });
-      if (result.canceled || !result.assets?.length) return;
+      // The NEW FileSystem API's own picker: the returned File objects carry
+      // the SAF READ permission, so .base64()/.text() work. The old
+      // DocumentPicker → new File(uri) path is rejected at runtime with
+      // "Missing 'READ' permission" (SDK 57 permission model).
+      const result = await ExponentFile.pickFileAsync({ multipleFiles: true });
+      if (result.canceled || !result.result?.length) return;
 
       const picked: SessionChatAttachment[] = [];
-      for (const asset of result.assets) {
-        const name = asset.name;
+      for (const file of result.result) {
+        const name = file.name;
         const kind = classifyByName(name);
-        const uri = asset.uri;
-        const size = asset.size;
+        const size = file.size;
 
-        // Fail closed: a picker result without a size would sail through
-        // every cap below and get read into base64 wholesale — treat it as
+        // Fail closed: a picker result without a size would sail through the
+        // cap below and get read into base64 wholesale — treat it as
         // over-limit instead of trusting an unbounded read.
-        if (size == null) {
+        if (!size) {
           setVoiceError(`${name}: file size unknown — attachment skipped.`);
           continue;
         }
+        if (size > MAX_ATTACHMENT_BYTES) {
+          setVoiceError(`${name} exceeds the 25 MB attachment limit.`);
+          continue;
+        }
         if (kind === 'image') {
-          if (size > MAX_IMAGE_BYTES) {
-            setVoiceError(`${name} exceeds the 15 MB image limit.`);
-            continue;
-          }
-          const data = await FileSystem.readAsStringAsync(uri, {
-            encoding: FileSystem.EncodingType.Base64,
-          });
-          picked.push({ name, kind: 'image', data, media_type: imageMediaType(name, asset.mimeType) });
+          const data = await file.base64();
+          picked.push({ name, kind: 'image', data, media_type: imageMediaType(name) });
         } else if (kind === 'doc') {
-          if (size > MAX_DOC_BYTES) {
-            setVoiceError(`${name} exceeds the 10 MB document limit.`);
-            continue;
-          }
-          const data = await FileSystem.readAsStringAsync(uri, {
-            encoding: FileSystem.EncodingType.Base64,
-          });
+          const data = await file.base64();
           picked.push({ name, kind: 'doc', data, format: name.split('.').pop()?.toLowerCase() });
         } else {
-          if (size > MAX_TEXT_BYTES) {
-            setVoiceError(`${name} exceeds the 512 KB text limit.`);
-            continue;
-          }
-          const fileText = await FileSystem.readAsStringAsync(uri, {
-            encoding: FileSystem.EncodingType.UTF8,
-          });
+          const fileText = await file.text();
           picked.push({ name, kind: 'text', text: fileText });
         }
       }
@@ -296,6 +350,24 @@ export default function ChatComposer({
       setVoiceError((e as Error)?.message ?? 'Could not pick file.');
     }
   }, [streaming, disabled]);
+
+  // Camera capture: the sheet resolves with a cache file:// URI (app sandbox
+  // — readable under the new FileSystem permission model), read to base64
+  // and attached as a JPEG image.
+  const handlePhotoCaptured = useCallback(async (uri: string) => {
+    setCameraOpen(false);
+    try {
+      const data = await new ExponentFile(uri).base64();
+      const name = `photo-${Date.now()}.jpg`;
+      setAttachments((prev) => [
+        ...prev,
+        { name, kind: 'image', data, media_type: 'image/jpeg' },
+      ]);
+      notifySuccess();
+    } catch (e) {
+      setVoiceError((e as Error)?.message ?? 'Could not attach the photo.');
+    }
+  }, []);
   const removeAttachment = useCallback((index: number) => {
     setAttachments((prev) => prev.filter((_, i) => i !== index));
   }, []);
@@ -333,6 +405,36 @@ export default function ChatComposer({
   const startRecording = useCallback(async () => {
     if (streaming || disabled || transcribing) return;
     pressActiveRef.current = true;
+    // Native STT path (dev/release APK): the OS recognizer listens directly —
+    // no recording, no desktop round trip.
+    if (NativeStt) {
+      try {
+        setVoiceError(null);
+        const perm = await NativeStt.ExpoSpeechRecognitionModule.requestPermissionsAsync();
+        if (!perm.granted) {
+          setVoiceError('Microphone permission denied.');
+          return;
+        }
+        // The finger may already be up (permission prompt delay) — same
+        // discard rule as the recording path.
+        if (!pressActiveRef.current) return;
+        cancelSlideRef.current = false;
+        sttBaseRef.current = text;
+        sttFinalRef.current = '';
+        NativeStt.ExpoSpeechRecognitionModule.start({
+          lang: 'en-US',
+          interimResults: true,
+          continuous: true,
+        });
+        sttListeningRef.current = true;
+        setRecording(true);
+      } catch {
+        sttListeningRef.current = false;
+        setRecording(false);
+        setVoiceError('Could not start listening.');
+      }
+      return;
+    }
     try {
       setVoiceError(null);
       const perm = await requestRecordingPermissionsAsync();
@@ -357,10 +459,22 @@ export default function ChatComposer({
       setRecording(false);
       setVoiceError('Could not start recording.');
     }
-  }, [recorder, streaming, disabled, transcribing]);
+  }, [recorder, streaming, disabled, transcribing, text]);
 
   const finishRecording = useCallback(async (transcribe: boolean) => {
     pressActiveRef.current = false;
+    // Native STT path: stop (finalize) or abort (slide-off cancel restores
+    // the pre-dictation text). The 'end' event clears the listening flag.
+    if (sttListeningRef.current) {
+      const mod = NativeStt?.ExpoSpeechRecognitionModule;
+      if (!transcribe || cancelSlideRef.current) {
+        mod?.abort();
+        setText(sttBaseRef.current);
+      } else {
+        mod?.stop();
+      }
+      return;
+    }
     if (!recordingRef.current) return;
     recordingRef.current = false;
     setRecording(false);
@@ -375,9 +489,7 @@ export default function ChatComposer({
       }
       setTranscribing(true);
       awaitingTranscribeRef.current = true;
-      const dataBase64 = await FileSystem.readAsStringAsync(uri, {
-        encoding: FileSystem.EncodingType.Base64,
-      });
+      const dataBase64 = await new ExponentFile(uri).base64();
       onTranscribe(dataBase64, RECORDING_MIME);
       transcribeTimeoutRef.current = setTimeout(() => {
         if (awaitingTranscribeRef.current) {
@@ -484,12 +596,37 @@ export default function ChatComposer({
       )}
 
       <View style={[styles.pill, { backgroundColor: 'transparent', borderWidth: 0 }]}>
+        {attachMenuOpen ? (
+          <View style={[styles.attachMenu, { backgroundColor: c.elevated, borderColor: c.border }]}>
+            <TouchableOpacity
+              style={styles.attachMenuItem}
+              onPress={() => { tapLight(); setAttachMenuOpen(false); setCameraOpen(true); }}
+              activeOpacity={0.7}
+              accessibilityRole="button"
+              accessibilityLabel="Take photo with camera"
+            >
+              <Ionicons name="camera-outline" size={18} color={c.text} />
+              <Text style={[styles.attachMenuText, { color: c.text }]}>Take photo</Text>
+            </TouchableOpacity>
+            <View style={[styles.attachMenuDivider, { backgroundColor: c.border }]} />
+            <TouchableOpacity
+              style={styles.attachMenuItem}
+              onPress={() => void handleAttach()}
+              activeOpacity={0.7}
+              accessibilityRole="button"
+              accessibilityLabel="Choose file"
+            >
+              <Ionicons name="folder-open-outline" size={18} color={c.text} />
+              <Text style={[styles.attachMenuText, { color: c.text }]}>Choose file</Text>
+            </TouchableOpacity>
+          </View>
+        ) : null}
         <TouchableOpacity
           style={[styles.plusBtn, { borderColor: c.border }]}
-          onPress={handleAttach}
+          onPress={() => { tapLight(); setAttachMenuOpen((v) => !v); }}
           disabled={streaming || disabled}
           activeOpacity={0.7}
-          accessibilityLabel="Attach file"
+          accessibilityLabel="Attach photo or file"
         >
           <AttachIcon size={20} color={streaming || disabled ? c.textSecondary : c.text} />
         </TouchableOpacity>
@@ -497,9 +634,11 @@ export default function ChatComposer({
         {recording ? (
           <View style={styles.recordingRow}>
             <Animated.View style={[styles.recDot, { backgroundColor: c.error, opacity: recPulse }] } />
-            <Text style={[styles.recText, { color: c.error }]}>Recording {timerText}</Text>
+            <Text style={[styles.recText, { color: c.error }]}>
+              {NativeStt ? 'Listening…' : `Recording ${timerText}`}
+            </Text>
             <Text style={[styles.recHint, { color: c.textSecondary }]}>
-              {cancelSlideRef.current ? 'Release to discard' : 'Release to transcribe · slide off to cancel'}
+              {cancelSlideRef.current ? 'Release to discard' : 'Release to insert · slide off to cancel'}
             </Text>
           </View>
         ) : transcribing ? (
@@ -605,6 +744,11 @@ export default function ChatComposer({
           </Pressable>
         )}
       </View>
+      <CameraCaptureSheet
+        visible={cameraOpen}
+        onCaptured={(uri) => void handlePhotoCaptured(uri)}
+        onClose={() => setCameraOpen(false)}
+      />
     </View>
     </View>
   );
@@ -669,6 +813,26 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  attachMenu: {
+    position: 'absolute',
+    left: 0,
+    bottom: 46,
+    zIndex: 30,
+    elevation: 8,
+    borderRadius: theme.radius.md,
+    borderWidth: 1,
+    paddingVertical: 4,
+    minWidth: 170,
+  },
+  attachMenuItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+  },
+  attachMenuText: { fontSize: 14 },
+  attachMenuDivider: { height: StyleSheet.hairlineWidth, marginLeft: 44 },
   rootWrap: {
     position: 'relative',
   },

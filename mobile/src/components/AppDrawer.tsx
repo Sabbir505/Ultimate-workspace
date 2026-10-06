@@ -2,11 +2,11 @@ import React, {
   createContext, useCallback, useContext, useEffect, useMemo, useRef, useState,
   type ReactNode,
 } from 'react';
-import {
+import { PanResponder,
   Alert, Animated, BackHandler, Easing, Modal, Pressable,
   FlatList, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View,
   useWindowDimensions,
-} from 'react-native';
+ } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
 import Ionicons from '@expo/vector-icons/Ionicons';
@@ -17,6 +17,7 @@ const PencilSquare = ({ size, color }: { size?: number; color?: string }) =>
   <Ionicons name="create-outline" size={size} color={color} />;
 import { getRelayUrl, onSearchResults, onSessionCreated, useRelay, type ChatSearchHit, type Session } from '../hooks/useRelay';
 import { useProjects } from '../hooks/useProjects';
+import { screenCacheGet } from '../lib/screenCache';
 import { theme, useTheme } from '../theme';
 import { timeAgo } from '../lib/format';
 import { openChatById } from '../lib/navigation';
@@ -41,12 +42,20 @@ import ProjectManager from './ProjectManager';
  *  the screen being left behind re-rendered at the exact moment the next one
  *  mounted — two screens' worth of work inside one navigation frame.
  */
+/** A project the new-chat sheet / drawer rows picked for the NEXT chat —
+ *  the home composer renders it as a chip and binds the created session to
+ *  it. Lives here so the drawer and the home screen share one source. */
+export interface PendingProject {
+  id: string;
+  name: string;
+}
+
 export interface DrawerActions {
   open: () => void;
   close: () => void;
   closeNow: () => void;
-  openNewChat: () => void;
-  closeNewChat: () => void;
+  pendingProject: PendingProject | null;
+  setPendingProject: (p: PendingProject | null) => void;
   /** @internal — <AppDrawer> registers the real implementation. */
   register: (impl: DrawerImpl | null) => void;
 }
@@ -56,16 +65,14 @@ export interface DrawerImpl {
   open: () => void;
   close: () => void;
   closeNow: () => void;
-  openNewChat: () => void;
-  closeNewChat: () => void;
 }
 
 const DrawerActionsContext = createContext<DrawerActions>({
   open: () => {},
   close: () => {},
   closeNow: () => {},
-  openNewChat: () => {},
-  closeNewChat: () => {},
+  pendingProject: null,
+  setPendingProject: () => {},
   register: () => {},
 });
 
@@ -81,15 +88,16 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
   // callbacks are harmless no-ops.
   const impl = useRef<DrawerImpl | null>(null);
   const call = useCallback((k: keyof DrawerImpl) => () => impl.current?.[k](), []);
+  const [pendingProject, setPendingProject] = useState<PendingProject | null>(null);
 
   const api = useMemo<DrawerActions>(() => ({
     open: call('open'),
     close: call('close'),
     closeNow: call('closeNow'),
-    openNewChat: call('openNewChat'),
-    closeNewChat: call('closeNewChat'),
+    pendingProject,
+    setPendingProject,
     register: (i: DrawerImpl | null) => { impl.current = i; },
-  }), [call]);
+  }), [call, pendingProject]);
 
   return <DrawerActionsContext.Provider value={api}>{children}</DrawerActionsContext.Provider>;
 }
@@ -151,7 +159,7 @@ function statusDotColor(status: Session['status']): string {
     : c.gray;
 }
 
-type TimeBucket = 'Today' | 'Yesterday' | 'This week' | 'Earlier';
+type TimeBucket = 'Pinned' | 'Today' | 'Yesterday' | 'This week' | 'Earlier';
 const BUCKETS: TimeBucket[] = ['Today', 'Yesterday', 'This week', 'Earlier'];
 
 function bucketSessions(sessions: Session[]): { label: TimeBucket; items: Session[] }[] {
@@ -162,8 +170,12 @@ function bucketSessions(sessions: Session[]): { label: TimeBucket; items: Sessio
   // then most recent).
   const sorted = [...sessions].sort((a, b) =>
     (b.starred ? 1 : 0) - (a.starred ? 1 : 0) || b.lastActivity - a.lastActivity);
+  // Pinned chats live ONLY in the drawer's top "Pinned" section (next to
+  // Projects/Artifacts) — excluded from the time buckets entirely so they
+  // never render twice.
   const groups = BUCKETS.map((label) => ({ label, items: [] as Session[] }));
   for (const s of sorted) {
+    if (s.starred) continue;
     const idx = s.lastActivity >= bounds[0] ? 0
       : s.lastActivity >= bounds[1] ? 1
       : s.lastActivity >= bounds[2] ? 2
@@ -242,234 +254,24 @@ export function useCreateSessionFlow() {
 // New chat picker — inline modal sheet: project list + agent chips + start.
 // ---------------------------------------------------------------------------
 
-function NewChatModal({ visible, onClose }: { visible: boolean; onClose: () => void }) {
-  const { sessions, connected, harnesses } = useRelay();
-  const navigation = useNavigation<any>();
-  const insets = useSafeAreaInsets();
-  useTheme();
-  const c = theme.colors;
-  const start = useCreateSessionFlow();
-  // Real project list from the desktop (ListProjects) — the session-derived
-  // list missed projects that have no chats yet. Session-derived entries
-  // still fill in the default agent per project. The listProjects send +
-  // ProjectList/Upserted/Removed merge live in the shared useProjects hook
-  // (same subscription ProjectManager uses).
-  const serverProjects = useProjects(visible);
-
-  const projects = useMemo(() => {
-    const fromSessions = collectProjects(sessions);
-    const rows = serverProjects.map((p) => ({
-      id: p.id,
-      name: p.name,
-      provider: fromSessions.find((s) => s.id === p.id)?.provider ?? '',
-    }));
-    for (const s of fromSessions) {
-      if (!rows.some((r) => r.id === s.id)) rows.push(s);
-    }
-    return rows;
-  }, [sessions, serverProjects]);
-  const [manageOpen, setManageOpen] = useState(false);
-  const [projectId, setProjectId] = useState<string | null>(null);
-  const [harness, setHarness] = useState('claude_code');
-
-  // The project list arrives asynchronously; if the sheet is already open,
-  // nothing was selected and Start created a project-less chat.
-  React.useEffect(() => {
-    if (!visible || projectId != null || projects.length === 0) return;
-    setProjectId(projects[0].id);
-    if (projects[0].provider) setHarness(projects[0].provider);
-  }, [visible, projectId, projects]);
-
-  // Agent chips mirror the desktop's agent picker: the harness list the
-  // desktop advertises (installed state included). Static fallback for a
-  // desktop that hasn't sent the list yet.
-  const agentOptions = useMemo(
-    () => (harnesses.length > 0
-      ? harnesses.map((h) => ({ label: h.display_name, value: h.id, installed: h.installed }))
-      : HARNESS_OPTIONS.map((o) => ({ ...o, installed: true }))),
-    [harnesses],
-  );
-
-  // Fresh selection every time the sheet opens.
-  useEffect(() => {
-    if (visible) {
-      setProjectId(projects[0]?.id ?? null);
-      setHarness(projects[0]?.provider ?? 'claude_code');
-    }
-    // `projects` is derived from sessions; re-seeding on every list refresh
-    // would clobber the user's mid-flow selection, so only key on `visible`.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visible]);
-
-  const canStart = connected;
-
-  const handleStart = () => {
-    if (!connected) return;
-    onClose();
-    // Land on the chat home while the desktop creates the session (the
-    // SessionCreated listener in `start` opens the chat itself). No project
-    // picked → project-less chat, bindable on the desktop later.
-    navigation.navigate('HomeMain');
-    start(projectId ?? '', harness);
-  };
-
-  return (
-    <>
-    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
-      <View style={[styles.modalScrim, { backgroundColor: c.scrim }]}>
-        <Pressable
-          style={styles.modalScrimTap}
-          onPress={onClose}
-          accessibilityRole="button"
-          accessibilityLabel="Close new chat"
-        />
-        <View
-          style={[styles.sheet, { backgroundColor: c.background, paddingBottom: insets.bottom + theme.spacing.lg }]}
-        >
-          <View style={[styles.sheetHandle, { backgroundColor: c.border }]} />
-          <Text style={[styles.sheetTitle, { color: c.text }, theme.type.title]}>New chat</Text>
-          <Text style={[styles.sheetSubtitle, { color: c.textSecondary }, theme.type.secondary]}>
-            Pick a project and an agent to start with.
-          </Text>
-
-          {projects.length === 0 && (
-            <Text style={[styles.sheetEmpty, { color: c.textSecondary }, theme.type.secondary]}>
-              No project picked — the chat starts project-less; bind one on the desktop anytime.
-            </Text>
-          )}
-          {projects.length > 0 && (
-            <ScrollView style={styles.projectList}>
-                {projects.map((p) => {
-                  const selected = p.id === projectId;
-                  return (
-                    <TouchableOpacity
-                      key={p.id || p.name}
-                      style={[
-                        styles.projectRow,
-                        { borderColor: selected ? c.accent : c.border },
-                        selected && { backgroundColor: c.surface2 },
-                      ]}
-                      activeOpacity={0.7}
-                      accessibilityRole="button"
-                      accessibilityState={selected ? { selected: true } : {}}
-                      accessibilityLabel={`Project ${p.name}`}
-                      onPress={() => { tapLight(); setProjectId(p.id); setHarness(p.provider); }}
-                    >
-                      <View style={[styles.projectIcon, { backgroundColor: c.bubble }]}>
-                        <Ionicons name="folder-outline" size={16} color={c.accent} />
-                      </View>
-                      <View style={styles.projectText}>
-                        <Text
-                          numberOfLines={1}
-                          style={[styles.projectName, { color: c.text }, theme.type.body]}
-                        >
-                          {p.name}
-                        </Text>
-                        <Text
-                          numberOfLines={1}
-                          style={[{ color: c.textSecondary }, theme.type.secondary]}
-                        >
-                          Continue with {harnessLabel(p.provider)}
-                        </Text>
-                      </View>
-                      {selected && <Ionicons name="checkmark" size={18} color={c.accent} />}
-                    </TouchableOpacity>
-                  );
-                })}
-          </ScrollView>
-          )}
-              <TouchableOpacity
-                style={styles.manageRow}
-                activeOpacity={0.7}
-                accessibilityRole="button"
-                accessibilityLabel="Manage projects"
-                onPress={() => { tapLight(); setManageOpen(true); }}
-              >
-                <Ionicons name="options-outline" size={15} color={c.textSecondary} />
-                <Text style={[{ color: c.textSecondary }, theme.type.secondary]}>
-                  Manage projects
-                </Text>
-              </TouchableOpacity>
-
-              <Text style={[styles.sheetLabel, { color: c.textSecondary }, theme.type.label]}>AGENT</Text>
-              <View style={styles.chipRow}>
-                {agentOptions.map((opt) => {
-                  const selected = harness === opt.value;
-                  return (
-                    <TouchableOpacity
-                      key={opt.value}
-                      style={[
-                        styles.chip,
-                        {
-                          borderColor: selected ? c.accent : c.border,
-                          backgroundColor: selected ? c.accent : 'transparent',
-                        },
-                      ]}
-                      activeOpacity={0.7}
-                      accessibilityRole="button"
-                      accessibilityState={selected ? { selected: true } : {}}
-                      accessibilityLabel={`Agent ${opt.label}`}
-                      onPress={() => { tapLight(); setHarness(opt.value); }}
-                    >
-                      <Text
-                        style={[
-                          styles.chipText,
-                          theme.type.label,
-                          { color: selected ? c.white : c.textSecondary },
-                          !opt.installed && !selected ? { opacity: 0.55 } : null,
-                        ]}
-                      >
-                        {opt.label}{opt.installed ? '' : ' ·'}
-                      </Text>
-                    </TouchableOpacity>
-                  );
-                })}
-              </View>
-
-              {!connected && (
-                <Text style={[styles.sheetOffline, { color: c.textSecondary }, theme.type.secondary]}>
-                  Connect to your desktop to start a chat.
-                </Text>
-              )}
-              <TouchableOpacity
-                style={[
-                  styles.startButton,
-                  { backgroundColor: c.accent, opacity: canStart ? 1 : 0.4 },
-                ]}
-                activeOpacity={0.8}
-                accessibilityRole="button"
-                accessibilityLabel="Start chat"
-                accessibilityState={canStart ? {} : { disabled: true }}
-                disabled={!canStart}
-                onPress={handleStart}
-              >
-                <PencilSquare size={18} color={c.white} />
-                <Text style={[styles.startButtonText, theme.type.body, { color: c.white }]}>
-                  Start chat
-                </Text>
-              </TouchableOpacity>
-        </View>
-      </View>
-    </Modal>
-      <ProjectManager visible={manageOpen} onClose={() => setManageOpen(false)} />
-    </>
-  );
-}
-
 // ---------------------------------------------------------------------------
 // The drawer overlay. Render ONCE inside the NavigationContainer, as a
 // sibling AFTER the navigator so it stacks above every screen.
 // ---------------------------------------------------------------------------
 
 export default function AppDrawer() {
-  const { close, closeNow, openNewChat, closeNewChat, register } = useDrawer();
+  const { close, closeNow, register } = useDrawer();
   // Drawer state lives HERE, not in the provider: the overlay is a sibling of
   // the navigator, so its state changes re-render only this component.
   const [isOpen, setIsOpen] = React.useState(false);
-  const [newChatOpen, setNewChatOpen] = React.useState(false);
+  const [projectsExpanded, setProjectsExpanded] = React.useState(false);
+  const [pinnedExpanded, setPinnedExpanded] = React.useState(false);
   const [mounted, setMounted] = React.useState(false);
 
   const { sessions, connected, deleteSession, spawnSession, setSessionStarred, searchChatMessages } = useRelay();
+  const { pendingProject, setPendingProject } = useDrawerActions();
+  // Registered projects (ListProjects) for the drawer's Projects section.
+  const drawerProjects = useProjects(isOpen);
   // Full-text message search (desktop command-palette parity). The title
   // filter below still runs; this adds the message-body hits the desktop
   // palette finds through SQLite FTS.
@@ -509,8 +311,6 @@ export default function AppDrawer() {
       open: () => { tapMedium(); snapRef.current = false; setMounted(true); setIsOpen(true); },
       close: () => { tapLight(); setIsOpen(false); },
       closeNow: () => { tapLight(); snapRef.current = true; setIsOpen(false); setMounted(false); },
-      openNewChat: () => { setIsOpen(false); setNewChatOpen(true); },
-      closeNewChat: () => { setNewChatOpen(false); },
     });
     return () => register(null);
   }, [register]);
@@ -532,6 +332,28 @@ export default function AppDrawer() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, progress]);
 
+  // Edge swipe (desktop-app parity): a thin always-present strip at the
+  // screen's left edge. A rightward horizontal swipe — or a tap — opens the
+  // drawer; the panel's own slide-in provides the animation. Starts 90px
+  // down so it never covers header buttons, and only exists while CLOSED.
+  const edgePan = React.useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponder: (_, g) =>
+        Math.abs(g.dx) > 18 && Math.abs(g.dy) < 14,
+      onPanResponderRelease: (_, g) => {
+        if (g.dx > 24) open();
+      },
+    }),
+  ).current;
+
+  const edgeStrip = !isOpen ? (
+    <View
+      style={styles.edgeStrip}
+      {...edgePan.panHandlers}
+      pointerEvents="box-only"
+    />
+  ) : null;
+
   // Android hardware back closes the drawer instead of leaving the app/screen.
   useEffect(() => {
     if (!isOpen) return;
@@ -544,13 +366,18 @@ export default function AppDrawer() {
 
   const [query, setQuery] = useState('');
   const q = query.trim().toLowerCase();
+  // Offline-first: when the relay store is empty (fresh boot before the
+  // SessionList reply, or disconnected), paint the persisted list instead.
+  const effectiveSessions = sessions.length > 0
+    ? sessions
+    : screenCacheGet<Session[]>('sessions.list') ?? [];
   const visibleSessions = useMemo(
     () => (q
-      ? sessions.filter((s) =>
+      ? effectiveSessions.filter((s) =>
           (s.title || '').toLowerCase().includes(q) ||
           (s.projectName || '').toLowerCase().includes(q))
-      : sessions),
-    [sessions, q],
+      : effectiveSessions),
+    [effectiveSessions, q],
   );
   const groups = useMemo(() => bucketSessions(visibleSessions), [visibleSessions]);
   // One flat row stream (headers interleaved with sessions) so FlatList can
@@ -611,7 +438,7 @@ export default function AppDrawer() {
   if (!mounted)
     return (
       <>
-        <NewChatModal visible={newChatOpen} onClose={closeNewChat} />
+        {edgeStrip}
       </>
     );
 
@@ -642,6 +469,7 @@ export default function AppDrawer() {
           mounted through its 250ms close animation, and without this the
           sliding-out drawer kept intercepting every touch on the screen the
           user just navigated to — a dead zone over 80% of the width. */}
+      {edgeStrip}
       <Animated.View
         pointerEvents={isOpen ? 'auto' : 'none'}
         style={[
@@ -661,20 +489,6 @@ export default function AppDrawer() {
           <ConnectionIndicator size={8} showLabel />
         </View>
         <DomainErrorBar domains={['sessions', 'search', 'acp-agents']} />
-
-        {/* New chat */}
-        <TouchableOpacity
-          style={[styles.newChatRow, { backgroundColor: c.surface2 }]}
-          activeOpacity={0.7}
-          accessibilityRole="button"
-          accessibilityLabel="New chat"
-          onPress={() => { tapMedium(); openNewChat(); }}
-        >
-          <View style={[styles.newChatIcon, { backgroundColor: c.bubble }]}>
-            <PencilSquare size={16} color={c.accent} />
-          </View>
-          <Text style={[styles.newChatLabel, { color: c.text }, theme.type.body]}>New chat</Text>
-        </TouchableOpacity>
 
         {/* Search */}
         <View style={[styles.searchField, { backgroundColor: c.surface2, borderColor: c.border }]}>
@@ -700,6 +514,155 @@ export default function AppDrawer() {
             </TouchableOpacity>
           )}
         </View>
+
+        {/* New chat */}
+        <TouchableOpacity
+          style={[styles.newChatRow, { backgroundColor: c.surface2 }]}
+          activeOpacity={0.7}
+          accessibilityRole="button"
+          accessibilityLabel="New chat"
+          onPress={() => {
+            tapMedium();
+            // "New chat" IS the home composer — no intermediate sheet. Clear
+            // any pending project so the next chat starts unbound.
+            setPendingProject(null);
+            setIsOpen(false);
+            navigation.navigate('HomeMain');
+          }}
+        >
+          <View style={[styles.newChatIcon, { backgroundColor: c.bubble }]}>
+            <PencilSquare size={16} color={c.accent} />
+          </View>
+          <Text style={[styles.newChatLabel, { color: c.text }, theme.type.body]}>New chat</Text>
+        </TouchableOpacity>
+
+        {/* Projects (collapsible — tap the title to reveal) + Artifacts:
+            desktop chat-rail parity, right under the primary actions. */}
+            <TouchableOpacity
+              style={styles.footerRow}
+              activeOpacity={0.6}
+              accessibilityRole="button"
+              accessibilityLabel={projectsExpanded ? 'Collapse projects' : 'Expand projects'}
+              onPress={() => { tapLight(); setProjectsExpanded((v) => !v); }}
+            >
+              <Ionicons name="folder-outline" size={18} color={c.textSecondary} />
+              <Text style={[styles.footerLabel, { color: c.text }, theme.type.body]}>Projects</Text>
+              <Ionicons
+                name={projectsExpanded ? 'chevron-up' : 'chevron-down'}
+                size={16}
+                color={c.textSecondary}
+              />
+            </TouchableOpacity>
+            {projectsExpanded ? (
+              <View style={styles.projectsList}>
+                {(() => {
+                  const cached = screenCacheGet<{ id: string; name: string }[]>('projects.list') ?? [];
+                  const shown = drawerProjects.length > 0
+                    ? drawerProjects.map((p) => ({ id: p.id, name: p.name }))
+                    : cached;
+                  if (shown.length === 0) {
+                    return (
+                      <Text style={{ color: c.textSecondary, fontSize: 12, paddingHorizontal: theme.spacing.lg, paddingVertical: 6 }}>
+                        {connected ? 'Loading projects…' : 'No cached projects.'}
+                      </Text>
+                    );
+                  }
+                  return shown.map((p) => (
+                  <TouchableOpacity
+                    key={p.id}
+                    style={styles.projectNestedRow}
+                    activeOpacity={0.6}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Start a chat in ${p.name}`}
+                    onPress={() => {
+                      tapLight();
+                      // The NEXT composer send creates the chat bound to this
+                      // project (the home chip shows the pending pick).
+                      setPendingProject({ id: p.id, name: p.name });
+                      setIsOpen(false);
+                      navigation.navigate('HomeMain');
+                    }}
+                  >
+                    <Ionicons name="folder-outline" size={13} color={c.textSecondary} />
+                    <Text
+                      numberOfLines={1}
+                      style={[styles.projectNestedLabel, { color: c.textSecondary }]}
+                    >
+                      {p.name}
+                    </Text>
+                    <Ionicons name="chatbubble-ellipses-outline" size={12} color={c.textSecondary} />
+                  </TouchableOpacity>
+                  ));
+                })()}
+              </View>
+            ) : null}
+        <TouchableOpacity
+          style={styles.footerRow}
+          activeOpacity={0.6}
+          accessibilityRole="button"
+          accessibilityLabel="Artifacts"
+          onPress={() => { tapLight(); close(); navigation.navigate('Artifacts'); }}
+        >
+          <Ionicons name="grid-outline" size={18} color={c.textSecondary} />
+          <Text style={[styles.footerLabel, { color: c.text }, theme.type.body]}>Artifacts</Text>
+          <Ionicons name="chevron-forward" size={16} color={c.textSecondary} />
+        </TouchableOpacity>
+
+        {/* Pinned chats (projects-section style): expand for starred chats
+            across every time bucket; they also stay on top of the history. */}
+        {(() => {
+          const pinnedChats = effectiveSessions.filter((x) => x.starred);
+          return (
+            <>
+              <TouchableOpacity
+                style={styles.footerRow}
+                activeOpacity={0.6}
+                accessibilityRole="button"
+                accessibilityLabel={pinnedExpanded ? 'Collapse pinned chats' : 'Expand pinned chats'}
+                onPress={() => { tapLight(); setPinnedExpanded((v) => !v); }}
+              >
+                <Ionicons name="star" size={18} color={c.textSecondary} />
+                <Text style={[styles.footerLabel, { color: c.text }, theme.type.body]}>Pinned</Text>
+                <Ionicons
+                  name={pinnedExpanded ? 'chevron-up' : 'chevron-down'}
+                  size={16}
+                  color={c.textSecondary}
+                />
+              </TouchableOpacity>
+              {pinnedExpanded ? (
+                <View style={styles.projectsList}>
+                  {pinnedChats.length === 0 ? (
+                    <Text style={{ color: c.textSecondary, fontSize: 12, paddingHorizontal: theme.spacing.lg, paddingVertical: 6 }}>
+                      No pinned chats — long-press a chat to pin it.
+                    </Text>
+                  ) : (
+                    pinnedChats.map((s) => (
+                      <TouchableOpacity
+                        key={s.id}
+                        style={styles.projectNestedRow}
+                        activeOpacity={0.6}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Open pinned chat ${s.title || 'Untitled'}`}
+                        onPress={() => openSession(s)}
+                      >
+                        <Ionicons name="star" size={12} color={c.accent} />
+                        <Text
+                          numberOfLines={1}
+                          style={[styles.projectNestedLabel, { color: c.textSecondary }]}
+                        >
+                          {s.title || 'Untitled'}
+                        </Text>
+                        <Text style={{ color: c.textSecondary, fontSize: 10 }}>
+                          {timeAgo(s.lastActivity)}
+                        </Text>
+                      </TouchableOpacity>
+                    ))
+                  )}
+                </View>
+              ) : null}
+            </>
+          );
+        })()}
 
         {/* Message-body hits (full-text) — desktop command-palette parity. */}
         {hits.length > 0 && (
@@ -831,19 +794,9 @@ export default function AppDrawer() {
         {/* Footer: the drawer is for navigation, not a settings index.
             Automations / Notifications / Memory / Skills / Git moved into
             Settings, where they sit next to the rest of the app's controls
-            instead of crowding the primary navigation. */}
+            instead of crowding the primary navigation. Artifacts lives up top
+            with Projects. */}
         <View style={[styles.footer, { borderTopColor: c.border }]}>
-          <TouchableOpacity
-            style={styles.footerRow}
-            activeOpacity={0.6}
-            accessibilityRole="button"
-            accessibilityLabel="Artifacts"
-            onPress={() => { beginScreenTiming(); closeNow(); navigation.navigate('Artifacts'); }}
-          >
-            <Ionicons name="folder-open-outline" size={18} color={c.textSecondary} />
-            <Text style={[styles.footerLabel, { color: c.text }, theme.type.body]}>Artifacts</Text>
-            <Ionicons name="chevron-forward" size={16} color={c.textSecondary} />
-          </TouchableOpacity>
           <TouchableOpacity
             style={styles.footerRow}
             activeOpacity={0.6}
@@ -855,28 +808,10 @@ export default function AppDrawer() {
             <Text style={[styles.footerLabel, { color: c.text }, theme.type.body]}>Settings</Text>
             <Ionicons name="chevron-forward" size={16} color={c.textSecondary} />
           </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.footerRow}
-            activeOpacity={0.6}
-            accessibilityRole="button"
-            accessibilityLabel={`Connection: ${connected ? 'connected' : 'offline'}`}
-            onPress={goToSettings}
-          >
-            <ConnectionIndicator size={8} />
-            <View style={styles.footerConnText}>
-              <Text style={[{ color: c.text }, theme.type.body]}>
-                {connected ? 'Connected' : 'Offline'}
-              </Text>
-              <Text numberOfLines={1} style={[{ color: c.textSecondary }, theme.type.secondary]}>
-                {host}
-              </Text>
-            </View>
-            <Ionicons name="chevron-forward" size={16} color={c.textSecondary} />
-          </TouchableOpacity>
         </View>
       </Animated.View>
 
-      <NewChatModal visible={newChatOpen} onClose={closeNewChat} />
+
     </>
   );
 }
@@ -955,6 +890,15 @@ const styles = StyleSheet.create({
     paddingTop: theme.spacing.sm,
     paddingBottom: theme.spacing.xs,
   },
+  projectsSection: { paddingHorizontal: 12, paddingBottom: 6 },
+  projectsList: { paddingBottom: 6 },
+  projectNestedRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    paddingLeft: 40, paddingRight: theme.spacing.md,
+    paddingVertical: 5,
+  },
+  projectNestedLabel: { flex: 1, fontSize: 13 },
+  projectRowLabel: { flex: 1, marginLeft: 10, marginRight: 8 },
   historyRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1067,4 +1011,5 @@ const styles = StyleSheet.create({
     borderRadius: theme.radius.pill,
   },
   startButtonText: { fontWeight: '600' },
+  edgeStrip: { position: 'absolute', left: 0, top: 90, bottom: 0, width: 22 },
 });

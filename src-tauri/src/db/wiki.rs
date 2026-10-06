@@ -19,7 +19,7 @@
 //! place raw file content is searched.
 
 use rusqlite::{params, Connection, OptionalExtension, Row};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::{new_id, now_ts, DbResult};
 
@@ -29,7 +29,7 @@ use super::{new_id, now_ts, DbResult};
 /// DOCS_CHUNK_SCHEMA_VERSION plays for RAG corpora.
 pub const WIKI_SCHEMA_VERSION: i64 = 1;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WikiProject {
     pub id: String,
@@ -57,7 +57,7 @@ const PROJECT_COLUMNS: &str =
     "id, path, head_sha, schema_version, built_at, last_update_at, build_model";
 
 /// Page row without the body (list/index surfaces).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WikiPage {
     pub id: String,
@@ -92,7 +92,7 @@ const PAGE_COLUMNS: &str = "id, slug, title, kind, summary, status, stale_reason
 /// One grounded claim: a factual sentence on a page pinned to versioned
 /// source evidence. `blob_sha` is the whole-file blob the evidence pointed
 /// at when the page was written.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WikiClaim {
     pub claim: String,
@@ -186,7 +186,7 @@ pub fn list_pages(conn: &Connection, project_id: &str) -> DbResult<Vec<WikiPage>
 }
 
 /// A page with everything: body, builder brief, evidence file set, claims.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WikiPageFull {
     #[serde(flatten)]
@@ -572,7 +572,7 @@ pub(crate) fn delete_wiki_rows(conn: &Connection, ids: &[String]) -> DbResult<()
 /// Per-wiki rollup for the tool-panel's project list (one row per wiki,
 /// pages aggregated — the panel groups pages UNDER projects, so it needs
 /// counts, not page rows).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WikiProjectSummary {
     pub path: String,
@@ -610,7 +610,7 @@ pub fn list_project_summaries(conn: &Connection) -> DbResult<Vec<WikiProjectSumm
 }
 
 /// One FTS hit for `search_wiki`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WikiSearchHit {
     pub slug: String,

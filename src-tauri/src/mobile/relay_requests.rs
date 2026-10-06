@@ -555,7 +555,13 @@ pub(super) async fn start_local_model_arm(
                 // Phone-supplied path: only GGUF files the desktop scanner
                 // actually listed may be spawned — an arbitrary `gguf_path`
                 // would point llama-server at any file on disk.
+                crate::relay_eprintln!(
+                    "[mobile-relay] StartLocalModel: model={model} path={gguf_path}"
+                );
                 if !super::relay::is_known_model_path(db, &gguf_path) {
+                    crate::relay_eprintln!(
+                        "[mobile-relay] StartLocalModel REJECTED — unknown path (scan list mismatch)"
+                    );
                     let _ = send_msg(
                         &write,
                         &DesktopMessage::LocalModelError {
@@ -573,6 +579,9 @@ pub(super) async fn start_local_model_arm(
                 // banner spinning with no work actually started.
                 match warm_up_local_model(&app, &gguf_path, &model).await {
                     Ok(base_url) => {
+                        crate::relay_eprintln!(
+                            "[mobile-relay] local model READY: {model} at {base_url}"
+                        );
                         // Persist so the LocalGguf provider adapter + a later
                         // ChatTurn both pick up the live endpoint.
                         {
@@ -585,6 +594,7 @@ pub(super) async fn start_local_model_arm(
                                 .await;
                     }
                     Err(e) => {
+                        crate::relay_eprintln!("[mobile-relay] local model FAILED: {model}: {e}");
                         let _ =
                             send_msg(&write, &DesktopMessage::LocalModelError { model, error: e })
                                 .await;

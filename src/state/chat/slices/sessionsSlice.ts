@@ -112,7 +112,30 @@ export function createSessionsSlice(set: ChatStoreSet, get: ChatStoreGet) {
 
     loadSessions: () => {
       loadSessionsInFlight ??= (async () => {
-        const sessions = await listChatSessions();
+        // TRANSIENT-FAILURE RETRY: the boot load races long DB holds (the
+        // phone's connect burst, cost rollups over 250+ sessions). A single
+        // rejection used to leave the sidebar on its initial "No chats yet"
+        // forever — the mount-only trigger never re-fired. Retry with
+        // backoff; a genuinely empty DB still resolves on the first pass.
+        let sessions: Awaited<ReturnType<typeof listChatSessions>> | null = null;
+        let lastErr: unknown = null;
+        for (let attempt = 0; attempt < 6; attempt++) {
+          try {
+            sessions = await listChatSessions();
+            lastErr = null;
+            break;
+          } catch (e) {
+            lastErr = e;
+            await new Promise((r) => setTimeout(r, 600 * (attempt + 1)));
+          }
+        }
+        if (sessions == null) {
+          console.error('[sessions] boot load failed after retries:', lastErr);
+          // One delayed re-burst: covers a backend that was momentarily
+          // wedged for the whole retry window.
+          setTimeout(() => { get().loadSessions(); }, 5000);
+          return;
+        }
         const clean = withoutDeleted(sessions ?? []);
         // Seed the in-memory binding cache from the persisted project_id so the
         // sidebar nesting + composer notch survive an app restart. Same for the

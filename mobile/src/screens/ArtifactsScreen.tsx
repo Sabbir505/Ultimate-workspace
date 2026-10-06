@@ -8,6 +8,8 @@ import { theme } from '../theme';
 import { useScreenMountTiming } from '../lib/screenTiming';
 import { onArtifactLibrary, onArtifactPreview, getCachedArtifactPreview, useRelay, type ArtifactLibraryEntry, type ArtifactPreview, type SessionArtifact } from '../hooks/useRelay';
 import { useRelayList } from '../hooks/useRelayList';
+import { screenCacheGet, screenCacheSet, screenCacheHas } from '../lib/screenCache';
+import { ScreenLoading } from '../components/ScreenFeedback';
 import { timeAgo } from '../lib/format';
 import ArtifactSheet, { extOf } from '../components/chat/ArtifactSheet';
 import MarkdownText from '../components/chat/MarkdownText';
@@ -61,7 +63,10 @@ export default function ArtifactsScreen() {
   useScreenMountTiming('ArtifactsScreen');
   const { listArtifacts, connected } = useRelay();
   const c = theme.colors;
-  const [entries, setEntries] = useState<ArtifactLibraryEntry[]>([]);
+  const [entries, setEntries] = useState<ArtifactLibraryEntry[]>(() =>
+    screenCacheGet<ArtifactLibraryEntry[]>('artifacts.library') ?? [],
+  );
+  const [loaded, setLoaded] = useState(() => screenCacheHas('artifacts.library'));
   const [query, setQuery] = useState('');
 
   // Refetch on mount and on reconnect — the mount send is dropped while the
@@ -69,7 +74,11 @@ export default function ArtifactsScreen() {
   // "No artifacts yet." on screen.
   useRelayList(() => listArtifacts());
   useEffect(
-    () => onArtifactLibrary.on(({ artifacts }) => setEntries(artifacts)),
+    () => onArtifactLibrary.on(({ artifacts }) => {
+      screenCacheSet('artifacts.library', artifacts);
+      setEntries(artifacts);
+      setLoaded(true);
+    }),
     [],
   );
 
@@ -135,11 +144,15 @@ export default function ArtifactsScreen() {
         contentContainerStyle={styles.grid}
         renderItem={renderTile}
         ListEmptyComponent={
-          <View style={styles.empty}>
-            <Text style={{ color: c.textSecondary }}>
-              {connected ? 'No artifacts yet.' : 'Connect to your desktop to see artifacts.'}
-            </Text>
-          </View>
+          !loaded ? (
+            <ScreenLoading label="Loading artifacts" />
+          ) : (
+            <View style={styles.empty}>
+              <Text style={{ color: c.textSecondary }}>
+                {connected ? 'No artifacts yet.' : 'Connect to your desktop to see artifacts.'}
+              </Text>
+            </View>
+          )
         }
       />
 

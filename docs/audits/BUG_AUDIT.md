@@ -1,8 +1,8 @@
 # BUG AUDIT — Relay (crate: `relay`)
 
-**Last verified:** 2026-09-06
+**Last verified:** 2026-10-05
 **Branch:** `master`
-**Working tree:** **GREEN.** `tsc --noEmit` clean (root + mobile), `npx vitest run` 128 files / 798 tests all passing, `cargo test --lib` 898 passed / 0 failed / 12 ignored. The 2026-08-27 regressions (N5, N6) are fixed — see the open-items table. The full-project audit of 2026-09-05 (`ISSUES.md`, 60 findings) is also fully resolved.
+**Working tree:** **GREEN.** `tsc --noEmit` clean (root + mobile), `npm test` 215 files / 1702 tests, `cargo test --lib` 1659 passed / 0 failed / 23 ignored. (The 2026-09-06 figures previously recorded here — 128 files / 798 tests, 898 Rust tests — were accurate at that date but are now superseded; the suites have grown substantially since.) One frontend case, `jsxPreviewRuntime.test.ts` → "lowers curated-library imports to require() calls", can exceed the 5s timeout under full-suite parallel load because it competes with the Mermaid corpus render for CPU; it passes in isolation, so a lone failure there is load, not a regression. The 2026-08-27 regressions (N5, N6) are fixed — see the open-items table. The full-project audit of 2026-09-05 (`ISSUES.md`, 60 findings) is also fully resolved.
 
 ---
 

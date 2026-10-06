@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
 
 use super::{canonical_root_str, WikiJobRegistry};
@@ -17,7 +17,7 @@ type CmdResult<T> = Result<T, String>;
 
 /// What the Wiki surface needs in one call: project state, the page list,
 /// and the settings the panel toggles.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WikiStatus {
     pub project: Option<db::WikiProject>,
@@ -35,7 +35,7 @@ pub struct WikiStatus {
     pub job_running: bool,
 }
 
-fn status_for(
+pub(crate) fn status_for(
     db: &DbState,
     registry: &std::sync::Arc<super::WikiJobRegistry>,
     path: &str,

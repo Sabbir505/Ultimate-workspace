@@ -1,0 +1,43 @@
+# Agent findings: db layer (24 files)
+# Status: COMPLETE — verified result captured 2026-10-02 18:26
+
+FILES COVERED: src-tauri/src/db/{mod,chat,improve,cost_v2,subagents,docs,wiki,memory,research_cache,session_fabric,automations,llm_log,projects,artifacts,checkpoints,cost,source_ledger,skills,connector_credentials,secrets,workspaces,settings,docs_eval}.rs — all read end-to-end, every candidate verified against callers, rusqlite v0.31 semantics (`unchecked_transaction` issues a plain `BEGIN`), and the schema in mod.rs.
+
+## P0
+
+none — no SQL injection (every dynamic SQL string interpolates only constant column lists/placeholder lists; all values are bound parameters, and all three FTS query builders sanitize to quoted alphanumerics), no un-rolled-back transactions (every `unchecked_transaction` propagates errors via `?` and drop-rolls-back), and no verified data-loss path.
+
+## P1
+
+**1. Nested transaction: deleting any project that has a wiki always fails and rolls back — db/projects.rs:63,98 + db/wiki.rs:537.**
+`remove_project` opens a transaction (`conn.unchecked_transaction()?`, projects.rs:63) and, inside it, calls `super::wiki::remove_wiki_by_path_prefix(&tx, &path)?` (projects.rs:98). That function then opens a second transaction on the same connection (wiki.rs:537). rusqlite 0.31's `unchecked_transaction` executes a plain `BEGIN`, and SQLite rejects a BEGIN inside an active transaction — so for any project whose path has a `wiki_projects` row, statement 6 of 7 errors, `remove_project` returns `Err`, and the outer transaction rolls back: the project can never be deleted. Existing tests seed no wiki, so `doomed.is_empty()` early-returns before the inner `BEGIN` and the bug is invisible to them. Fix: inline the three wiki deletes into `remove_project`'s existing `tx`, or split `remove_wiki_by_path_prefix` into an untransactional inner helper (`delete_wiki_rows(&tx, id)`) that the public function wraps in its own transaction only when called standalone.
+
+**2. `mirror_run_start` repoints `active` at `active + 1` instead of the version `record_version` actually created — db/automations.rs:374-375.**
+```rust
+super::improve::record_version(conn, &artifact.id, active, &prompt, None, "user")?;
+super::improve::set_channel(conn, &artifact.id, "active", active + 1)?;
+```
+`record_version` numbers the new row `SELECT COALESCE(MAX(version), 0) + 1` (improve.rs:134-135), not `active + 1`. These diverge whenever `active` lags `MAX(version)`, and both such states are reachable: the improve engine records candidate versions without moving `active` (improve_engine.rs:265 calls `record_version` then `create_proposal`, leaving `active` at base), and `set_channel` is the documented rollback primitive ("rollback = re-point 'active'", mod.rs:1200). Concrete trigger: engine proposes candidate v2 (active stays 1) → user edits the automation prompt → next run inserts the prompt as v3 but sets `active = 2` — pointing at the *engine's candidate body*, not the user's prompt. Every subsequent run's telemetry attributes to the wrong version and the next edit compares against the wrong `active_body`, desyncing permanently. Fix: use the returned version — `if let Some(v) = record_version(...)? { set_channel(conn, &artifact.id, "active", v)?; }`.
+
+**3. `ensure_artifact`'s three logical inserts run bare — a partial failure permanently cripples the artifact — db/improve.rs:89-103.**
+The registry insert (`INSERT INTO improve_artifacts`, line 89), the v1 seed (`INSERT INTO improve_versions`, line 94), and the active channel (`INSERT INTO improve_channels`, line 99) are one logical write but run as three autocommitted statements. If any statement after the first fails (SQLITE_BUSY is a real cross-process failure mode here — the headless `relay_automation` binary opens the same DB file, per mod.rs:66-69), the artifact row survives without a v1 body or active channel, and the early return `if let Some(a) = existing { return Ok(a); }` (line 84) means no later call ever repairs it: `start_run`'s `unwrap_or(1)` points runs at a nonexistent version 1 forever. Same bug class the codebase already fixed in `delete_chat_session`, `replace_file_chunks`, and `remove_corpus`. Fix: wrap the three inserts in one `conn.unchecked_transaction()?` … `tx.commit()?`, mirroring `replace_file_chunks` (docs.rs:253).
+
+## P2
+
+**4. `fts_leg` filters disabled corpora even for scoped queries, breaking the pinned-docs contract — db/docs.rs:478.**
+The scoped query contract is explicit: "Some(id) scopes to one corpus regardless of its enabled flag (pinned docs must come back regardless)" (docs.rs:331), and `cosine_top_k` honors it. But the FTS leg's SQL applies the flag unconditionally: `WHERE doc_chunks_fts MATCH ?1 AND co.enabled != 0 AND (?2 IS NULL OR c.corpus_id = ?2)`. The pinned-corpus retrieval path (chat/mod.rs:1748) calls `search_chunks_hybrid(..., Some(corpus_id), ...)`, so a corpus pinned to a chat and later disabled silently loses the keyword leg of hybrid retrieval — and when the embedding sidecar is down, returns nothing at all. Fix: `AND (?2 IS NOT NULL OR co.enabled != 0)`.
+
+**5. `totals.unpriced_usd` is dead arithmetic — always exactly 0.0 — db/cost_v2.rs:440 and 589-591.**
+In the cost_events loop, the else-branch is only reachable when `cost` is `None`, and `cost = reported.or_else(|| price_usage(...))` (line 407) means `reported` is necessarily `None` there, so `totals.unpriced_usd += reported.unwrap_or(0.0);` always adds 0. In the chat loop, `let c = cost.unwrap_or(0.0);` (line 584) makes the += inside `if cost.is_none()` also always add 0. The field is serialized to the UI (`unpricedUsd`, src/types.ts:153) and permanently reads $0.00 while `unpriced_pct` (row counts) works. Fix: delete the field or define it as the dollar amount that would have been estimated had a rate existed.
+
+**6. `llm_log::list` search does not escape LIKE wildcards — db/llm_log.rs:281-284.**
+`sql.push_str(" AND (IFNULL(request_body,'') LIKE ? OR IFNULL(response_body,'') LIKE ?)"); args.push(format!("%{s}%"))`. A `%` or `_` typed into the Logs search box acts as a wildcard and matches everything, while every other user-facing LIKE in the db layer escapes per a documented contract (chat.rs:1205-1210, session_fabric.rs:344-350). Parameterized (no injection), but contradicts the layer's own convention. Fix: apply the same escape + `ESCAPE '\'`.
+
+**7. Unbounded append-only tables with no prune anywhere — db/mod.rs:1149-1461 (schema); verified no `DELETE FROM` exists for these in src-tauri/src.**
+`session_mail` (every agent-to-agent exchange, statuses never archived), `memory_ops` (one row per judge decision; `candidate` capped at 2000 chars but `rationale`/rows uncapped), `improve_events`, `improve_runs`, `improve_eval_runs`/`improve_eval_results` grow forever on a long-lived install. The layer otherwise bounds its caches (`llm_log::prune`, `purge_expired`, `DOC_VERSION_CAP`, `CITATION_REPORTS_KEEP`), so these are the outliers; scanned by `queued_mail_for`/`list_memory_ops`/`list_events`. Fix: add age/count caps in the existing boot-time sweep.
+
+**8. `quarantine_flaky_cases` compares the globally-last two results, not the last two per (base, candidate) pair — db/improve.rs:691-707.**
+The doc states "Group by case, keep the two most recent results per (base, candidate) pair, compare", but the code only looks at `results[len-1]`/`results[len-2]` and requires `b1 == b2 && c1 == c2`. A case whose two same-pair runs flip (fail → pass) but are separated by a run of a different pair — e.g. (v2,fail), (v3,pass), (v2,pass) — is never quarantined, letting a flaky case keep vetoing candidates. Fix: bucket `results` by the `(Option<i64>, Option<i64>)` pair per case and compare the last two entries of any pair bucket with ≥2 entries.
+
+**9. DRY: the FTS5-sanitizing `fts_match_query` and the LIKE-escape snippet are copy-pasted across modules — db/docs.rs:445-462, db/wiki.rs:611-628, db/memory.rs:244-257 (byte-identical OR-joined builders); db/chat.rs:1164-1184 (AND-joined variant); LIKE-escape duplicated at chat.rs:1205-1210 and session_fabric.rs:344-350.**
+Four implementations of "strip to alphanumerics, quote, prefix-star" with drifting semantics (AND vs OR joining), each carrying its own comment claiming a shared discipline. A sanitizer bug fixed in one copy silently misses the others. Fix: hoist one `pub(crate) fn fts_prefix_query(query: &str, join: Join) -> Option<String>` and one `escape_like(&str) -> String` into db/mod.rs; same for the near-identical `SELECT {COLUMNS}`/row-mapper scaffolding repeated in subagents.rs, automations.rs, wiki.rs, docs.rs.

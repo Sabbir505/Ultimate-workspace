@@ -328,18 +328,26 @@ pub fn log_stderr_line(args: std::fmt::Arguments<'_>) {
     let stderr = std::io::stderr();
     {
         let mut lock = stderr.lock();
-        if lock.write_fmt(args).is_ok() && lock.flush().is_ok() {
-            return;
-        }
+        let _ = lock.write_fmt(args);
+        let _ = lock.flush();
     }
+    // ALWAYS mirror to the log file: when launched without a console (double-
+    // clicked exe) stderr is lost, and the relay's wedge/no-response
+    // diagnostics were unrecoverable. Capped at ~5 MB, rotated on boot.
     let mut fallback = FALLBACK_STDERR.lock();
     if fallback.is_none() {
         let dir = crate::user_dirs::app_data_dir_default().join("logs");
         let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("relay-stderr.log");
+        if let Ok(meta) = std::fs::metadata(&path) {
+            if meta.len() > 5 * 1024 * 1024 {
+                let _ = std::fs::rename(&path, dir.join("relay-stderr.log.old"));
+            }
+        }
         *fallback = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(dir.join("relay-stderr.log"))
+            .open(path)
             .ok();
     }
     if let Some(f) = fallback.as_mut() {

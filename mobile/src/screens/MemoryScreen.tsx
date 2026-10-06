@@ -17,6 +17,8 @@ import {
   useRelay, onMemoryList, onMemoryMutated, type MemoryInfo,
 } from '../hooks/useRelay';
 import { useRelayList } from '../hooks/useRelayList';
+import { screenCacheGet, screenCacheSet, screenCacheHas } from '../lib/screenCache';
+import { ScreenLoading, FadeIn } from '../components/ScreenFeedback';
 import { tapLight } from '../lib/haptics';
 import ScreenHeader from '../components/ScreenHeader';
 
@@ -31,7 +33,12 @@ export default function MemoryScreen() {
   useScreenMountTiming('MemoryScreen');
   const c = theme.colors;
   const { listMemoryRecords, updateMemoryRecord, deleteMemoryRecord, purgeMemories } = useRelay();
-  const [records, setRecords] = useState<MemoryInfo[]>([]);
+  const [records, setRecords] = useState<MemoryInfo[]>(() =>
+    screenCacheGet<MemoryInfo[]>('memory.records') ?? [],
+  );
+  // Distinguishes "still fetching" (spinner) from "loaded and empty" (the
+  // empty-state text) — an empty list on first paint read as a broken screen.
+  const [loaded, setLoaded] = useState(() => screenCacheHas('memory.records'));
   const [query, setQuery] = useState('');
   const [editing, setEditing] = useState<MemoryInfo | null>(null);
   const [draft, setDraft] = useState('');
@@ -41,7 +48,11 @@ export default function MemoryScreen() {
   // send is dropped while the socket is still pairing.
   useRelayList(() => listMemoryRecords(includeInactive), [includeInactive]);
   useEffect(() => {
-    const offList = onMemoryList.on(({ records: list }) => setRecords(list));
+    const offList = onMemoryList.on(({ records: list }) => {
+      screenCacheSet('memory.records', list);
+      setRecords(list);
+      setLoaded(true);
+    });
     const offMut = onMemoryMutated.on(() => listMemoryRecords(includeInactive));
     return () => { offList(); offMut(); };
   }, [includeInactive, listMemoryRecords]);
@@ -117,13 +128,16 @@ export default function MemoryScreen() {
       </View>
 
       <ScrollView style={styles.list} keyboardShouldPersistTaps="handled">
-        {filtered.length === 0 ? (
+        {!loaded ? (
+          <ScreenLoading label="Loading memories" />
+        ) : filtered.length === 0 ? (
           <Text style={[styles.empty, { color: c.textSecondary }]}>
             No memories match. The assistant learns facts from your chats — edit or forget
             anything here.
           </Text>
-        ) : null}
-        {filtered.map((m) => (
+        ) : (
+          <FadeIn>
+            {filtered.map((m) => (
           <View
             key={m.id}
             style={[styles.card, { backgroundColor: c.surface, borderColor: c.border }]}
@@ -201,7 +215,9 @@ export default function MemoryScreen() {
               </>
             )}
           </View>
-        ))}
+          ))}
+          </FadeIn>
+        )}
       </ScrollView>
     </SafeAreaView>
   );
@@ -216,7 +232,7 @@ const styles = StyleSheet.create({
   },
   searchInput: { flex: 1, fontSize: 14, padding: 0 },
   toggle: { alignSelf: 'flex-end', paddingVertical: 6, paddingHorizontal: 4 },
-  list: { padding: theme.spacing.md, gap: 10, paddingBottom: 40 },
+  list: { padding: theme.spacing.md, gap: 10, paddingBottom: 64 },
   card: { borderRadius: 14, borderWidth: StyleSheet.hairlineWidth, padding: 14, gap: 8 },
   cardHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   kind: { fontSize: 11, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.6 },

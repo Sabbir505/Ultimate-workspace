@@ -9,22 +9,24 @@ There are two ways to bridge the phone to the relay:
 
 ## Pairing flow
 
-The relay generates a fresh **pairing token** (43-char base64) on each desktop app launch. The token rides in the connection URL's fragment:
+The relay uses a **pairing token** (43-char base64) that is created once and then **persisted in the OS keychain**, so a phone paired yesterday reconnects automatically after a desktop restart — the phone retries its saved `ws://host/#token` URL with capped backoff, and a per-launch-rotated token would turn every restart into a mandatory re-scan. Rotate it deliberately with **Settings → Remote → New pairing token** (`regen_mobile_pairing_token`). The token rides in the connection URL's fragment:
 
 ```
-ws://127.0.0.1:54321/#<token>          # USB bridge (what the desktop's QR encodes;
+ws://127.0.0.1:<port>/#<token>          # USB bridge (what the desktop's QR encodes;
                                        #  localhost works too over `adb reverse`)
 wss://laptop.tailnet-name.ts.net/#<token>  # Tailscale
 ```
 
-On connect, the phone pairs as the first WebSocket frame. Pairing is **E2E-proof-only**: the phone sends an HMAC-SHA256 *proof* of the token (`{ "type": "Pair", "proof": "<hex>" }`) — never the raw token — and both sides derive an XChaCha20-Poly1305 session key from the token via HKDF-SHA256 (per-connection random salt, delivered in `PairOk`). Every post-pair frame is then AEAD-encrypted (Binary WS frames, per-direction counter nonces), so a passive on-path observer sees ciphertext, not conversations. There is no legacy raw-token / plaintext fallback: a `Pair` frame without a valid proof is rejected and the connection is dropped within the 30s pairing window, and the phone retries with capped exponential backoff (3s doubling to 60s per launch).
+`<port>` is not fixed: the relay binds `127.0.0.1:0` on first launch, takes the OS-assigned port, and persists it to the `mobile.relay_port` setting for reuse on later launches. Read the actual port from the desktop's Remote panel — the panel renders the matching `adb reverse` command for you.
+
+On connect, the phone pairs as the first WebSocket frame. Pairing is **E2E-proof-only**: the phone sends an HMAC-SHA256 *proof* of the token — never the raw token — and both sides derive an XChaCha20-Poly1305 session key from the token via HKDF-SHA256 (per-connection random salt, delivered in `PairOk`). Since 2026-10-01 the proof is **challenge-bound**: the desktop opens with a `PairChallenge` frame carrying a fresh 32-byte nonce, and the phone answers `Hex(HMAC-SHA256(token, "E2E-NONCE-V1" ‖ challenge))`, so a captured proof cannot be replayed against a later connection. The legacy static proof `Hex(HMAC-SHA256(token, "E2E"))` remains the pre-v2 fallback, and the `PairOk` salt is folded with the challenge (`SHA256(challenge ‖ salt)`) rather than used raw. **Settings → Remote → Require challenge-response pairing** refuses the legacy fallback outright. Every post-pair frame is AEAD-encrypted (Binary WS frames, per-direction counter nonces), so a passive on-path observer sees ciphertext, not conversations. There is no raw-token / plaintext fallback: a `Pair` frame without a valid proof is rejected and the connection is dropped within the 30s pairing window, and the phone retries with capped exponential backoff (3s doubling to 60s per launch). Five consecutive failed proofs trigger a 60-second lockout.
 
 ### Option A: USB bridge (adb)
 
 1. Connect the phone via USB with debugging enabled.
-2. On the desktop, open **Settings → Remote** and note the relay port (e.g. `54321`).
-3. Run `adb reverse tcp:54321 tcp:54321` from a terminal.
-4. On the phone, open **Settings → Desktop Connection**, enter `ws://localhost:54321/#<token>` (copy the token from the desktop's Remote panel), and tap **Connect**.
+2. On the desktop, open **Settings → Remote** and note the relay port it shows (e.g. `54321`).
+3. Run `adb reverse tcp:<port> tcp:<port>` from a terminal — or copy the command the Remote panel renders for you.
+4. On the phone, open **Settings → Desktop Connection**, enter `ws://localhost:<port>/#<token>` (copy the token from the desktop's Remote panel), and tap **Connect**.
 
 Alternatively, scan the **"Local URL (USB bridge)" QR** shown in the desktop Remote panel (it is the panel's primary QR whenever no tailnet/serve URL is available) — it encodes `ws://127.0.0.1:<port>/#<token>`.
 
@@ -54,24 +56,30 @@ Alternatively, scan the **"Local URL (USB bridge)" QR** shown in the desktop Rem
 
 The phone's ChatComposer has an attach button (📎) that opens the document picker. Selected files are:
 
-- **Images** (png, jpg, gif, webp) — sent as base64 with MIME type, up to 15 MB.
-- **Documents** (pdf, docx, pptx, xlsx, txt, code files) — sent as base64 with format extension, up to 10 MB. The desktop extracts text via its office-to-text pipeline.
-- **Text files** — sent as UTF-8 inline text, up to 512 KB.
+- **Images** (png, jpg, jpeg, gif, webp, bmp) — sent as base64 with MIME type.
+- **Documents** (pdf, docx, pptx, xlsx, txt, code files) — sent as base64 with format extension. The desktop extracts text via its office-to-text pipeline.
+- **Text files** — sent as UTF-8 inline text.
+
+All three share one per-file cap (25 MB) enforced identically by the desktop's send path (`MAX_ATTACHMENT_BYTES`), so the phone never rejects a file the desktop would accept.
 
 The desktop processes mobile attachments through the same path as desktop-attached files: images go to the vision model, documents are text-extracted and inlined, text is appended to the message.
 
 ## What the phone deliberately does NOT mirror
 
-The phone mirrors every *chat and project* surface of the desktop. The domains below are intentionally desktop-only. They are not gaps, not stubs, and not silently failing — no relay op exists for them, so nothing on the phone can half-work or appear broken.
+The phone mirrors the *chat and project* surfaces of the desktop. The domains below are intentionally desktop-only. They are not gaps, not stubs, and not silently failing — no relay op exists for them, so nothing on the phone can half-work or appear broken. (A partial exception is the terminal, noted in its row below.)
 
 | Domain | Why it stays on the desktop |
 |---|---|
 | **Vault** (secrets, credentials, keychain) | The vault holds the API keys every proxied request uses. Exposing read/write over the relay would turn a paired phone into a key exfiltration surface for anyone who steals it. The phone never holds keys — all requests are proxied through the desktop, which is the whole point of the relay's security model. |
-| **Terminal pane** (interactive PTY, `Transcript` frames) | A live shell is a remote-code-execution primitive with no meaningful second factor. Harnesses run with their own approval cards on the phone instead, so every consequential action still passes through a reviewable prompt. |
+| **Terminal pane — create/spawn/resize is desktop-only** | The phone *does* mirror a live pane: `GetTranscript` returns the rendered vt100 screen (a snapshot, not the raw byte stream, since TUI redraw sequences would be unreadable concatenated) and `SendToSession` writes into the desktop's live pane (a `\r` terminates the line). What stays desktop-only is **spawning** a new shell or resizing one — starting a process is a remote-code-execution primitive, so it must be a deliberate desktop action. Existing panes are reviewable and drivable from the phone. |
 | **Browser pane** (Playwright/CDP control) | Same class as the terminal: driving a logged-in desktop browser from a paired phone is account takeover. |
 | **PR workflow** (PR list, create/review/merge) | Merging is irreversible from a phone and GitHub credentials live on the desktop. The phone gets the *read/write* Git surface (status, diff, per-file review, commit, push, branches, log) so review is possible anywhere; the merge decision stays deliberate and at a keyboard. |
 | **Settings administration** (provider keys, model config, appearance, hooks, updater) | Changing providers or hooks rewrites what the agent is allowed to do. The phone can pick a model and effort per chat and manage budgets, but cannot install capability or redirect credentials. |
 | **RAG / embedding index management** | Index rebuilds are long-running desktop jobs over the local corpus. The phone can search chat history (`SearchChatMessages`), which is the part that is useful away from the desk. |
+| **Project wiki** (`src-tauri/src/wiki/`) | Generation and claims-ledger maintenance are long-running desktop jobs derived from git and the local checkout; the phone reads chat results that already cite it. |
+| **Declarative subagents** (`chat/subagents.rs`) | Authoring a subagent changes what the agent is permitted to do, so it stays behind the desktop's approval surface. |
+| **LLM request log / gateway** (`src-tauri/src/llm_log/`) | It captures raw prompts and responses from every local-model call; exposing it over the relay would be a transcript-exfiltration surface. |
+| **GitHub Issues** | Creating and closing issues is outward-facing and irreversible from a phone, in the same class as the merge decision below. |
 | **Image generation, TTS** | Desktop-only media jobs that write into desktop-managed artifact directories. Their *outputs* are fully visible on the phone through the artifact gallery and previews. |
 | **Updater** | Installing a desktop build from a phone would replace the binary executing the very relay serving the request. |
 
@@ -86,8 +94,8 @@ Every non-chat relay arm (git, memory, skills, projects, budgets, sessions, arti
 | Layer | Protection |
 |---|---|
 | Network bind | `127.0.0.1` always; the tailnet interface additionally when on a tailnet (CGNAT-range — unreachable from the LAN) |
-| Pairing | Per-launch token (43-char base64), constant-time HMAC proof, 30s timeout |
-| Payload encryption | XChaCha20-Poly1305 session key derived via HKDF-SHA256 from the pairing token; per-direction counter nonces; raw token never on the wire (§3.2.11) |
+| Pairing | Keychain-persisted token (43-char base64, reused across restarts so a paired phone reconnects automatically; rotate via Settings → Remote), challenge-bound constant-time HMAC proof, 30s window, 5-failure/60s lockout |
+| Payload encryption | XChaCha20-Poly1305 session key derived via HKDF-SHA256 from the pairing token; per-direction counter nonces; raw token never on the wire. See `CONTRACT.md` → Mobile Relay for the full protocol |
 | TLS | Via Tailscale Serve (HTTPS/WSS) — the relay itself is plain WS behind the proxy. Direct tailnet connections are WS without TLS, but always E2E-encrypted at the payload layer |
 | API keys | Phone never holds keys — all requests proxied through the desktop |
 

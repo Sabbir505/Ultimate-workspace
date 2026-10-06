@@ -50,6 +50,7 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 import { theme } from '../../theme';
 import { tapLight } from '../../lib/haptics';
 import { railBrandIcon } from '../AgentIcons';
+import { onLocalModelError } from '../../hooks/useRelay';
 import {
   onHarnessModels,
   onDomainError,
@@ -166,6 +167,18 @@ export default function ModelSheet({
   // `mounted` keeps the Modal alive while the close animation plays.
   const [mounted, setMounted] = useState(visible);
   const [startingKey, setStartingKey] = useState<string | null>(null);
+  // The desktop's start failure (bad path, sidecar spawn failure, port
+  // clash) used to vanish — nothing consumed LocalModelError and the row
+  // spun forever. Surface it on the model row.
+  const [startError, setStartError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const off = onLocalModelError.on(({ model, error }) => {
+      setStartError(`${model}: ${error}`);
+      setStartingKey(null);
+    });
+    return off;
+  }, []);
   const [query, setQuery] = useState('');
   // The active rail entry id ('harness:<id>' or the provider id).
   const [paneId, setPaneId] = useState<string | null>(null);
@@ -235,7 +248,22 @@ export default function ModelSheet({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, paneId, harnessCfgs]);
 
-  // Rail: AGENTS (harnesses) → API (cloud) → LOCAL, desktop rail order.
+  // Dedup once — the rail AND the local aggregate both read this.
+  const uniqProviders = useMemo(() => {
+    const seen = new Set<string>();
+    return providers.filter((p) => {
+      const key = p.id + (p.gguf_path ?? '');
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }, [providers]);
+  const localProviders = useMemo(() => uniqProviders.filter((p) => p.is_local), [uniqProviders]);
+
+  // Rail: AGENTS (harnesses) → API (cloud) → LOCAL, desktop rail order. The
+  // desktop shows ONE local pane listing every GGUF — so does this rail: a
+  // single aggregate entry (first provider as the anchor) whose pane carries
+  // every local model with its real owner for start/stop handling.
   const rail = useMemo<{ section: string; entry: RailEntry }[]>(() => {
     const rows: { section: string; entry: RailEntry }[] = [];
     for (const h of harnesses ?? []) {
@@ -250,21 +278,25 @@ export default function ModelSheet({
         entry: { kind: 'acp', id: a.id, label: a.display_name, installed: a.installed },
       });
     }
-    const seen = new Set<string>();
-    const uniq = providers.filter((p) => {
-      const key = p.id + (p.gguf_path ?? '');
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
-    for (const p of uniq.filter((p) => !p.is_local)) {
+    for (const p of uniqProviders.filter((p) => !p.is_local)) {
       rows.push({ section: 'API', entry: { kind: 'provider', provider: p } });
     }
-    for (const p of uniq.filter((p) => p.is_local)) {
-      rows.push({ section: 'LOCAL', entry: { kind: 'provider', provider: p } });
+    if (localProviders.length > 0) {
+      rows.push({
+        section: 'LOCAL',
+        entry: {
+          kind: 'provider',
+          provider: {
+            ...localProviders[0],
+            display_name: 'Local',
+            models: localProviders.flatMap((p) => p.models ?? []),
+            is_running: localProviders.some((p) => p.is_running),
+          },
+        },
+      });
     }
     return rows;
-  }, [harnesses, acpAgents, providers]);
+  }, [harnesses, acpAgents, uniqProviders, localProviders]);
 
   const activeEntry = useMemo<RailEntry | null>(() => {
     if (paneId == null) return rail[0]?.entry ?? null;
@@ -273,7 +305,11 @@ export default function ModelSheet({
         (r) =>
           (r.entry.kind === 'harness' && `harness:${r.entry.id}` === paneId) ||
           (r.entry.kind === 'acp' && `acp:${r.entry.id}` === paneId) ||
-          (r.entry.kind === 'provider' && r.entry.provider.id === paneId),
+          // The LOCAL aggregate: any bound local model selects this pane.
+          (r.entry.kind === 'provider' &&
+            (r.entry.provider.id === paneId ||
+              (r.entry.provider.is_local &&
+                localProviders.some((p) => p.id === paneId)))),
       )?.entry ?? rail[0]?.entry ?? null
     );
   }, [rail, paneId]);
@@ -295,12 +331,29 @@ export default function ModelSheet({
   const providerRows = useMemo(() => {
     if (!activeProviderPane) return [];
     const q = query.trim().toLowerCase();
-    const all = activeProviderPane.models ?? [];
-    if (!q) return all;
-    return all.filter(
-      (m) => m.toLowerCase().includes(q) || prettyModel(m).toLowerCase().includes(q),
-    );
-  }, [activeProviderPane, query]);
+    const matches = (m: string) =>
+      m.toLowerCase().includes(q) || prettyModel(m).toLowerCase().includes(q);
+    // The LOCAL aggregate pane: every local model, each carrying its real
+    // owner so start-sidecar/stop badges resolve per model. Deduped: the
+    // desktop reports one provider entry per GGUF file sharing the id
+    // `local_gguf`, and the same model can be listed under several files —
+    // duplicate keys crashed the reconciler.
+    if (activeProviderPane.is_local) {
+      const seen = new Set<string>();
+      return localProviders.flatMap((p) =>
+        (p.models ?? []).filter(matches).flatMap((m) => {
+          const k = `${p.id}|${m}`;
+          if (seen.has(k)) return [];
+          seen.add(k);
+          return [{ model: m, provider: p }];
+        }),
+      );
+    }
+    return (activeProviderPane.models ?? []).filter(matches).map((m) => ({
+      model: m,
+      provider: activeProviderPane,
+    }));
+  }, [activeProviderPane, localProviders, query]);
 
   const harnessRows = useMemo(() => {
     if (!activeHarnessId) return [];
@@ -318,16 +371,27 @@ export default function ModelSheet({
 
   const handleModel = (providerId: string, model: string) => {
     tapLight();
-    const provider = rail.find((r) => r.entry.kind === 'provider' && r.entry.provider.id === providerId)?.entry as
-      | Extract<RailEntry, { kind: 'provider' }>
-      | undefined;
-    const needsStart = provider?.provider.is_local && provider.provider.is_running === false;
+    // Local owners live in localProviders (the rail only carries the
+    // aggregate entry). Every local provider entry shares the id
+    // `local_gguf` — one per GGUF file — so the owner MUST be resolved by
+    // MODEL MEMBERSHIP, not id (an id match always returned the first file
+    // and could start the wrong GGUF).
+    const localOwner = localProviders.find((p) => (p.models ?? []).includes(model));
+    const provider = localOwner
+      ? undefined
+      : (rail.find((r) => r.entry.kind === 'provider' && r.entry.provider.id === providerId)?.entry as
+          | Extract<RailEntry, { kind: 'provider' }>
+          | undefined);
+    const needsStart = localOwner
+      ? localOwner.is_running === false
+      : provider?.provider.is_local && provider.provider.is_running === false;
     if (needsStart && provider) {
       // Start the sidecar first, then switch the session onto it. The
       // desktop answers with LocalModelReady + SessionModelSet; the sheet
       // closes after a beat so the user sees the "Starting…" state.
+      setStartError(null);
       setStartingKey(`${providerId}|${model}`);
-      onStartLocal(model, provider.provider.gguf_path ?? '');
+      onStartLocal(model, localOwner?.gguf_path ?? '');
       onSelect(providerId, model);
       setTimeout(() => {
         setStartingKey(null);
@@ -426,6 +490,10 @@ export default function ModelSheet({
                           ]}
                         >
                           {(() => {
+                            // Local GGUFs skip the shared "computer" glyph:
+                            // five identical monitors read as a rendering
+                            // bug. They fall through to the per-model letter
+                            // avatar, like cloud providers without a brand.
                             const iconKey =
                               e.kind === 'harness'
                                 ? `harness:${e.id}`
@@ -434,10 +502,13 @@ export default function ModelSheet({
                                   : e.provider.is_local
                                     ? 'local'
                                     : e.provider.id;
-                            const brand = railBrandIcon(iconKey, {
-                              color: active ? c.white : c.text,
-                              size: 15,
-                            });
+                            const brand =
+                              e.kind === 'provider' && e.provider.is_local
+                                ? null
+                                : railBrandIcon(iconKey, {
+                                    color: active ? c.white : c.text,
+                                    size: 15,
+                                  });
                             if (brand) return brand;
                             return (
                               <Text
@@ -485,16 +556,20 @@ export default function ModelSheet({
                   ) : null}
 
                   {/* Provider pane rows (cloud + local). */}
+                  {activeProviderPane && startError ? (
+                    <Text numberOfLines={3} style={[styles.startError, { color: c.error }]}>
+                      {startError}
+                    </Text>
+                  ) : null}
                   {activeProviderPane
-                    ? providerRows.map((model) => {
-                        const provider = activeProviderPane;
+                    ? providerRows.map(({ model, provider }) => {
                         const isCurrent =
                           provider.id === currentProvider && model === currentModel;
                         const isStarting = startingKey === `${provider.id}|${model}`;
                         const stopped = provider.is_local && provider.is_running === false;
                         return (
                           <TouchableOpacity
-                            key={model}
+                            key={`${provider.id}|${model}`}
                             style={[styles.modelRow, isCurrent && { backgroundColor: c.surface2 }]}
                             activeOpacity={0.7}
                             accessibilityRole="button"
@@ -953,4 +1028,5 @@ const styles = StyleSheet.create({
     marginLeft: -30,
   },
   effortLabelText: { fontSize: 9.5 },
+  startError: { fontSize: 11.5, lineHeight: 16, padding: 10, borderRadius: 8, backgroundColor: 'rgba(214,69,69,0.08)', marginBottom: 6 },
 });

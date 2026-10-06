@@ -1,9 +1,13 @@
 # Project Audit Report
 
-> **Status (2026-09-05):** this is a point-in-time audit of the v0.4.1 tree (commit `0b6e4e32`, 2026-08-31); line numbers and counts refer to that snapshot. The headline S-1 auth fail-open is **fixed** — pairing now fails closed on an empty token (`src-tauri/src/mobile/relay_crypto.rs:60`); see `FIXES.md` for the itemized fix log and verification results. Current suite health: 865 cargo-lib tests passing, 100 vitest files / 733 tests passing, `tsc --noEmit` clean.
+> **Status (2026-09-05):** this is a point-in-time audit of the v0.4.1 tree (commit `0b6e4e32`, 2026-08-31); line numbers and counts refer to that snapshot. The headline S-1 auth fail-open is **fixed** — pairing now fails closed on an empty token (`src-tauri/src/mobile/relay_crypto.rs`); see `FIXES.md` for the itemized fix log and verification results.
+>
+> **Suite health at the 2026-09-05 audit:** 865 cargo-lib tests passing, 100 vitest files / 733 tests passing, `tsc --noEmit` clean. *(Those were the figures then; as of **2026-10-05** the suites are 1659 cargo-lib tests passing / 0 failed / 23 ignored and 215 vitest files / 1702 tests, with `tsc --noEmit` clean for both `src/` and `mobile/`. See `docs/audits/BUG_AUDIT.md` for the current header.)*
+>
+> Several file paths in the body have since moved and will not resolve: `agent_sessions.rs` is now the directory `agent_sessions/`, `src/state/chat.ts` is now `src/state/chat/` (12 slices), `browser.rs` has been split into `browser.rs` + `browser/{actions,interactions,navigation,tabs}.rs`, and `chat/commands.rs` is now a thin module root over `chat/commands/`. Treat the findings, not the line numbers, as the durable content.
 
-**Project:** Relay (`relay` v0.4.1) — Tauri 2 desktop shell for AI coding agents
-**Scope:** full repo — `src-tauri/src` (126 Rust files, ~73k lines), `src` (221 TS/TSX files, ~55k lines), config, CI, tests
+**Project:** Relay (`relay` — audited at v0.4.1; the tree is now **v0.6.0**) — Tauri 2 desktop shell for AI coding agents
+**Scope:** full repo — at audit time `src-tauri/src` (126 Rust files, ~73k lines) and `src` (221 TS/TSX files, ~55k lines); the tree has since grown to roughly 241 Rust files / ~186k lines and 574 TS/TSX files / ~131k lines, config, CI, tests
 **Method:** manual line-level review of every critical module (fs/permission/secrets/browser/codeexec by hand; agent_sessions, chat pipeline, db/automations/mobile/oauth, frontend state/ipc reviewed across four parallel deep passes), with the top-severity findings re-verified against source in a second pass. Baseline confirmed before audit: `cargo check` clean, `npx vitest run` = 491/491 tests pass.
 
 ## Summary

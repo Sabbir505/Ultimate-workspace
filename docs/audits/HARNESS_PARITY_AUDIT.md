@@ -4,17 +4,19 @@
 
 > **UPDATE 2026-09-05 (later same day): G1, G2, G3, G4, G5, G6, G7 and G9 are now FIXED** (G8/ACP remains a v1 protocol limitation by design). See `§5 Recommended fixes` — items 1–5 and the PTY documentation shipped; gallery MCP servers ride the claude/kimi/opencode configs as stdio entries, pi/omp/commandcode/opencode get the instructions on their first turn, date + manifest + memory sections render into the bundle instructions, one-shot automations get persona + bundle, and `browser_screenshot` is advertised in both wire formats.
 
+> **UPDATE 2026-10-05 (doc-only re-verification).** The gap list above still stands, but the *framing* around it had drifted well behind the code, so several claims in the body are corrected here. What actually changed: the Relay bridge is no longer 9 tools — `ALLOWED_RELAY_TOOLS` is a **34-entry** allowlist (`mcp_tools_bridge.rs:27`) and now covers the project wiki, the subagent registry family, the automation set and the Session Mesh set. The MCP servers are named `relay-tools` / `relay-browser`, not `conduit-tools` / `conduit-browser` (the binary is `src-tauri/src/bin/relay_browser_mcp.rs`). The chat tool registry holds **88** tool-name constants, not ~40 schemas. Harnesses **do** now receive memory — `agent_sessions/bundle.rs` injects `memory::on_demand_injection(...)` into the bundle instructions when memory is enabled, so the old "they never get memory" line is wrong. `build_system_prompt` has also grown well past 10 assembled sections. The line numbers cited below (`agent_sessions.rs:634`, `chat/prompts.rs:660-732`, `chat/mod.rs:492-497`, `connectors/harness.rs:46-53`, `mcp_tools_bridge.rs:27-37`) are all dead: the code now lives in `agent_sessions/{mod,bundle,oneshot}.rs`, `chat/prompts.rs`, and `mcp_tools_bridge.rs:27+`. The §5 fix list is historical; every item marked fixed did land.
+
 Question: does a harness agent (Claude Code, Kimi, OpenCode, pi, omp, commandcode, ACP) get the same context as Relay's built-in chat — tools, MCP, connectors, system prompt, skills?
 
-**Short answer: no — partly by design, partly by omission.** Harnesses get their own CLI's tools plus a 9-tool Relay bridge and (for three of six adapters) the Relay MCP/connector bundle. They never get the core system prompt, memory, the attach-on-demand manifest, or the user's MCP-gallery servers. One-shot automations get none of it.
+**Short answer: no — partly by design, partly by omission.** Harnesses get their own CLI's tools plus a 34-tool Relay bridge and (for three of six adapters) the Relay MCP/connector bundle. They never get the built-in chat's *core* system prompt (the CLI keeps its own provider personality) or the user's MCP-gallery servers as global attachments. Memory and the attach-on-demand manifest **do** now render into the bundle instructions, and one-shot automations now receive persona + bundle instructions.
 
 ## 1. The two pipelines
 
 | | Built-in chat | Harness agents |
 |---|---|---|
-| Prompt | `build_system_prompt` (`chat/prompts.rs:660`) — 10 assembled sections | CLI's own prompt + `harness_persona` prefix per turn (`agent_sessions.rs:634`) |
-| Tools | ~40 registered schemas (`chat/tools/specs.rs`) + connector/MCP tools per turn | CLI's native tools + `conduit-tools` bridge (9 tools) + `conduit-browser` MCP |
-| Config | none (in-process) | bundle written to `<app-data>/harness/<project>/` per spawn (`harness_bundle.rs`) |
+| Prompt | `build_system_prompt` (`chat/prompts.rs`) — many assembled sections, including the memory injection | CLI's own prompt + `harness_persona` prefix per turn (`agent_sessions/`) |
+| Tools | **88** registered tool-name constants (`chat/tools/mod.rs`) + connector/MCP tools per turn | CLI's native tools + `relay-tools` bridge (**34** tools, `ALLOWED_RELAY_TOOLS`) + `relay-browser` MCP |
+| Config | none (in-process) | bundle written to `<app-data>/harness/<project>/` per spawn (`harness_bundle.rs`, `agent_sessions/bundle.rs`) |
 
 ## 2. What harnesses DO get
 

@@ -1,0 +1,1310 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Relay · Bots — design spec</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+/* ============================================================
+   Relay design-spec page — tokens copied verbatim from
+   src/styles/tokens.css so every surface below is the real
+   palette the app ships. Dark is the default; the toggle in
+   the header flips data-theme exactly like the app does.
+   Signature element: the bot dot — a colored ring + emoji that
+   marks every place a bot appears (rail, chat, modal, mobile).
+   ============================================================ */
+
+:root {
+  --font-ui: "Space Grotesk", -apple-system, "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Space Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+  --radius: 12px;
+  --radius-sm: 8px;
+  --radius-xs: 6px;
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --state-idle: #6a6a6a;
+  --state-working: #4ec9b0;
+  --state-waiting: #dcdcaa;
+  --glass-rim: inset 0 1px 0 0 rgba(255, 255, 255, 0.06);
+  --glass-drop: 0 12px 32px -12px rgba(0, 0, 0, 0.35);
+}
+
+:root[data-theme="dark"] {
+  --bg-tint: #181818;
+  --surface: #1a1a1a;
+  --surface-2: #1f1f1f;
+  --surface-solid: #141414;
+  --surface-glass: #1e1e1e;
+  --surface-glass-2: #252525;
+  --surface-3: #2a2a2a;
+  --border: #2a2a2a;
+  --border-strong: #3a3a3a;
+  --text: #e4e4e4;
+  --chat-text: #c9c9c9;
+  --text-dim: #a0a0a0;
+  --text-faint: #858585;
+  --link: #88c0d0;
+  --accent: #6e706f;
+  --accent-soft: rgba(110, 112, 111, 0.16);
+  --accent-contrast: #ffffff;
+  --danger: #ff7b72;
+  --sidebar-bg: #141414;
+  --input-bg: #1f1f1f;
+  --button-bg: #2a2a2a;
+  --button-hover-bg: #3a3a3a;
+  --button-primary-bg: #88C0D0;
+  --button-primary-fg: #141414;
+  --spec-shadow: 0 24px 64px -20px rgba(0,0,0,0.45), 0 8px 20px -12px rgba(0,0,0,0.35);
+  --spec-page-glow: radial-gradient(1200px 500px at 70% -10%, rgba(136,192,208,0.05), transparent 60%);
+}
+
+:root[data-theme="light"] {
+  --bg-tint: #ffffff;
+  --surface: #ffffff;
+  --surface-2: #f3f3f3;
+  --surface-solid: #fafafa;
+  --surface-glass: #ffffff;
+  --surface-glass-2: #f3f3f3;
+  --surface-3: #e8e8e8;
+  --border: #e0e0e0;
+  --border-strong: #c8c8c8;
+  --text: #1a1a1a;
+  --chat-text: #1a1a1a;
+  --text-dim: #6a6a6a;
+  --text-faint: #8a8a8a;
+  --link: #0b69a3;
+  --accent: #6e706f;
+  --accent-soft: rgba(110, 112, 111, 0.12);
+  --accent-contrast: #ffffff;
+  --danger: #d64545;
+  --sidebar-bg: #fafafa;
+  --input-bg: #ffffff;
+  --button-bg: #f0f0f0;
+  --button-hover-bg: #e0e0e0;
+  --button-primary-bg: #0078a8;
+  --button-primary-fg: #ffffff;
+  --glass-rim: inset 0 1px 0 0 rgba(0, 0, 0, 0.06);
+  --spec-shadow: 0 20px 48px -22px rgba(15, 22, 30, 0.18), 0 8px 18px -12px rgba(15, 22, 30, 0.1);
+  --spec-page-glow: radial-gradient(1200px 500px at 70% -10%, rgba(0,120,168,0.05), transparent 60%);
+}
+
+* { box-sizing: border-box; }
+
+html, body { margin: 0; padding: 0; }
+
+body {
+  font-family: var(--font-ui);
+  font-size: 13px;
+  letter-spacing: 0.005em;
+  color: var(--text);
+  background: var(--surface-solid);
+  background-image: var(--spec-page-glow);
+  -webkit-font-smoothing: antialiased;
+  transition: background-color 0.18s var(--ease), color 0.18s var(--ease);
+}
+
+.mono { font-family: var(--font-mono); }
+
+/* ---------- page scaffold ---------- */
+
+.page { max-width: 1240px; margin: 0 auto; padding: 40px 32px 96px; }
+
+.spec-header {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 24px; padding-bottom: 28px; border-bottom: 1px solid var(--border);
+}
+
+.eyebrow {
+  font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.14em;
+  text-transform: uppercase; color: var(--text-dim); margin: 0 0 14px;
+}
+.eyebrow b { color: var(--link); font-weight: 400; }
+
+h1 { font-size: 40px; line-height: 1.05; font-weight: 700; margin: 0 0 10px; letter-spacing: -0.01em; }
+.lede { font-size: 15px; color: var(--text-dim); max-width: 600px; margin: 0; line-height: 1.55; }
+
+/* the constellation — signature moment of the spec page */
+.constellation { display: flex; gap: 28px; align-items: flex-start; padding-top: 6px; }
+.constellation .star { display: flex; flex-direction: column; align-items: center; gap: 8px; width: 76px; }
+.constellation .star .lbl { font-family: var(--font-mono); font-size: 10px; color: var(--text-dim); text-align: center; line-height: 1.4; }
+
+/* ---------- bot dot (the identity) ---------- */
+
+.bot-dot-wrap { position: relative; width: 44px; height: 44px; }
+.bot-dot-core {
+  position: absolute; inset: 0; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 19px; background: var(--surface-glass-2);
+  border: 2px solid var(--dot, var(--state-idle));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--dot, var(--state-idle)) 18%, transparent);
+}
+.bot-dot-status {
+  position: absolute; right: -2px; bottom: -2px; width: 12px; height: 12px;
+  border-radius: 50%; background: var(--status, var(--state-idle));
+  border: 2px solid var(--surface-solid);
+}
+.bot-dot-wrap.is-working .bot-dot-core { animation: pulse 2.2s var(--ease) infinite; }
+@keyframes pulse {
+  0%, 100% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--dot, var(--state-idle)) 18%, transparent); }
+  50%      { box-shadow: 0 0 0 7px color-mix(in srgb, var(--dot, var(--state-idle)) 7%,  transparent); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .bot-dot-wrap.is-working .bot-dot-core { animation: none; }
+}
+
+/* ---------- theme toggle ---------- */
+
+.theme-toggle {
+  display: flex; border: 1px solid var(--border); border-radius: var(--radius-xs);
+  overflow: hidden; flex-shrink: 0; background: var(--surface-glass); box-shadow: var(--glass-rim);
+}
+.theme-toggle button {
+  font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--text-dim); background: transparent; border: 0; padding: 7px 14px; cursor: pointer;
+  transition: background 0.18s var(--ease), color 0.18s var(--ease);
+}
+.theme-toggle button.on { color: var(--text); background: var(--surface-3); }
+.theme-toggle button:focus-visible { outline: 2px solid var(--link); outline-offset: -2px; }
+
+/* ---------- surfaces ---------- */
+
+.surface { margin-top: 64px; }
+.surface-head { display: flex; align-items: baseline; gap: 14px; margin-bottom: 18px; }
+.surface-head .no { font-family: var(--font-mono); font-size: 11px; color: var(--link); letter-spacing: 0.12em; }
+.surface-head h2 { font-size: 19px; font-weight: 600; margin: 0; }
+.surface-head .task {
+  margin-left: auto; font-family: var(--font-mono); font-size: 10.5px;
+  color: var(--text-faint); border: 1px solid var(--border); border-radius: 99px; padding: 3px 10px;
+  white-space: nowrap;
+}
+.surface-body { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 36px; align-items: start; }
+@media (max-width: 980px) { .surface-body { grid-template-columns: 1fr; } }
+
+.stage {
+  background: var(--bg-tint); border: 1px solid var(--border); border-radius: var(--radius);
+  box-shadow: var(--spec-shadow); overflow: hidden;
+}
+.two-stage { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+@media (max-width: 900px) { .two-stage { grid-template-columns: 1fr; } }
+.stage-cap {
+  font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--text-faint); padding: 9px 14px; border-bottom: 1px solid var(--border); background: var(--surface-glass);
+}
+
+.notes { font-size: 12.5px; color: var(--text-dim); line-height: 1.65; }
+.notes h3 {
+  font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase;
+  color: var(--text-faint); font-weight: 400; margin: 0 0 8px;
+}
+.notes ul { margin: 0; padding-left: 16px; display: grid; gap: 8px; }
+.notes li::marker { color: var(--link); }
+.notes b { color: var(--text); font-weight: 600; }
+
+/* ---------- shared app chrome ---------- */
+
+.win-titlebar {
+  display: flex; align-items: center; gap: 8px; padding: 9px 14px;
+  background: var(--sidebar-bg); border-bottom: 1px solid var(--border);
+}
+.win-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--surface-3); }
+.win-title { font-size: 12px; color: var(--text-faint); margin-left: 8px; }
+
+/* view nav — the header strip where Bots joins Automations/Wiki/Vault */
+.viewnav {
+  display: flex; align-items: center; gap: 6px; padding: 8px 12px;
+  background: var(--sidebar-bg); border-bottom: 1px solid var(--border);
+}
+.viewnav .vn {
+  font-size: 12px; font-weight: 500; color: var(--text-dim);
+  border: 1px solid transparent; border-radius: 99px; padding: 5px 13px; cursor: pointer;
+}
+.viewnav .vn:hover { color: var(--text); background: var(--surface-glass-2); }
+.viewnav .vn.on { color: var(--text); background: var(--surface-3); border-color: var(--border); }
+.viewnav .vn .vdot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--state-working); margin-right: 6px; vertical-align: 1px; }
+.viewnav .spacer { flex: 1; }
+
+/* ---------- messages + composer (shared by every chat surface) ---------- */
+
+.chat { padding: 20px 22px 12px; display: grid; gap: 16px; align-content: start; background: var(--surface); }
+.msg { display: flex; gap: 12px; max-width: 82%; }
+.msg.user { margin-left: auto; flex-direction: row-reverse; max-width: 66%; }
+.msg .who {
+  font-family: var(--font-mono); font-size: 10px; color: var(--text-faint);
+  letter-spacing: 0.08em; margin-bottom: 4px; text-transform: uppercase;
+}
+.msg .bubble {
+  background: var(--surface-glass-2); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: 10px 13px; color: var(--chat-text);
+  line-height: 1.55; box-shadow: var(--glass-rim);
+}
+.msg.user .bubble { background: var(--surface-3); }
+.msg .bubble .time { font-family: var(--font-mono); font-size: 10px; color: var(--text-faint); margin-left: 8px; }
+.msg .mini-dot {
+  width: 26px; height: 26px; flex-shrink: 0; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center; font-size: 13px;
+  background: var(--surface-glass-2); border: 2px solid var(--dot, var(--state-idle));
+}
+.msg .mini-dot.user-dot { border-color: var(--border-strong); }
+
+.job-note {
+  display: flex; align-items: center; gap: 10px; max-width: 82%;
+  border: 1px dashed var(--border-strong); border-radius: var(--radius-sm);
+  padding: 9px 13px; color: var(--text-dim); font-size: 12px; background: var(--surface-glass);
+}
+.job-note .job-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--state-working); flex-shrink: 0; }
+.job-note .mono { font-size: 11px; }
+
+.composer { padding: 0 22px 20px; background: var(--surface); }
+.composer-card {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--surface-glass); box-shadow: var(--glass-rim), var(--glass-drop);
+  padding: 10px 12px;
+}
+.composer-text { color: var(--text-faint); font-size: 13px; padding: 2px 2px 12px; }
+.composer-row { display: flex; align-items: center; gap: 8px; }
+.chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; font-weight: 500; color: var(--text);
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: var(--radius-xs); padding: 5px 11px;
+  box-shadow: var(--glass-rim); white-space: nowrap;
+}
+.chip .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dot, var(--state-idle)); }
+.chip.caret::after { content: "▾"; color: var(--text-faint); font-size: 10px; margin-left: 2px; }
+.chip.spacer { flex: 1; border: 0; background: transparent; box-shadow: none; }
+.send {
+  background: var(--button-primary-bg); color: var(--button-primary-fg);
+  border: 0; border-radius: var(--radius-xs); font-weight: 600; font-size: 12px; padding: 6px 14px;
+  font-family: var(--font-ui); cursor: pointer;
+}
+
+/* tool-call card (main chat manages bots) */
+.toolcall {
+  max-width: 82%; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface-glass); overflow: hidden; box-shadow: var(--glass-rim);
+}
+.toolcall .tc-head {
+  display: flex; align-items: center; gap: 8px; padding: 7px 12px;
+  border-bottom: 1px solid var(--border); background: var(--surface-2);
+}
+.toolcall .tc-head .nm { font-family: var(--font-mono); font-size: 11.5px; color: var(--link); }
+.toolcall .tc-head .badge {
+  margin-left: auto; font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--text-dim); border: 1px solid var(--border); border-radius: 99px; padding: 2px 8px;
+}
+.toolcall .tc-head .badge.write { color: var(--state-waiting); }
+.toolcall .tc-body { padding: 8px 12px 9px; font-size: 11.5px; color: var(--text-dim); line-height: 1.6; }
+.toolcall .tc-body .args { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-faint); }
+.toolcall .tc-body .res { margin-top: 4px; }
+.toolcall .tc-body .res b { color: var(--text); font-weight: 600; }
+
+/* ---------- surface 01: the Bots view ---------- */
+
+.botsview { display: grid; grid-template-columns: 228px minmax(0, 1fr); min-height: 460px; }
+@media (max-width: 700px) { .botsview { grid-template-columns: 1fr; } }
+
+.rail { background: var(--sidebar-bg); border-right: 1px solid var(--border); padding: 10px; display: flex; flex-direction: column; gap: 4px; }
+.rail-hdr {
+  font-family: var(--font-mono); font-size: 9.5px; letter-spacing: 0.12em; text-transform: uppercase;
+  color: var(--text-faint); padding: 4px 8px 8px;
+}
+.rail-row {
+  display: flex; align-items: center; gap: 10px; text-align: left;
+  padding: 9px 10px; border-radius: var(--radius-sm); border: 1px solid transparent;
+  background: transparent; cursor: pointer; width: 100%;
+}
+.rail-row:hover { background: var(--sidebar-hover-bg, var(--surface-glass)); }
+.rail-row.on { background: color-mix(in srgb, var(--link) 12%, transparent); border-color: color-mix(in srgb, var(--link) 25%, transparent); }
+.rail-row .rdot { width: 9px; height: 9px; border-radius: 50%; background: var(--dot, var(--state-idle)); flex-shrink: 0; }
+.rail-row.is-working .rdot { animation: railpulse 2.2s var(--ease) infinite; }
+@keyframes railpulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--dot, var(--state-idle)) 35%, transparent); }
+  50%      { box-shadow: 0 0 0 5px color-mix(in srgb, var(--dot, var(--state-idle)) 0%, transparent); }
+}
+.rail-row .rmain { min-width: 0; display: grid; gap: 1px; }
+.rail-row .rname { font-weight: 600; font-size: 12.5px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rail-row .rdesc { font-size: 11px; color: var(--text-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rail-row.is-disabled { opacity: 0.55; }
+.rail-add {
+  margin-top: 6px; text-align: left; padding: 8px 10px; border-radius: var(--radius-sm);
+  border: 1px dashed var(--border-strong); background: transparent; color: var(--text-dim);
+  font-size: 12px; font-family: var(--font-ui); cursor: pointer;
+}
+.rail-add:hover { color: var(--text); background: var(--surface-glass); }
+
+.bots-center { display: flex; flex-direction: column; min-width: 0; background: var(--surface); }
+.center-titlebar {
+  display: flex; align-items: center; gap: 10px; padding: 10px 16px;
+  border-bottom: 1px solid var(--border); background: var(--surface);
+}
+.center-titlebar .ct-name { font-weight: 600; font-size: 13px; }
+.center-titlebar .ct-sub { font-family: var(--font-mono); font-size: 10px; color: var(--text-faint); }
+.center-titlebar .ct-tag {
+  margin-left: auto; font-family: var(--font-mono); font-size: 9.5px; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--text-dim); border: 1px solid var(--border); border-radius: 99px; padding: 3px 9px;
+}
+
+/* ---------- surface 02: empty state + modal ---------- */
+
+.promo-wrap { display: grid; place-items: center; min-height: 430px; background: var(--surface); padding: 24px; }
+.promo {
+  max-width: 380px; text-align: center; padding: 30px 28px;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--surface-glass); box-shadow: var(--glass-rim), var(--glass-drop);
+}
+.promo .glyph { font-size: 30px; margin-bottom: 12px; color: var(--link); }
+.promo h2 { font-size: 17px; margin: 0 0 8px; }
+.promo p { font-size: 12.5px; color: var(--text-dim); line-height: 1.6; margin: 0 0 18px; }
+.promo button {
+  background: var(--button-primary-bg); color: var(--button-primary-fg);
+  border: 0; border-radius: var(--radius-xs); font-weight: 600; font-size: 12.5px;
+  padding: 8px 16px; cursor: pointer; font-family: var(--font-ui);
+}
+.promo .ghost-hint { margin-top: 14px; font-family: var(--font-mono); font-size: 10px; color: var(--text-faint); }
+
+.scrim { position: relative; min-height: 620px; background: var(--surface); }
+.scrim::before { content: ""; position: absolute; inset: 0; background: color-mix(in srgb, var(--surface-solid) 55%, transparent); }
+.modal {
+  position: absolute; z-index: 3; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  width: min(430px, calc(100% - 40px));
+  background: var(--surface-glass); border: 1px solid var(--border-strong);
+  border-radius: var(--radius); box-shadow: var(--spec-shadow); overflow: hidden;
+}
+.modal .m-head {
+  display: flex; align-items: center; padding: 13px 16px; border-bottom: 1px solid var(--border);
+  font-weight: 600; font-size: 13.5px; background: var(--surface-2);
+}
+.modal .m-head .x { margin-left: auto; color: var(--text-faint); font-size: 14px; }
+.modal .m-body { padding: 14px 16px; display: grid; gap: 13px; }
+.modal .m-foot { display: flex; gap: 8px; justify-content: flex-end; padding: 12px 16px; border-top: 1px solid var(--border); background: var(--surface-glass); }
+.btn {
+  font-size: 12px; font-weight: 500; padding: 7px 14px; border-radius: var(--radius-xs);
+  border: 1px solid var(--border); background: var(--button-bg); color: var(--text); cursor: pointer;
+  font-family: var(--font-ui);
+}
+.btn.primary { background: var(--button-primary-bg); color: var(--button-primary-fg); border-color: transparent; }
+.btn.danger { color: var(--danger); background: transparent; }
+
+.field { display: grid; gap: 5px; }
+.field label { font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-faint); }
+.field .hint { font-size: 11px; color: var(--text-faint); line-height: 1.5; }
+.field input[type="text"], .field textarea {
+  font-family: var(--font-ui); font-size: 13px; color: var(--text);
+  background: var(--input-bg); border: 1px solid var(--border);
+  border-radius: var(--radius-xs); padding: 8px 10px; outline: none; width: 100%;
+}
+.field textarea { resize: none; line-height: 1.55; }
+.field input:focus, .field textarea:focus { border-color: var(--link); box-shadow: 0 0 0 3px var(--accent-soft); }
+
+.field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.field-row3 { display: grid; grid-template-columns: 2fr 1fr; gap: 12px; }
+
+.swatches { display: flex; gap: 8px; }
+.swatch { width: 20px; height: 20px; border-radius: 50%; border: 1px solid var(--border); }
+.swatch.sel { box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--dot); }
+
+.toggle-row { display: flex; align-items: flex-start; gap: 10px; }
+.toggle-row .txt b { display: block; font-weight: 600; font-size: 12.5px; }
+.toggle-row .txt span { font-size: 11px; color: var(--text-faint); }
+.switch { margin-left: auto; flex-shrink: 0; width: 32px; height: 18px; border-radius: 99px; background: var(--surface-3); border: 1px solid var(--border); position: relative; }
+.switch .knob { position: absolute; top: 1px; left: 1px; width: 14px; height: 14px; border-radius: 50%; background: var(--text-faint); }
+.switch.on { background: color-mix(in srgb, var(--link) 30%, transparent); border-color: var(--link); }
+.switch.on .knob { left: 15px; background: var(--link); }
+
+/* ---------- surface 04: mobile ---------- */
+
+.phone {
+  width: 300px; border: 1px solid var(--border-strong); border-radius: 34px;
+  background: var(--surface-solid); padding: 10px; box-shadow: var(--spec-shadow);
+}
+.phone .screen { border-radius: 26px; overflow: hidden; background: var(--surface); border: 1px solid var(--border); }
+.phone .notch { width: 90px; height: 22px; background: var(--surface-solid); border-radius: 0 0 14px 14px; margin: 0 auto; }
+.phone .app-hdr { padding: 10px 16px 12px; border-bottom: 1px solid var(--border); display: flex; align-items: baseline; gap: 8px; }
+.phone .app-hdr .t { font-weight: 600; font-size: 15px; }
+.phone .app-hdr .sub { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-faint); }
+.bot-list { display: grid; }
+.bot-row { display: flex; align-items: center; gap: 12px; padding: 13px 16px; border-bottom: 1px solid var(--border); }
+.bot-row .info { min-width: 0; }
+.bot-row .nm { font-weight: 600; font-size: 13.5px; }
+.bot-row .sub { font-size: 11.5px; color: var(--text-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bot-row .last { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); margin-top: 3px; }
+.bot-row .chev { margin-left: auto; color: var(--text-faint); }
+.notif {
+  margin: 12px 14px 8px; padding: 10px 12px; border-radius: var(--radius-sm);
+  background: var(--surface-glass-2); border: 1px solid var(--border);
+  display: flex; gap: 10px; align-items: flex-start;
+}
+.notif .t { font-size: 12px; font-weight: 600; }
+.notif .b { font-size: 11.5px; color: var(--text-dim); line-height: 1.5; }
+.notif .now { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-faint); margin-left: auto; flex-shrink: 0; }
+.tabbar { display: flex; border-top: 1px solid var(--border); background: var(--sidebar-bg); padding: 7px 6px 9px; }
+.tabbar .tab { flex: 1; text-align: center; font-size: 9.5px; font-family: var(--font-mono); letter-spacing: 0.06em; color: var(--text-faint); text-transform: uppercase; }
+.tabbar .tab.on { color: var(--link); }
+
+/* ---------- surface 05: 3D avatars ---------- */
+
+.avatar-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+@media (max-width: 980px) { .avatar-grid { grid-template-columns: 1fr; } }
+
+.avatar-card {
+  background: var(--bg-tint); border: 1px solid var(--border); border-radius: var(--radius);
+  box-shadow: var(--spec-shadow); overflow: hidden;
+}
+.avatar-head {
+  display: flex; align-items: center; gap: 8px; padding: 10px 14px;
+  border-bottom: 1px solid var(--border); background: var(--surface-glass);
+}
+.avatar-name { font-weight: 600; font-size: 13px; white-space: nowrap; }
+.avatar-head .sprite-spec { margin-left: auto; white-space: nowrap; }
+
+.av-stage {
+  position: relative; aspect-ratio: 5 / 4; border-bottom: 1px solid var(--border);
+  background: radial-gradient(130% 100% at 50% 12%, #21262c 0%, #12151a 62%, #0d1013 100%);
+}
+.av-stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.av-statechip {
+  position: absolute; top: 10px; left: 10px; font-family: var(--font-mono); font-size: 9.5px;
+  letter-spacing: 0.12em; text-transform: uppercase; color: #d4d7da;
+  background: rgba(13, 16, 19, 0.72); border: 1px solid #3a3f45; border-radius: 99px; padding: 3px 10px;
+}
+.av-statechip[data-state="working"] { color: #4ec9b0; border-color: #2b6f60; }
+.av-statechip[data-state="waiting"] { color: #dcdcaa; border-color: #8f8449; }
+.av-statechip[data-state="done"]    { color: #59c99a; border-color: #2f7d5f; }
+.av-fallback {
+  position: absolute; inset: 0; display: grid; place-items: center; padding: 22px;
+  text-align: center; color: #a0a0a0; font-size: 12px; line-height: 1.65;
+}
+
+.av-btns { display: flex; gap: 6px; padding: 10px 12px 4px; flex-wrap: wrap; align-items: center; }
+.av-btns button {
+  font-family: var(--font-ui); font-size: 11px; padding: 4px 11px; border-radius: 99px;
+  border: 1px solid var(--border); background: var(--surface-2); color: var(--text-dim); cursor: pointer;
+  transition: background 0.15s var(--ease), color 0.15s var(--ease);
+}
+.av-btns button.on { color: var(--text); background: var(--surface-3); border-color: var(--border-strong); }
+.av-btns .av-auto {
+  margin-left: auto; font-family: var(--font-mono); font-size: 9px; color: var(--text-faint);
+  letter-spacing: 0.1em; text-transform: uppercase;
+}
+.av-cap { padding: 2px 14px 12px; font-size: 11.5px; color: var(--text-faint); line-height: 1.55; }
+
+/* ---------- footer ---------- */
+
+.footer {
+  margin-top: 72px; padding-top: 22px; border-top: 1px solid var(--border);
+  display: flex; gap: 28px; flex-wrap: wrap; font-family: var(--font-mono);
+  font-size: 11px; color: var(--text-faint); line-height: 1.8;
+}
+.footer a { color: var(--link); text-decoration: none; }
+.footer a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <!-- ================= header ================= -->
+  <header class="spec-header">
+    <div>
+      <p class="eyebrow">Relay · Design Spec · <b>BOTS</b> · 2026-10-05 · Rev 4 — dedicated view + 3D avatars</p>
+      <h1>Bots — a view of their own.</h1>
+      <p class="lede">Bots join the app's destinations alongside Automations, Wiki, and Vault. The left rail is the roster — dot, emoji, name, one-line description. The center is the bot's real conversation (the actual ChatView, not a lookalike), so bot threads also open from Chat History. Creating happens in a modal, right where the empty state invites you. And the main chat can drive it all with tools.</p>
+    </div>
+    <div style="display:flex; flex-direction:column; align-items:flex-end; gap:22px;">
+      <div class="theme-toggle" role="group" aria-label="Theme">
+        <button type="button" class="on" id="btnDark" onclick="setTheme('dark')">Dark</button>
+        <button type="button" id="btnLight" onclick="setTheme('light')">Light</button>
+      </div>
+      <div class="constellation" aria-hidden="true">
+        <div class="star">
+          <div class="bot-dot-wrap is-working" style="--dot:#4ec9b0; --status:var(--state-working);">
+            <div class="bot-dot-core">🛰️</div><div class="bot-dot-status"></div>
+          </div>
+          <div class="lbl">Atlas<br>running 09:00 sweep</div>
+        </div>
+        <div class="star">
+          <div class="bot-dot-wrap" style="--dot:#88C0D0; --status:var(--state-idle);">
+            <div class="bot-dot-core">🔎</div><div class="bot-dot-status"></div>
+          </div>
+          <div class="lbl">Scout<br>idle · local Qwen</div>
+        </div>
+        <div class="star">
+          <div class="bot-dot-wrap" style="--dot:#dcdcaa; --status:var(--state-waiting);">
+            <div class="bot-dot-core">🧾</div><div class="bot-dot-status"></div>
+          </div>
+          <div class="lbl">Ledger<br>pending approval</div>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <!-- ================= surface 01 ================= -->
+  <section class="surface">
+    <div class="surface-head">
+      <span class="no">SURFACE 01</span>
+      <h2>The Bots view — roster rail, real conversation</h2>
+      <span class="task">Plan: Task 7</span>
+    </div>
+    <div class="surface-body">
+      <div class="stage">
+        <div class="viewnav" aria-label="App view navigation">
+          <span class="vn">Chats</span>
+          <span class="vn on"><span class="vdot"></span>Bots</span>
+          <span class="vn">Automations</span>
+          <span class="vn">Wiki</span>
+          <span class="vn">Vault</span>
+          <span class="spacer"></span>
+          <span class="vn mono" style="font-size:11px;">⌘B</span>
+        </div>
+        <div class="botsview">
+          <aside class="rail">
+            <div class="rail-hdr">Bots · 3 on this machine</div>
+            <button class="rail-row on is-working" type="button" style="--dot:#4ec9b0;">
+              <span class="rdot"></span>
+              <span class="rmain">
+                <span class="rname">🛰️ Atlas</span>
+                <span class="rdesc">Morning briefings</span>
+              </span>
+            </button>
+            <button class="rail-row" type="button" style="--dot:#88C0D0;">
+              <span class="rdot"></span>
+              <span class="rmain">
+                <span class="rname">🔎 Scout</span>
+                <span class="rdesc">Repo watcher · local Qwen</span>
+              </span>
+            </button>
+            <button class="rail-row is-disabled" type="button" style="--dot:#dcdcaa;">
+              <span class="rdot"></span>
+              <span class="rmain">
+                <span class="rname">🧾 Ledger</span>
+                <span class="rdesc">Subscriptions &amp; spend</span>
+              </span>
+            </button>
+            <button class="rail-add" type="button">＋ New bot</button>
+          </aside>
+          <section class="bots-center">
+            <div class="center-titlebar">
+              <span class="ct-name">🛰️ Atlas</span>
+              <span class="ct-sub">morning briefings · anthropic</span>
+              <span class="ct-tag">Bot thread</span>
+            </div>
+            <div class="chat">
+              <div class="job-note">
+                <span class="job-dot"></span>
+                <span class="mono">JOB · inbox-sweep</span>
+                <span>finished · 12 mails triaged, 1 needs you — digest below</span>
+              </div>
+              <div class="msg">
+                <div class="mini-dot" style="--dot:#4ec9b0;">🛰️</div>
+                <div>
+                  <div class="who">Atlas · bot</div>
+                  <div class="bubble">Sweep done. The one that needs you is the vendor renewal — due Friday, and the quote went up 8%. Calendar is clear until 11:00; both tracked repos were quiet overnight. <span class="time">09:00</span></div>
+                </div>
+              </div>
+              <div class="msg user">
+                <div class="mini-dot user-dot">🙂</div>
+                <div>
+                  <div class="who">You</div>
+                  <div class="bubble">Draft a short reply — push back on the bump, keep it friendly. <span class="time">09:02</span></div>
+                </div>
+              </div>
+            </div>
+            <div class="composer">
+              <div class="composer-card">
+                <div class="composer-text">Message Atlas…</div>
+                <div class="composer-row">
+                  <div class="chip" style="--dot:#4ec9b0;"><span class="dot"></span>🛰️ Atlas</div>
+                  <div class="chip caret">Claude Sonnet 4.5</div>
+                  <div class="chip spacer"></div>
+                  <div class="chip">＋</div>
+                  <button class="send" type="button">Send</button>
+                </div>
+              </div>
+            </div>
+          </section>
+        </div>
+      </div>
+      <aside class="notes">
+        <h3>Behavior</h3>
+        <ul>
+          <li><b>Bots joins the destinations</b> — same header strip as Automations/Wiki/Vault, same full-center swap, back/forward aware. Keybinding ⌘B mirrors the others.</li>
+          <li><b>The rail is the roster</b>: dot, emoji, name, one-line description — second row exactly as specced. Row states: active (accent tint), working (pulsing dot), disabled (dimmed — Ledger is pending approval).</li>
+          <li><b>The center is the real ChatView</b> bound to the bot's session — streaming, tools, approvals, artifacts all work. The same thread opens from Chat History; there is one conversation per bot, ever.</li>
+          <li><b>Job notes</b> land inside the thread: a scheduled run appends to the bot's chat, so its history is one continuous story.</li>
+          <li>The identity chip in the composer is a <b>tag, not a picker</b> — you're inside Atlas's thread, and the chip says so.</li>
+        </ul>
+      </aside>
+    </div>
+  </section>
+
+  <!-- ================= surface 02 ================= -->
+  <section class="surface">
+    <div class="surface-head">
+      <span class="no">SURFACE 02</span>
+      <h2>Empty state → create modal (no settings page)</h2>
+      <span class="task">Plan: Tasks 7 + 8</span>
+    </div>
+    <div class="surface-body">
+      <div class="two-stage">
+        <div class="stage">
+          <div class="stage-cap">Empty roster — the promo is the view</div>
+          <div class="viewnav" aria-hidden="true">
+            <span class="vn">Chats</span>
+            <span class="vn on">Bots</span>
+            <span class="vn">Automations</span>
+            <span class="vn">Wiki</span>
+            <span class="vn">Vault</span>
+          </div>
+          <div class="promo-wrap">
+            <div class="promo">
+              <div class="glyph">◎</div>
+              <h2>No bots yet</h2>
+              <p>Bots are named agents with their own persona, memory, and standing jobs. They run on this machine — even while Relay is closed.</p>
+              <button type="button">Create your first bot</button>
+              <div class="ghost-hint">or ask the assistant: "make me a briefing bot"</div>
+            </div>
+          </div>
+        </div>
+        <div class="stage">
+          <div class="stage-cap">The create modal — opened from the promo or "New bot"</div>
+          <div class="scrim">
+            <div class="modal" role="dialog" aria-label="New bot">
+              <div class="m-head">New bot <span class="x">✕</span></div>
+              <div class="m-body">
+                <div class="field-row3">
+                  <div class="field">
+                    <label>Name</label>
+                    <input type="text" value="Atlas" readonly>
+                  </div>
+                  <div class="field">
+                    <label>Emoji</label>
+                    <input type="text" value="🛰️" readonly>
+                  </div>
+                </div>
+                <div class="field">
+                  <label>Description</label>
+                  <input type="text" value="Morning briefings" readonly>
+                  <div class="hint">One line under the name in the rail.</div>
+                </div>
+                <div class="field">
+                  <label>Dot color</label>
+                  <div class="swatches">
+                    <span class="swatch sel" style="--dot:#4ec9b0; background:#4ec9b0;"></span>
+                    <span class="swatch" style="--dot:#88C0D0; background:#88C0D0;"></span>
+                    <span class="swatch" style="--dot:#dcdcaa; background:#dcdcaa;"></span>
+                    <span class="swatch" style="--dot:#ce9178; background:#ce9178;"></span>
+                    <span class="swatch" style="--dot:#c586c0; background:#c586c0;"></span>
+                    <span class="swatch" style="--dot:#a0a0a0; background:#a0a0a0;"></span>
+                  </div>
+                </div>
+                <div class="field">
+                  <label>Persona</label>
+                  <textarea rows="2" readonly>You are Atlas, my morning briefing agent. Be terse. Sweep my inbox, calendar, and tracked repos every weekday at 09:00 and post a digest here.</textarea>
+                  <div class="hint">Its thread uses this instead of your assistant prompt.</div>
+                </div>
+                <div class="field-row">
+                  <div class="field">
+                    <label>Model</label>
+                    <input type="text" value="Inherit from chat ⌄" readonly>
+                  </div>
+                  <div class="field" style="gap:9px; align-content:start;">
+                    <label>Toggles</label>
+                    <div class="toggle-row">
+                      <div class="txt"><b>Tools</b></div>
+                      <div class="switch on"><div class="knob"></div></div>
+                    </div>
+                    <div class="toggle-row">
+                      <div class="txt"><b>Memory</b></div>
+                      <div class="switch on"><div class="knob"></div></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div class="m-foot">
+                <button class="btn" type="button">Cancel</button>
+                <button class="btn primary" type="button">Create bot</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <aside class="notes">
+        <h3>Behavior</h3>
+        <ul>
+          <li><b>The promo is the empty view</b> — no bots, no rail chrome, one clear next action.</li>
+          <li><b>The modal is the only editor.</b> Same form for create and edit (rail rows get a pencil affordance). Settings stays out of it entirely.</li>
+          <li>Description is the <b>rail's second row</b> — one line, written for scanning.</li>
+          <li><b>Dot color</b> is the identity; six swatches drawn from the app's token accents. Emoji ships v1 — 3D avatars are specced in Surface 05.</li>
+          <li>Empty persona falls back to your assistant prompt — the bot is then a shell with its own memory and jobs but no voice of its own.</li>
+          <li>The promo's ghost hint doubles as the tools entry: <b>"ask the assistant"</b> — Surface 03.</li>
+        </ul>
+      </aside>
+    </div>
+  </section>
+
+  <!-- ================= surface 03 ================= -->
+  <section class="surface">
+    <div class="surface-head">
+      <span class="no">SURFACE 03</span>
+      <h2>Main chat — manage bots with tools</h2>
+      <span class="task">Plan: Task 10</span>
+    </div>
+    <div class="surface-body">
+      <div class="stage">
+        <div class="win-titlebar">
+          <span class="win-dot"></span><span class="win-dot"></span><span class="win-dot"></span>
+          <span class="win-title">Relay — New chat</span>
+        </div>
+        <div class="chat">
+          <div class="msg user">
+            <div class="mini-dot user-dot">🙂</div>
+            <div>
+              <div class="who">You</div>
+              <div class="bubble">Run Atlas's sweep now, and set up a new bot called Ledger that keeps an eye on subscriptions. <span class="time">14:20</span></div>
+            </div>
+          </div>
+          <div class="toolcall">
+            <div class="tc-head"><span class="nm">run_bot</span><span class="badge write">write</span></div>
+            <div class="tc-body">
+              <div class="args">{ "bot_id": "atlas", "prompt": null }</div>
+              <div class="res"><b>Running</b> in Atlas's thread — you'll see the reply there.</div>
+            </div>
+          </div>
+          <div class="toolcall">
+            <div class="tc-head"><span class="nm">create_bot</span><span class="badge write">write</span></div>
+            <div class="tc-body">
+              <div class="args">{ "name": "Ledger", "description": "Subscriptions & spend", "emoji": "🧾", "persona": "Track recurring charges…" }</div>
+              <div class="res"><b>Created (disabled)</b> — pending your approval in the Bots view.</div>
+            </div>
+          </div>
+          <div class="msg">
+            <div class="mini-dot user-dot" style="border-color: var(--border-strong);">✦</div>
+            <div>
+              <div class="who">Assistant</div>
+              <div class="bubble">Atlas is sweeping now — check its thread in the Bots view. Ledger is set up but disabled until you approve it; I gave it a tracking persona and left memory on so it learns your recurring charges. <span class="time">14:21</span></div>
+            </div>
+          </div>
+        </div>
+        <div class="composer">
+          <div class="composer-card">
+            <div class="composer-text">Ask anything…</div>
+            <div class="composer-row">
+              <div class="chip caret">Claude Sonnet 4.5</div>
+              <div class="chip spacer"></div>
+              <div class="chip">＋</div>
+              <button class="send" type="button">Send</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <aside class="notes">
+        <h3>Behavior</h3>
+        <ul>
+          <li>Five tools, mirroring the automations family: <span class="mono">list_bots</span> (read), <span class="mono">create_bot / update_bot / delete_bot / run_bot</span> (write-classified → approval flow).</li>
+          <li><b>Agent-created bots land disabled</b> — same safety rail as agent-created automations. The rail shows them dimmed with a gold "pending" dot.</li>
+          <li><b>run_bot</b> triggers a turn in the bot's own thread (optional prompt overrides the standing job) — the result appears in the Bots view, not inline, so each bot keeps one history.</li>
+          <li>Overlapping runs are guarded — <span class="mono">run_bot</span> on a working bot reports back instead of double-firing.</li>
+          <li>Every mutation emits <span class="mono">bots:changed</span>, so the rail, modal, and mobile list refresh live.</li>
+        </ul>
+      </aside>
+    </div>
+  </section>
+
+  <!-- ================= surface 04 ================= -->
+  <section class="surface">
+    <div class="surface-head">
+      <span class="no">SURFACE 04</span>
+      <h2>Mobile — reach a bot from anywhere</h2>
+      <span class="task">Plan: Task 11</span>
+    </div>
+    <div class="surface-body">
+      <div class="phone">
+        <div class="screen">
+          <div class="notch"></div>
+          <div class="notif">
+            <div class="mini-dot" style="--dot:#4ec9b0; width:30px; height:30px; font-size:14px;">🛰️</div>
+            <div>
+              <div class="t">Atlas finished the 09:00 sweep</div>
+              <div class="b">12 mails triaged, 1 needs you. Full digest in the thread.</div>
+            </div>
+            <span class="now">now</span>
+          </div>
+          <div class="app-hdr"><span class="t">Bots</span><span class="sub">3 on this machine</span></div>
+          <div class="bot-list">
+            <div class="bot-row">
+              <div class="bot-dot-wrap is-working" style="--dot:#4ec9b0; --status:var(--state-working); width:38px; height:38px;">
+                <div class="bot-dot-core" style="font-size:16px;">🛰️</div><div class="bot-dot-status"></div>
+              </div>
+              <div class="info">
+                <div class="nm">Atlas</div>
+                <div class="sub">Morning briefings · running since 08:57</div>
+                <div class="last">last digest 09:02 · 12 triaged</div>
+              </div>
+              <span class="chev">›</span>
+            </div>
+            <div class="bot-row">
+              <div class="bot-dot-wrap" style="--dot:#88C0D0; --status:var(--state-idle); width:38px; height:38px;">
+                <div class="bot-dot-core" style="font-size:16px;">🔎</div><div class="bot-dot-status"></div>
+              </div>
+              <div class="info">
+                <div class="nm">Scout</div>
+                <div class="sub">Repo watcher · qwen3-8b local · idle</div>
+                <div class="last">recall: "relay pairing docs"</div>
+              </div>
+              <span class="chev">›</span>
+            </div>
+            <div class="bot-row" style="opacity:.55;">
+              <div class="bot-dot-wrap" style="--dot:#dcdcaa; --status:var(--state-waiting); width:38px; height:38px;">
+                <div class="bot-dot-core" style="font-size:16px;">🧾</div><div class="bot-dot-status"></div>
+              </div>
+              <div class="info">
+                <div class="nm">Ledger</div>
+                <div class="sub">Subscriptions &amp; spend · pending approval</div>
+                <div class="last">created by assistant · disabled</div>
+              </div>
+              <span class="chev">›</span>
+            </div>
+          </div>
+          <div class="tabbar">
+            <span class="tab">Chats</span>
+            <span class="tab on">Bots</span>
+            <span class="tab">Jobs</span>
+            <span class="tab">Memory</span>
+          </div>
+        </div>
+      </div>
+      <aside class="notes">
+        <h3>Behavior</h3>
+        <ul>
+          <li>Bot list comes over the <b>existing encrypted relay</b> — a new <span class="mono">ListBots</span> message, nothing else on the wire changes.</li>
+          <li><b>Push already works</b>: job completion reuses the automation notification path, so "Atlas finished" arrives even with the socket down.</li>
+          <li>Tapping a bot opens <b>its thread</b> — the same single conversation, from anywhere on your tailnet.</li>
+          <li>v1 is <b>read + chat</b>; creating and editing stays on the desktop where the modal has room. Agent-created bots show as pending here too.</li>
+        </ul>
+      </aside>
+    </div>
+  </section>
+
+  <!-- ================= surface 05 ================= -->
+  <section class="surface" id="avatars">
+    <div class="surface-head">
+      <span class="no">SURFACE 05</span>
+      <h2>3D avatars — live, state-driven mascots</h2>
+      <span class="task">For approval → then Plan: Task 8b</span>
+    </div>
+    <div class="surface-body">
+      <div class="avatar-grid">
+
+        <div class="avatar-card" data-bot="atlas">
+          <div class="avatar-head">
+            <span class="avatar-name">Atlas — the orbiter</span>
+            <span class="sprite-spec mono">studio-lit · 4 states</span>
+          </div>
+          <div class="av-stage">
+            <canvas></canvas>
+            <span class="av-statechip" data-state="idle">idle</span>
+          </div>
+          <div class="av-btns">
+            <button type="button" data-state="idle" class="on">Idle</button>
+            <button type="button" data-state="working">Working</button>
+            <button type="button" data-state="waiting">Waiting</button>
+            <button type="button" data-state="done">Done</button>
+            <span class="av-auto">auto</span>
+          </div>
+          <div class="av-cap">Orbital ring and radar pings while it works; floats a gold "?" when blocked; hops and sparkles when done.</div>
+        </div>
+
+        <div class="avatar-card" data-bot="scout">
+          <div class="avatar-head">
+            <span class="avatar-name">Scout — the watcher</span>
+            <span class="sprite-spec mono">studio-lit · 4 states</span>
+          </div>
+          <div class="av-stage">
+            <canvas></canvas>
+            <span class="av-statechip" data-state="idle">idle</span>
+          </div>
+          <div class="av-btns">
+            <button type="button" data-state="idle" class="on">Idle</button>
+            <button type="button" data-state="working">Working</button>
+            <button type="button" data-state="waiting">Waiting</button>
+            <button type="button" data-state="done">Done</button>
+            <span class="av-auto">auto</span>
+          </div>
+          <div class="av-cap">The lens is the face — it wanders when idle, sweeps a scanline on the job, looks up when blocked, smiles green when done.</div>
+        </div>
+
+        <div class="avatar-card" data-bot="ledger">
+          <div class="avatar-head">
+            <span class="avatar-name">Ledger — the accountant</span>
+            <span class="sprite-spec mono">studio-lit · 4 states</span>
+          </div>
+          <div class="av-stage">
+            <canvas></canvas>
+            <span class="av-statechip" data-state="idle">idle</span>
+          </div>
+          <div class="av-btns">
+            <button type="button" data-state="idle" class="on">Idle</button>
+            <button type="button" data-state="working">Working</button>
+            <button type="button" data-state="waiting">Waiting</button>
+            <button type="button" data-state="done">Done</button>
+            <span class="av-auto">auto</span>
+          </div>
+          <div class="av-cap">Feeds paper through the top slot while computing, digits rolling in the visor; check-mark eyes and sparkles when done.</div>
+        </div>
+
+      </div>
+      <aside class="notes">
+        <h3>Spec</h3>
+        <ul>
+          <li><b>Live 3D, rendered right here</b> — three.js (r160, same CDN delivery as the page fonts) with studio lighting, so this is the real material and motion, not an artist's still.</li>
+          <li><b>Silhouettes are the identity</b>: Atlas the orbiter (ring + dish), Scout the watcher (one big lens), Ledger the accountant (receipt body + bindings). Palettes derive from each bot's dot color.</li>
+          <li><b>Four states per bot, matching Relay's status language</b>: idle (float + blink), working (ring ping / lens scan / paper feed), waiting (gold "?" bob), done (hop + sparkles + green eyes). Auto-cycles every 4 s — click a state to pin it; auto resumes after 12 s.</li>
+          <li><b>Production path on approval (Task 8b)</b>: the same rigs ship in the app — Tauri's webview is WebGL2-capable — driving avatars in the rail, chat, and push; emoji + dot stay as the fallback.</li>
+          <li>Everything here is tunable — silhouette, colors, timing, lighting. Say what to change and I'll re-render.</li>
+        </ul>
+      </aside>
+    </div>
+  </section>
+
+  <!-- ================= footer ================= -->
+  <footer class="footer">
+    <span>Plan · <a href="../plans/2026-10-04-bots-always-on-agents.md">docs/superpowers/plans/2026-10-04-bots-always-on-agents.md</a></span>
+    <span>Tokens · <a href="../../../src/styles/tokens.css">src/styles/tokens.css</a> (verbatim)</span>
+    <span>Status · Rev 4 — dedicated Bots view + 3D avatars · Surfaces map to Tasks 7 / 8 / 10 / 11 · avatars → Task 8b on approval</span>
+  </footer>
+</div>
+
+<script>
+  function setTheme(t) {
+    document.documentElement.setAttribute('data-theme', t);
+    document.getElementById('btnDark').classList.toggle('on', t === 'dark');
+    document.getElementById('btnLight').classList.toggle('on', t === 'light');
+  }
+
+</script>
+
+<script type="importmap">
+  { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+  /* 3D avatar rigs — three bots × four states, rendered live.
+     States map to Relay's status language: idle / working / waiting / done. */
+  const cards = [...document.querySelectorAll(".avatar-card")];
+  let THREE, RoomEnvironment;
+  try {
+    THREE = await import("three");
+    ({ RoomEnvironment } = await import(
+      "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/environments/RoomEnvironment.js"
+    ));
+  } catch (e) {
+    for (const c of cards)
+      c.querySelector(".av-stage").insertAdjacentHTML("beforeend",
+        '<div class="av-fallback">3D preview needs network access (three.js CDN).<br>Design intent: glossy studio-lit mascots — Atlas the orbiter, Scout the watcher, Ledger the accountant — animated per state: idle float, working sweep, waiting "?", done sparkle.</div>');
+  }
+
+  if (THREE) {
+    const stdMat = (color, o = {}) =>
+      new THREE.MeshStandardMaterial({ color, roughness: 0.35, metalness: 0.08, ...o });
+    const glossMat = (color, o = {}) =>
+      new THREE.MeshPhysicalMaterial({ color, roughness: 0.4, clearcoat: 1, clearcoatRoughness: 0.18, ...o });
+
+    const groundTex = (colHex) => {
+      const c = document.createElement("canvas"); c.width = c.height = 256;
+      const x = c.getContext("2d");
+      const col = "#" + colHex.toString(16).padStart(6, "0");
+      let g = x.createRadialGradient(128, 128, 8, 128, 128, 120);
+      g.addColorStop(0, "rgba(0,0,0,0.55)");
+      g.addColorStop(0.32, "rgba(0,0,0,0.18)");
+      g.addColorStop(0.55, "rgba(0,0,0,0)");
+      x.fillStyle = g; x.fillRect(0, 0, 256, 256);
+      g = x.createRadialGradient(128, 128, 30, 128, 128, 124);
+      g.addColorStop(0.6, col + "00");
+      g.addColorStop(0.78, col + "4d");
+      g.addColorStop(1, col + "00");
+      x.fillStyle = g; x.fillRect(0, 0, 256, 256);
+      return new THREE.CanvasTexture(c);
+    };
+    const groundDisc = (colHex) => {
+      const m = new THREE.Mesh(new THREE.PlaneGeometry(3.1, 3.1),
+        new THREE.MeshBasicMaterial({ map: groundTex(colHex), transparent: true, depthWrite: false }));
+      m.rotation.x = -Math.PI / 2; m.position.y = -1.62; return m;
+    };
+
+    const qmark = () => {
+      const g = new THREE.Group();
+      const m = stdMat(0xdcdcaa, { emissive: 0xdcdcaa, emissiveIntensity: 0.9, roughness: 0.35 });
+      const arc = new THREE.Mesh(new THREE.TorusGeometry(0.17, 0.05, 10, 24, Math.PI * 1.25), m);
+      arc.rotation.z = -Math.PI * 0.12; arc.position.y = 0.16; g.add(arc);
+      const dot = new THREE.Mesh(new THREE.SphereGeometry(0.05, 10, 10), m);
+      dot.position.y = -0.14; g.add(dot);
+      return g;
+    };
+
+    const sparkles = (colHex) => {
+      const g = new THREE.Group(); g.visible = false; const parts = [];
+      for (let i = 0; i < 8; i++) {
+        const m = new THREE.Mesh(new THREE.OctahedronGeometry(0.06),
+          stdMat(0xffffff, { emissive: colHex, emissiveIntensity: 1.6, roughness: 0.3 }));
+        m.userData = { a: (i / 8) * Math.PI * 2, r: 0.8 + Math.random() * 0.5, h: 0.5 + Math.random() * 1.1, s: 0.7 + Math.random() * 0.7 };
+        parts.push(m); g.add(m);
+      }
+      g.update = (t) => {
+        if (!g.visible) return;
+        parts.forEach(p => {
+          const ph = (t * p.userData.s + p.userData.a) % 1.6;
+          const k = Math.sin((ph / 1.6) * Math.PI);
+          p.position.set(Math.cos(p.userData.a) * p.userData.r, p.userData.h * k - 0.7, Math.sin(p.userData.a) * p.userData.r * 0.6);
+          p.scale.setScalar(0.3 + k); p.rotation.y = t * 2 + p.userData.a;
+        });
+      };
+      return g;
+    };
+
+    function baseScene(canvas, colHex) {
+      const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
+      renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 1.15;
+      const scene = new THREE.Scene();
+      const pm = new THREE.PMREMGenerator(renderer);
+      scene.environment = pm.fromScene(new RoomEnvironment(), 0.04).texture;
+      const cam = new THREE.PerspectiveCamera(30, 1.25, 0.1, 50);
+      cam.position.set(0, 0.55, 6.0); cam.lookAt(0, 0.05, 0);
+      scene.add(new THREE.HemisphereLight(0xffffff, 0x1c2126, 0.85));
+      const key = new THREE.DirectionalLight(0xffffff, 2.2); key.position.set(3, 4, 4); scene.add(key);
+      const rim = new THREE.PointLight(colHex, 26, 12, 2); rim.position.set(-2.6, 1.4, -2.2); scene.add(rim);
+      scene.add(groundDisc(colHex));
+      return { renderer, scene, cam };
+    }
+
+    /* ---- Atlas — the orbiter: white egg, dark screen, glowing RING eyes ---- */
+    function buildAtlas(root, colHex) {
+      const inner = new THREE.Group(); root.add(inner);
+      inner.add(new THREE.Mesh(new THREE.SphereGeometry(1, 48, 32), glossMat(0xeef1f2, { roughness: 0.38 })));
+      const belt = new THREE.Mesh(new THREE.TorusGeometry(0.88, 0.1, 20, 72), stdMat(colHex, { roughness: 0.3, metalness: 0.25 }));
+      belt.rotation.x = Math.PI / 2 - 0.06; belt.position.y = -0.38; inner.add(belt);
+      const screen = new THREE.Mesh(new THREE.SphereGeometry(0.74, 48, 32), stdMat(0x0d1216, { roughness: 0.16, metalness: 0.55 }));
+      screen.scale.set(1.16, 0.94, 0.58); screen.position.set(0, 0.12, 0.52); inner.add(screen);
+      const eyeMat = stdMat(0xd9fff4, { emissive: colHex, emissiveIntensity: 2.1, roughness: 0.3 });
+      const mkEye = (arc) => new THREE.Mesh(new THREE.TorusGeometry(0.105, 0.032, 10, 28, arc ? Math.PI : undefined), eyeMat);
+      const eyes = new THREE.Group(); inner.add(eyes);
+      const eL = mkEye(false); eL.position.set(-0.24, 0.16, 0.95);
+      const eR = mkEye(false); eR.position.set(0.24, 0.16, 0.95);
+      const aL = mkEye(true); aL.position.set(-0.24, 0.2, 0.95); aL.visible = false;
+      const aR = mkEye(true); aR.position.set(0.24, 0.2, 0.95); aR.visible = false;
+      eyes.add(eL, eR, aL, aR);
+      const focus = new THREE.Group(); inner.add(focus); focus.visible = false;
+      const fL = new THREE.Mesh(new THREE.SphereGeometry(0.042, 10, 10), eyeMat); fL.position.set(-0.24, 0.16, 0.99);
+      const fR = fL.clone(); fR.position.x = 0.24; focus.add(fL, fR);
+      const nub = new THREE.Mesh(new THREE.SphereGeometry(0.07, 12, 12), stdMat(colHex, { emissive: colHex, emissiveIntensity: 1.2 }));
+      nub.position.set(0, 1.12, 0); inner.add(nub);
+      for (const s of [-1, 1]) {
+        const pod = new THREE.Mesh(new THREE.SphereGeometry(0.13, 16, 16), stdMat(colHex, { roughness: 0.35, metalness: 0.2 }));
+        pod.position.set(1.0 * s, -0.1, 0.05); inner.add(pod);
+      }
+      const ringG = new THREE.Group();
+      ringG.add(new THREE.Mesh(new THREE.TorusGeometry(1.55, 0.026, 12, 90), stdMat(colHex, { metalness: 0.4, roughness: 0.35 })));
+      const ping = new THREE.Mesh(new THREE.SphereGeometry(0.09, 12, 12), stdMat(0xffffff, { emissive: colHex, emissiveIntensity: 2.4 }));
+      ringG.add(ping);
+      ringG.rotation.set(1.18, 0.32, 0); inner.add(ringG);
+      const radar = [];
+      for (let i = 0; i < 2; i++) {
+        const r = new THREE.Mesh(new THREE.TorusGeometry(1, 0.016, 8, 64),
+          new THREE.MeshBasicMaterial({ color: colHex, transparent: true, opacity: 0, depthWrite: false }));
+        r.rotation.x = Math.PI / 2; r.position.y = -0.15; r.visible = false; inner.add(r); radar.push(r);
+      }
+      const q = qmark(); q.position.set(1.28, 1.0, 0.3); q.visible = false; inner.add(q);
+      const sp = sparkles(colHex); inner.add(sp);
+      let tilt = 0, tiltTarget = 0, lean = 0, leanTarget = 0;
+      return {
+        setState(s) {
+          const done = s === "done";
+          eL.visible = eR.visible = !done; aL.visible = aR.visible = done;
+          focus.visible = s === "working";
+          tiltTarget = s === "waiting" ? -0.24 : 0;
+          leanTarget = s === "working" ? 0.1 : 0;
+          radar.forEach(r => r.visible = s === "working");
+          q.visible = s === "waiting"; sp.visible = done;
+        },
+        update(s, t, dt, el) {
+          tilt += (tiltTarget - tilt) * Math.min(dt * 5, 1);
+          lean += (leanTarget - lean) * Math.min(dt * 5, 1);
+          inner.rotation.z = tilt; inner.rotation.x = lean;
+          ringG.rotation.z += dt * (s === "working" ? 1.6 : 0.4);
+          const a = t * (s === "working" ? 2.6 : 0.8);
+          ping.position.set(Math.cos(a) * 1.55, Math.sin(a) * 1.55, 0);
+          if (s === "working") {
+            radar.forEach((r, i) => {
+              const k = ((el * 0.7) + i * 0.5) % 1, sc = 0.95 + k * 1.15;
+              r.scale.setScalar(sc); r.material.opacity = 0.5 * (1 - k);
+            });
+            const pulse = 1 + Math.sin(t * 3.2) * 0.08;
+            eL.scale.setScalar(pulse); eR.scale.setScalar(pulse);
+          } else {
+            const bl = s !== "done" && Math.sin(t * 2.1 + 1) > 0.985;
+            eyes.scale.y = bl ? 0.18 : 1;
+            eyes.position.x = s === "idle" ? Math.sin(t * 0.4) * 0.03 : 0;
+          }
+          if (q.visible) { q.position.y = 1.0 + Math.sin(t * 2.4) * 0.08; q.rotation.z = Math.sin(t * 1.5) * 0.14; }
+          if (sp.visible) sp.update(t);
+        }
+      };
+    }
+
+    /* ---- Scout — the watcher: lens face, glowing aperture ring, scanline ---- */
+    function buildScout(root, colHex) {
+      const inner = new THREE.Group(); root.add(inner);
+      inner.add(new THREE.Mesh(new THREE.SphereGeometry(1.04, 48, 32), glossMat(0xe8f1f5, { roughness: 0.4 })));
+      const handle = new THREE.Mesh(new THREE.TorusGeometry(0.42, 0.05, 12, 36, Math.PI), stdMat(0x2b3238, { metalness: 0.5, roughness: 0.35 }));
+      handle.position.y = 1.04; inner.add(handle);
+      const bezel = new THREE.Mesh(new THREE.TorusGeometry(0.52, 0.08, 16, 48), stdMat(0x10161a, { metalness: 0.7, roughness: 0.25 }));
+      bezel.position.set(0, 0.08, 0.84); inner.add(bezel);
+      const glass = new THREE.Mesh(new THREE.SphereGeometry(0.47, 32, 24), stdMat(0x0a0f13, { metalness: 0.75, roughness: 0.12 }));
+      glass.scale.set(1, 1, 0.45); glass.position.set(0, 0.08, 0.86); inner.add(glass);
+      const haloMat = stdMat(0x9fdcec, { emissive: colHex, emissiveIntensity: 1.7, roughness: 0.3 });
+      const halo = new THREE.Mesh(new THREE.TorusGeometry(0.34, 0.018, 10, 40), haloMat);
+      halo.position.set(0, 0.08, 1.06); inner.add(halo);
+      const irisMat = stdMat(0xcdeef8, { emissive: colHex, emissiveIntensity: 1.9, roughness: 0.25 });
+      const iris = new THREE.Mesh(new THREE.SphereGeometry(0.11, 16, 16), irisMat);
+      iris.position.set(0, 0.08, 1.1); inner.add(iris);
+      const glint = new THREE.Mesh(new THREE.SphereGeometry(0.035, 8, 8), stdMat(0xffffff, { emissive: 0xffffff, emissiveIntensity: 1.8 }));
+      glint.position.set(-0.13, 0.2, 1.14); inner.add(glint);
+      const scan = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.028, 0.028),
+        stdMat(colHex, { emissive: colHex, emissiveIntensity: 2.0, transparent: true, opacity: 0.85 }));
+      scan.position.set(0, 0.08, 1.12); scan.visible = false; inner.add(scan);
+      const smile = new THREE.Group(); inner.add(smile); smile.visible = false;
+      const smMat = stdMat(0x7fe8c0, { emissive: 0x59c99a, emissiveIntensity: 2.0, roughness: 0.3 });
+      const sArc = new THREE.Mesh(new THREE.TorusGeometry(0.22, 0.045, 10, 28, Math.PI), smMat);
+      sArc.rotation.z = Math.PI; sArc.position.set(0, -0.02, 1.12); smile.add(sArc);
+      const sdL = new THREE.Mesh(new THREE.SphereGeometry(0.045, 10, 10), smMat); sdL.position.set(-0.12, 0.12, 1.12);
+      const sdR = sdL.clone(); sdR.position.x = 0.12; smile.add(sdL, sdR);
+      const q = qmark(); q.position.set(1.25, 0.95, 0.3); q.visible = false; inner.add(q);
+      const sp = sparkles(colHex); inner.add(sp);
+      let tilt = 0, tiltTarget = 0;
+      return {
+        setState(s) {
+          scan.visible = s === "working"; q.visible = s === "waiting";
+          sp.visible = s === "done"; smile.visible = s === "done";
+          iris.visible = glint.visible = s !== "done";
+          tiltTarget = s === "waiting" ? 0.18 : 0;
+        },
+        update(s, t, dt, el) {
+          tilt += (tiltTarget - tilt) * Math.min(dt * 5, 1);
+          inner.rotation.x = -tilt;
+          if (s === "done") {
+            halo.scale.setScalar(1.1 + Math.sin(t * 4) * 0.05);
+            sp.update(t);
+            return;
+          }
+          let ix = 0, iy = 0;
+          if (s === "idle") { ix = Math.sin(t * 0.8) * 0.14; iy = Math.cos(t * 0.55) * 0.08; }
+          else if (s === "working") { ix = Math.sin(t * 2.6) * 0.18; iy = Math.sin(t * 4.1) * 0.04; }
+          else if (s === "waiting") { iy = 0.1; }
+          iris.position.x = ix; iris.position.y = 0.08 + iy;
+          glint.position.set(ix - 0.13, 0.2 + iy, 1.14);
+          halo.scale.setScalar(s === "working" ? 1 + Math.sin(t * 2.4) * 0.1 : 1);
+          if (scan.visible) scan.position.y = 0.08 + Math.sin(t * 1.9) * 0.26;
+          iris.scale.y = Math.sin(t * 2.3) > 0.987 ? 0.15 : 1;
+          if (q.visible) q.position.y = 0.95 + Math.sin(t * 2.4) * 0.08;
+        }
+      };
+    }
+
+    /* ---- Ledger — the accountant: receipt body, bindings, paper feed ---- */
+    function buildLedger(root, colHex) {
+      const body = new THREE.Mesh(new THREE.SphereGeometry(1, 48, 32), stdMat(0xe6d9a6, { roughness: 0.48 }));
+      body.scale.set(1, 1.2, 0.78); root.add(body);
+      const slot = new THREE.Mesh(new THREE.BoxGeometry(0.52, 0.09, 0.14), stdMat(0x14181c, { metalness: 0.4 }));
+      slot.position.set(0, 1.02, 0.1); slot.rotation.x = -0.12; root.add(slot);
+      const visor = new THREE.Mesh(new THREE.BoxGeometry(1.12, 0.44, 0.22), stdMat(0x101418, { metalness: 0.55, roughness: 0.2 }));
+      visor.position.set(0, 0.18, 0.72); visor.rotation.x = -0.05; root.add(visor);
+      const eyeMat = stdMat(0xeae49f, { emissive: 0xdcdcaa, emissiveIntensity: 2.0, roughness: 0.3 });
+      const eL = new THREE.Mesh(new THREE.BoxGeometry(0.13, 0.17, 0.06), eyeMat); eL.position.set(-0.25, 0.18, 0.88);
+      const eR = eL.clone(); eR.position.x = 0.25; root.add(eL, eR);
+      for (const sx of [-1, 1]) for (let i = 0; i < 3; i++) {
+        const ring = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 0.1, 12), stdMat(0x8f8449, { metalness: 0.5, roughness: 0.4 }));
+        ring.rotation.z = Math.PI / 2; ring.position.set(1.02 * sx, 0.42 - i * 0.42, 0.18); root.add(ring);
+      }
+      const foot = new THREE.Mesh(new THREE.BoxGeometry(1.3, 0.12, 0.24), stdMat(0x8f8449, { roughness: 0.45 }));
+      foot.position.set(0, -1.18, 0.08); root.add(foot);
+      const paper = new THREE.Mesh(new THREE.PlaneGeometry(0.32, 0.42), stdMat(0xffffff, { roughness: 0.6, side: THREE.DoubleSide }));
+      paper.position.set(0, 1.2, 0.1); paper.visible = false; root.add(paper);
+      const q = qmark(); q.position.set(1.25, 0.9, 0.3); q.visible = false; root.add(q);
+      const sp = sparkles(colHex); root.add(sp);
+      return {
+        setState(s) {
+          paper.visible = s === "working"; q.visible = s === "waiting"; sp.visible = s === "done";
+          const done = s === "done";
+          eyeMat.color.set(done ? 0x59c99a : 0xeae49f);
+          eyeMat.emissive.set(done ? 0x59c99a : 0xdcdcaa);
+        },
+        update(s, t, dt, el) {
+          if (paper.visible) { paper.position.y = 1.14 + ((el * 0.75) % 0.5); paper.rotation.z = Math.sin(t * 3) * 0.09; }
+          if (s === "working") { const dx = Math.sin(t * 5) * 0.05; eL.position.x = -0.24 + dx; eR.position.x = 0.24 + dx; }
+          else { eL.position.x = -0.24; eR.position.x = 0.24; }
+          eL.position.y = eR.position.y = 0.18 + (s === "waiting" ? 0.08 : 0);
+          eL.scale.y = eR.scale.y = (s === "idle" && Math.sin(t * 2.2) > 0.987) ? 0.15 : 1;
+          if (s === "working") root.rotation.x = Math.sin(t * 2) * 0.02;
+          if (q.visible) q.position.y = 0.9 + Math.sin(t * 2.3) * 0.08;
+          if (sp.visible) sp.update(t);
+        }
+      };
+    }
+
+    const BUILD = { atlas: buildAtlas, scout: buildScout, ledger: buildLedger };
+    const COL = { atlas: 0x4ec9b0, scout: 0x88c0d0, ledger: 0xdcdcaa };
+    const STATES = ["idle", "working", "waiting", "done"];
+
+    const rigs = cards.map((card) => {
+      const canvas = card.querySelector("canvas");
+      const { renderer, scene, cam } = baseScene(canvas, COL[card.dataset.bot]);
+      const root = new THREE.Group(); scene.add(root);
+      const api = BUILD[card.dataset.bot](root, COL[card.dataset.bot]);
+      const chip = card.querySelector(".av-statechip");
+      const btns = [...card.querySelectorAll(".av-btns button")];
+      let state = "idle", changedAt = 0, manualUntil = 0;
+      function setState(s, user) {
+        state = s; changedAt = performance.now() / 1000;
+        if (user) manualUntil = changedAt + 12;
+        chip.textContent = s; chip.dataset.state = s;
+        btns.forEach(b => b.classList.toggle("on", b.dataset.state === s));
+        api.setState(s);
+      }
+      btns.forEach(b => b.addEventListener("click", () => setState(b.dataset.state, true)));
+      setState("idle");
+      setInterval(() => {
+        if (performance.now() / 1000 > manualUntil)
+          setState(STATES[(STATES.indexOf(state) + 1) % 4]);
+      }, 4000);
+      function fit() {
+        const w = canvas.clientWidth || 280, h = canvas.clientHeight || 224;
+        renderer.setSize(w, h, false);
+        cam.aspect = w / h; cam.updateProjectionMatrix();
+      }
+      fit(); addEventListener("resize", fit);
+      return {
+        update(t, dt) {
+          const el = t - changedAt;
+          const hop = state === "done" ? Math.max(0, Math.sin(Math.min(el * 3.2, Math.PI)) * 0.34) : 0;
+          root.position.y = (state === "working" ? Math.sin(t * 3.1) * 0.055
+            : state === "idle" ? Math.sin(t * 1.5) * 0.07
+            : Math.sin(t * 1.1) * 0.03) + hop;
+          root.rotation.y = Math.sin(t * 0.5) * 0.16 + (state === "working" ? Math.sin(t * 1.1) * 0.12 : 0);
+          root.rotation.z = state === "working" ? Math.sin(t * 2.0) * 0.035 : 0;
+          api.update(state, t, dt, el);
+          renderer.render(scene, cam);
+        }
+      };
+    });
+
+    let last = performance.now() / 1000;
+    (function loop() {
+      requestAnimationFrame(loop);
+      const t = performance.now() / 1000, dt = Math.min(t - last, 0.05); last = t;
+      rigs.forEach(r => r.update(t, dt));
+    })();
+  }
+</script>
+</body>
+</html>

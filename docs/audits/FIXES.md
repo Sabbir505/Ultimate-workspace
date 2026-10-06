@@ -74,13 +74,19 @@ Fixes applied for the findings in `AUDIT.md`, in its priority order. Verificatio
 
 ## Deferred (with reasons)
 - **[B-26-related]** Mobile `ChatTurn` runs on a spawned task with a `select!` over the socket (cancel now works mid-turn); other commands received mid-turn get an honest "busy" error rather than full reentrant dispatch.
-- **[B-28]** PID-based stale automation locks implemented on Windows (OpenProcess/GetExitCodeProcess, `windows-sys` Threading feature added); non-Windows keeps the 6h age fallback (no cheap liveness probe wired).
-- **[E-1 risk]** The actual OS sandbox for `run_code` (Landlock/Job Objects/sandbox-exec) remains future work — the hooks and honest warnings exist; wiring them is a feature, not a bug fix.
-- **[B-24 protocol]** Nonce/challenge pairing proof — needs a coordinated phone-side protocol change.
-- **[E-9 misc not done]** `started_at` per-turn reset for claude turns was included in the sessions fixes; `onStatus` symmetric guard, artifact-maps eviction (`P-3`), nav-injection thread pooling (`P-2` — the early-exit is covered by the B-7-era map check pattern) remain open, all Low.
+- **[B-28]** PID-based stale automation locks implemented on Windows (OpenProcess/GetExitCodeProcess, `windows-sys` Threading feature added). *(Corrected 2026-10-05: the Unix fallback is also done — `pid_alive` uses `libc::kill(pid, 0)` with EPERM counting as alive, so a crashed runner's lock is reclaimed immediately rather than blocking every tick for 6h. See the B-28 entry in the Fixed section above.)*
+- **[E-1 risk]** The actual OS sandbox for `run_code` (Landlock/Job Objects/sandbox-exec) remains future work — the hooks and honest warnings exist; wiring them is a feature, not a bug fix. **Still open as of 2026-10-05.**
+- **[B-24 protocol]** Nonce/challenge pairing proof — **DONE 2026-10-01.** The desktop now opens with a `PairChallenge` frame carrying a fresh 32-byte nonce and the phone answers `Hex(HMAC-SHA256(token, "E2E-NONCE-V1" ‖ challenge))` (`mobile/relay_crypto.rs:1-20`), with the legacy static proof retained only as the pre-v2 fallback. A 5-failure/60s lockout backs it (`mobile/relay_requests.rs:88-92`). See `docs/remote-access.md`.
+- **[E-9 misc]** The `started_at` per-turn reset for claude turns was included in the sessions fixes. *(Corrected 2026-10-05: an earlier version of this bullet also listed the `onStatus` symmetric guard, artifact-map eviction (`P-3`), and nav-injection thread pooling (`P-2`) as still open. All three shipped in the 2026-09-06 batch recorded in the Fixed section above, and the code confirms them — `chat/commands/send.rs` pairs the `local_model_loading` status clear and `chat/dispatch.rs` performs the artifact-map eviction.)*
 - **[E-9h harness model quoting]** Solved by validation (`ensure_cmd_safe_model`) rather than quoting through cmd's `%*` — quoting is fragile; validation rejects the dangerous surface with a clear error.
 
 ## Verification
+
+> The figures below are what this log recorded at the time of the 2026-09-06 fix
+> batch. For the **current** suite health see `docs/audits/BUG_AUDIT.md`
+> (215 vitest files / 1702 tests; `cargo test --lib` 1659 passed / 0 failed /
+> 23 ignored as of 2026-10-05).
+
 - `cargo check` — clean (0 errors; pre-existing warnings only).
 - `cargo test` — **574 passed, 0 failed**, 11 ignored (includes new tests: pair-proof fail-closed, `should_clear_in_flight`, `ensure_cmd_safe_model`, pid_alive, SseLineBuffer, browser wrapper nonce/transport, migration marker behavior, plus the sessions-agent's tests).
 - `npx vitest run` — **74 files / 499 tests passed** (baseline before fixes: 71/491; +3 new test files, updated broadcast assertions).

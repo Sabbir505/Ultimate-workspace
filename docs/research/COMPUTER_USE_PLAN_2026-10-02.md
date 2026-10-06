@@ -5,6 +5,14 @@ architecture is still ~70% right; the load-bearing correction is in §2 below.
 
 > **Status: Phases 0–2 are implemented.** Phase 3 (OS-level desktop control) is
 > not started. See §12 for what landed and what was verified.
+>
+> **Re-verified 2026-10-05:** Phases 0–2 remain accurate. Two figures in the body
+> were stale and have been corrected — the sidecar's advertised tool count (now 63
+> static schemas, 27 browser + 36 relay, plus a live 34-entry allowlist) and the
+> chat-tool browser surface (now 14 `BROWSER_*` tools, not 8; see the asymmetry note
+> in §2, whose gap has since closed). Phase 3 is still genuinely not started —
+> `src-tauri/src/app_ui.rs` covers Phase 2 self-control only and is a DOM bridge, not
+> an OS-level pixel loop.
 
 ---
 
@@ -184,11 +192,17 @@ press it to dismiss dialogs.
 Close the gap between Relay's chat-tool surface and the official browser toolset. Cheap
 because the machinery exists.
 
-**Asymmetry worth noting:** the MCP server (`bin/relay_browser_mcp.rs`, 54 tools) has
+**Asymmetry worth noting (re-verified 2026-10-05 — this gap has since closed):** the MCP
+server (`bin/relay_browser_mcp.rs`) has
 `zoom`, `press_key`, `fill_form`, `select_option`, `find`, `batch`, `read_console`,
-`read_network`, `print_to_pdf`. The **chat-tool** surface has only 8
-(`browser_read/click/type/scroll/screenshot/observe/extract/upload_file`). So `zoom`
-and `press_key` exist in the codebase but are unreachable from a chat turn.
+`read_network`, `print_to_pdf`. At the time of this plan the **chat-tool** surface had
+only 8 (`browser_read/click/type/scroll/screenshot/observe/extract/upload_file`), leaving
+`zoom` and `press_key` unreachable from a chat turn. That is no longer true — the chat
+registry now ships 14 `BROWSER_*` tools, with `browser_upload_file`, `browser_zoom`,
+`browser_press_key`, `browser_fill_form`, `browser_select_option`, `browser_find` and
+`browser_batch` added alongside the original eight. *(The "54 tools" figure in the
+original line was also stale: the sidecar declares 63 static schemas — 27 browser + 36
+relay — merged at runtime with a live 34-entry allowlist.)*
 
 Work:
 1. Promote `zoom`, `press_key`, `fill_form`, `select_option` to chat tools.

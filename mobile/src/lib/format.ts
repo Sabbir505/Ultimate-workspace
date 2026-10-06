@@ -45,3 +45,18 @@ export function formatTokens(n: number): string {
   if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
   return String(n);
 }
+
+/** Turn-duration label (desktop MessageBubble parity): 40 → "40s",
+ *  125 → "2m 5s", 7200 → "2h". Sub-second turns read as "1s". */
+export function formatDuration(sec: number): string {
+  if (sec < 1) return '1s';
+  if (sec < 60) return `${sec}s`;
+  if (sec < 3600) {
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60);
+    return s ? `${m}m ${s}s` : `${m}m`;
+  }
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  return m ? `${h}h ${m}m` : `${h}h`;
+}

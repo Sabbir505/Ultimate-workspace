@@ -3,7 +3,7 @@
 **Date:** 2026-08-27
 **Scope:** full project (frontend `src/`, Rust backend `src-tauri/src/`, mobile `mobile/`)
 
-> **STATUS: GREEN (2026-09-06, updated same day).** The 2026-08-27 regressions are fixed: `tsc --noEmit` clean (root + mobile), `npx vitest run` 128 files / 798 tests all passing, `cargo test --lib` 898 passed / 0 failed / 12 ignored, `vite build` passes. The previously-resolved Round 2 findings (PTY batching, react-markdown lazy load, lucide tree-shaking, mobile poll → on-demand, N+1 cost queries, token batching, parallel probes, KaTeX dedup, CSS split) remain resolved. What is *not* green: the entry chunk tripled since the 2026-08-27 audit (459 KB → 1,179 KB raw) and several async chunks remain > 500 KB — see Key Metrics and Remaining Recommendations.
+> **STATUS: GREEN (re-verified 2026-10-05).** `tsc --noEmit` clean (root + mobile), `npm test` 215 files / 1702 tests, `cargo test --lib` 1659 passed / 0 failed / 23 ignored. The 2026-08-27 regressions remain fixed, and the previously-resolved Round 2 findings (PTY batching, react-markdown lazy load, lucide tree-shaking, mobile poll → on-demand, N+1 cost queries, token batching, parallel probes, KaTeX dedup, CSS split) remain resolved. What is *not* green: the entry chunk tripled since the 2026-08-27 audit (459 KB → 1,179 KB raw) and several async chunks remain > 500 KB — see Key Metrics and Remaining Recommendations. **The bundle-size figures below have not been re-measured since 2026-08-27**; the build has grown substantially since then (425 registered commands, 60 DB tables, and whole new subsystems — project wiki, subagent registry, LLM log/gateway), so treat the chunk sizes as a floor, not a current reading.
 
 ---
 
@@ -11,10 +11,10 @@
 
 | Category | Finding | Status |
 |---|---|---|
-| Command count | 2026-08-23 audit reported 226 commands | **SUPERSEDED** — 235 at the 2026-08-27 audit; **296 registered** in `generate_handler!` (`src-tauri/src/lib.rs`), 298 `#[tauri::command]` attributes total, as of 2026-09-06 |
-| Database tables | 2026-08-23 audit reported 21 tables | **SUPERSEDED** — 21 at 2026-08-27; **42 distinct tables** as of 2026-09-06 (research caches, citation reports, knowledge/MCP/memory growth) |
-| Test files | 2026-08-23 audit reported 59 vitest files / 407 tests | **SUPERSEDED** — 68 files / 460 tests at the 2026-08-27 audit; **128 files / 798 tests, all passing** as of 2026-09-06 |
-| Cargo lib tests | 2026-08-23 audit reported 502 passing | **RESOLVED** — was 539 passed / 1 FAILED at 2026-08-27; **898 passed, 0 failed, 12 ignored** as of 2026-09-06 |
+| Command count | 2026-08-23 audit reported 226 commands | **SUPERSEDED** — 235 at the 2026-08-27 audit; 296 registered as of 2026-09-06; **425 registered** in `generate_handler!` (`src-tauri/src/lib.rs:691-1155`) with 424 real `#[tauri::command]` attributes, as of 2026-10-05 |
+| Database tables | 2026-08-23 audit reported 21 tables | **SUPERSEDED** — 21 at 2026-08-27; 42 as of 2026-09-06; **60 tables plus 5 FTS5 virtual tables** as of 2026-10-05 |
+| Test files | 2026-08-23 audit reported 59 vitest files / 407 tests | **SUPERSEDED** — 68 files / 460 tests at the 2026-08-27 audit; 128 files / 798 tests at 2026-09-06; **215 files / 1702 tests** as of 2026-10-05 |
+| Cargo lib tests | 2026-08-23 audit reported 502 passing | **RESOLVED** — was 539 passed / 1 FAILED at 2026-08-27; 898 passed / 0 failed / 12 ignored at 2026-09-06; **1659 passed, 0 failed, 23 ignored** as of 2026-10-05 |
 | `tsc --noEmit` | 2026-08-23 audit reported clean | **RESOLVED** — had regressed to 34 `TS18046` errors (BUG_AUDIT N5); clean again since 2026-09-05 |
 | Entry chunk | 2026-08-23 audit reported 336 KB raw / 108 KB gzip | **CHANGED** — `dist/assets/index-C98R2Vls.js` is now 458.96 KB raw / 141.47 KB gzip |
 | Async chunks >500 KB | n/a in 2026-08-23 audit | **NEW OBSERVATION** — babel 2.98 MB, syntax 1.59 MB, flowchart-elk 1.45 MB, ArtifactPreviewPane 1.24 MB, mindmap 544 KB all > 500 KB; build emits chunk-size warning |

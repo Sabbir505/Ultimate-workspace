@@ -58,8 +58,8 @@ full-auto promotion is opt-in per artifact.
 
 | Artifact | Storage | Runtime use | Telemetry today |
 |---|---|---|---|
-| Skill | Filesystem `SKILL.md` in `~/.claude/skills/`, `~/.agents/skills/` (`installed_skills.rs`); legacy `skills` DB table; built-ins via `include_str!` | Passive injection into system prompt (`chat/prompts.rs:708`), `get_skill` tool, `/slug` expansion | **None** — invocation is not recorded at all |
-| Loop | Filesystem `LOOP.md` (`installed_skills.rs` kind `loops`); goal loop runtime is **frontend-only** ephemeral state (`src/state/chat.ts` `LoopState`, `GOAL_LOOP_MAX = 10`) | `LOOP_STATUS: continue|complete|blocked` sentinel parsed by `parseLoopStatus`; malformed ⇒ stop | **None persisted** — iterations vanish on session close |
+| Skill | Filesystem `SKILL.md` in `~/.claude/skills/`, `~/.agents/skills/` (`installed_skills.rs`); legacy `skills` DB table; built-ins via `include_str!` | Passive injection into system prompt (`chat/prompts.rs`), `get_skill` tool, `/slug` expansion | ✅ **Recorded** — invocations land in the `improve_runs` table (`db/mod.rs`, `db/improve.rs`), parsed by `parse_invoked_skills` in `chat/commands/send.rs` *(corrected 2026-10-05: this cell previously read "None — invocation is not recorded at all", which stopped being true once `improve_runs` shipped)* |
+| Loop | Filesystem `LOOP.md` (`installed_skills.rs` kind `loops`); goal-loop runtime state lives in `src/state/chat/moduleState.ts` `LoopState` (`GOAL_LOOP_MAX = 10`) plus `src/state/chat/slices/loopsSlice.ts` | `LOOP_STATUS: continue|complete|blocked` sentinel parsed by `parseLoopStatus`; malformed ⇒ stop | ✅ **Persisted** — the `loop_sessions` table (`db/mod.rs`, written by `db/improve.rs`) records goal, iteration, status and run id *(corrected 2026-10-05: this cell previously read "None persisted — iterations vanish on session close")* |
 | Prompt template | Settings JSON `prompts.templates` (`{id, name, body, trigger, createdAt}`); artifact proposals also land in `skills` table + filesystem | Composer `/` menu fill-in (`ChatComposer.tsx`), skill injection | **None** |
 | Automation | `automations` + `automation_runs` tables (status: `running`/`ok`/`skipped`/error text, summary, source) | Scheduler `automations.rs`, headless `src/bin/relay_automation.rs`, Task Scheduler | ✅ **Mature**: per-run status/summary, `last_status`, webhook + failure email |
 
@@ -221,7 +221,7 @@ turn (or the loop) reaches a terminal state, then one write classifies it.
 | Manual artifact edit shortly after use | file-hash change / template edit within a window of a run | strong |
 | Stop + rephrase | `stoppedPartial` + new user turn ≤2 min | medium |
 | Delete-message on artifact output | `delete_chat_message` | medium |
-| Explicit 👍/👎 on a message | **net-new**: one `artifact_feedback` write from `MessageBubble` (artifact-attributed when the turn invoked one) | strongest, sparse |
+| Explicit 👍/👎 on a message | **net-new**: one `improve_feedback` write (the table is `improve_feedback`, not `artifact_feedback`) from `MessageBubble`, artifact-attributed when the turn invoked one. As of 2026-10-05 the thumbs control itself is still **not** wired into `MessageBubble.tsx` — the row describes the intended write, not shipped UI | strongest, sparse |
 
 Every observation row carries `artifact_id, version, run_id, signal,
 evidence_json` (message ids, error codes, diff summaries) so §6's proposer

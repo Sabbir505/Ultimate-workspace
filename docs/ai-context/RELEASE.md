@@ -103,13 +103,16 @@ The moment the release is live, every running Relay sees it within 4 hours
 
 ### Release notes
 
-The CI workflow uses `generate_release_notes: true`, so GitHub auto-generates
-release notes from merged PRs. The `latest.json` notes field carries the
-released version's own section of `CHANGELOG.md` — CI invokes
-`npm run release:latest-json -- --notes-file CHANGELOG.md`, and the script
-extracts the current version's `## [x.y.z]` section body (`scripts/make-latest-json.mjs`).
-The default "See release notes on GitHub" pointer is only used for manual runs
-that pass neither `--notes` nor `--notes-file`.
+CI does **not** use GitHub's `generate_release_notes` — a cross-repo release
+cannot, because the tag carries no commit history in the releases repo
+(`.github/workflows/build.yml`). Instead the `latest.json` notes field carries
+the released version's own section of `CHANGELOG.md`: CI invokes
+`npm run release:latest-json -- --notes-file CHANGELOG.md`, the script extracts
+the current version's `## [x.y.z]` section body (`scripts/make-latest-json.mjs`),
+and the workflow's "Extract release notes" step strips private-repo commit links
+into `release-notes.md`, which is passed to the release as `body_path`. The
+default "See release notes on GitHub" pointer is only used for manual runs that
+pass neither `--notes` nor `--notes-file`.
 
 ---
 
@@ -248,6 +251,22 @@ Configured in Settings → Secrets and variables → Actions:
 | `GOOGLE_CLIENT_SECRET` | Google Cloud Console "Desktop app" secret |
 | `GH_CLIENT_ID` | GitHub OAuth App client ID |
 | `GH_CLIENT_SECRET` | GitHub OAuth App secret |
+
+The Windows build is additionally signed via **Azure Trusted Signing**, which
+requires six more secrets (the `Azure/trusted-signing-action` step in
+`build.yml`, filtered to `exe` with an RFC3161 timestamp):
+
+| Secret | Description |
+|--------|-------------|
+| `AZURE_TENANT_ID` | Entra tenant holding the signing account |
+| `AZURE_CLIENT_ID` | App registration used for the signing request |
+| `AZURE_CLIENT_SECRET` | Client secret for that app registration |
+| `AZURE_KEY_VAULT_URI` | Key Vault holding the Trusted Signing certificate |
+| `AZURE_TRUSTED_SIGNING_ACCOUNT` | Trusted Signing account name |
+| `AZURE_TRUSTED_SIGNING_PROFILE` | Trusted Signing profile name |
+
+> This repo has two workflows: `build.yml` (the release build) and `ci.yml`
+> (the per-push checks).
 
 ---
 

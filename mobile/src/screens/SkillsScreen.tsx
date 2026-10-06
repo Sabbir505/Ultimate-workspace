@@ -5,7 +5,7 @@
  * single-harness entries into both harness dirs). All ops hit the same
  * installed_skills commands the desktop library uses.
  */
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   View, Text, StyleSheet, TextInput, TouchableOpacity, ScrollView, Alert,
 } from 'react-native';
@@ -19,6 +19,10 @@ import {
   type InstalledSkillInfo,
 } from '../hooks/useRelay';
 import { useRelayList } from '../hooks/useRelayList';
+import { screenCacheGet, screenCacheSet, screenCacheHas } from '../lib/screenCache';
+import MarkdownText from '../components/chat/MarkdownText';
+import { ActivityIndicator } from 'react-native';
+import { ScreenLoading, FadeIn } from '../components/ScreenFeedback';
 import { tapLight } from '../lib/haptics';
 import DomainErrorBar from '../components/DomainErrorBar';
 
@@ -33,12 +37,24 @@ export default function SkillsScreen() {
     createInstalledSkill, deleteInstalledSkill, makeInstalledSkillsGlobal,
   } = useRelay();
   const [kind, setKind] = useState<Kind>('skill');
-  const [skills, setSkills] = useState<InstalledSkillInfo[]>([]);
+  const [skills, setSkills] = useState<InstalledSkillInfo[]>(() =>
+    screenCacheGet<InstalledSkillInfo[]>('skills.installed') ?? [],
+  );
+  const [loaded, setLoaded] = useState(() => screenCacheHas('skills.installed'));
   const [editing, setEditing] = useState<InstalledSkillInfo | null>(null);
   const [draft, setDraft] = useState('');
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState('');
   const [message, setMessage] = useState<string | null>(null);
+
+  // Reader-first: opening a skill renders its README as markdown; the raw
+  // editor is one tap away (a TextInput inside the ScrollView read badly).
+  const [editMode, setEditMode] = useState(false);
+  // The InstalledSkillList reply does NOT echo which kind it is for: a
+  // single-row LOOPS reply used to merge into the open SKILLS list, so the
+  // toggle looked like it did nothing. Mounts and kind switches REPLACE;
+  // only create-replies merge.
+  const replaceNextRef = useRef(true);
 
   // Fetch on mount, on the kind toggle, and on every reconnect — a fetch
   // fired before the socket pairs is silently dropped, so the reconnect
@@ -57,6 +73,12 @@ export default function SkillsScreen() {
           ? prev.map((p) => (p.slug === list[0].slug ? list[0] : p))
           : [...prev, list[0]];
       });
+      // Only a full list refresh counts as loaded (and is worth caching) —
+      // a single-row merge reply rides on data we already have.
+      if (list.length !== 1) {
+        screenCacheSet('skills.installed', list);
+        setLoaded(true);
+      }
     });
     const offContent = onInstalledSkillContent.on(({ content }) => {
       setDraft(content);
@@ -74,6 +96,7 @@ export default function SkillsScreen() {
     tapLight();
     setEditing(s);
     setDraft('');
+    setEditMode(false);
     readInstalledSkill(s.slug, s.kind);
   };
 
@@ -129,7 +152,41 @@ export default function SkillsScreen() {
         </TouchableOpacity>
       ) : null}
 
-      {editing || creating ? (
+      {editing && !editMode && !creating ? (
+        // README reader — rendered markdown, desktop parity.
+        <View style={[styles.editor, { backgroundColor: c.surface, borderColor: c.border }]}>
+          <View style={styles.cardHead}>
+            <Text style={[styles.editorTitle, { color: c.text }]}>{editing.name}</Text>
+            <TouchableOpacity
+              style={[styles.primaryBtn, { backgroundColor: c.accent }]}
+              onPress={() => { tapLight(); setEditMode(true); }}
+              accessibilityRole="button"
+              accessibilityLabel="Edit skill body"
+            >
+              <Text style={{ color: c.white, fontWeight: '700', fontSize: 13 }}>Edit</Text>
+            </TouchableOpacity>
+          </View>
+          <ScrollView style={styles.readmeScroll} nestedScrollEnabled>
+            {draft.trim() ? (
+              <MarkdownText content={draft} />
+            ) : (
+              <ActivityIndicator size="small" color={c.textSecondary} style={{ padding: 16 }} />
+            )}
+          </ScrollView>
+          <View style={styles.actions}>
+            <TouchableOpacity
+              style={styles.ghostBtn}
+              accessibilityRole="button"
+              accessibilityLabel="Close"
+              onPress={() => setEditing(null)}
+            >
+              <Text style={{ color: c.textSecondary, fontWeight: '600', fontSize: 13 }}>Close</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      ) : null}
+
+      {(editing && editMode) || creating ? (
         <View style={[styles.editor, { backgroundColor: c.surface, borderColor: c.border }]}>
           <Text style={[styles.editorTitle, { color: c.text }]}>
             {creating ? `New ${kind}` : editing?.name}
@@ -177,7 +234,10 @@ export default function SkillsScreen() {
               style={styles.ghostBtn}
               accessibilityRole="button"
               accessibilityLabel="Cancel"
-              onPress={() => { setEditing(null); setCreating(false); }}
+              onPress={() => {
+                if (creating) setCreating(false);
+                else setEditMode(false);
+              }}
             >
               <Text style={{ color: c.textSecondary, fontWeight: '600', fontSize: 13 }}>Cancel</Text>
             </TouchableOpacity>
@@ -186,11 +246,14 @@ export default function SkillsScreen() {
       ) : null}
 
       <ScrollView style={styles.list}>
-        {skills.length === 0 ? (
+        {!loaded ? (
+          <ScreenLoading label={kind === 'skill' ? 'Loading skills' : 'Loading loops'} />
+        ) : skills.length === 0 ? (
           <Text style={[styles.empty, { color: c.textSecondary }]}>
             No {kind}s installed yet. Create one above — it becomes a `/{'skill' === kind ? 'slug' : 'loop'}` command in the composer.
           </Text>
-        ) : null}
+        ) : (
+          <FadeIn>
         {skills.map((s) => (
           <TouchableOpacity
             key={s.slug}
@@ -231,6 +294,8 @@ export default function SkillsScreen() {
             </View>
           </TouchableOpacity>
         ))}
+          </FadeIn>
+        )}
       </ScrollView>
     </SafeAreaView>
   );
@@ -254,6 +319,7 @@ const styles = StyleSheet.create({
   primaryBtn: { paddingHorizontal: 18, paddingVertical: 9, borderRadius: theme.radius.pill },
   ghostBtn: { paddingHorizontal: 14, paddingVertical: 9 },
   rowBtn: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 8, paddingVertical: 4 },
+  readmeScroll: { maxHeight: 320 },
   list: { padding: 10, gap: 10, paddingBottom: 40 },
   card: { borderRadius: 14, borderWidth: StyleSheet.hairlineWidth, padding: 14, gap: 6 },
   cardHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 8 },

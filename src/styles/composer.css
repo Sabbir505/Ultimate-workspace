@@ -1428,6 +1428,9 @@
   color: var(--text);
   background: var(--surface-1, rgba(255, 255, 255, 0.08));
 }
+/* Send button — the same frosted circular chip as the mic / hands-free
+   buttons it shares the row with (same surface, hairline border, muted
+   glyph): a solid accent disc read as a foreign element next to them. */
 .composer-send-btn {
   width: 24px;
   height: 24px;
@@ -1436,26 +1439,46 @@
   justify-content: center;
   font-size: 13px;
   line-height: 1;
-  border: none;
+  border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 50%;
-  background: var(--accent);
-  color: var(--accent-contrast, #fff);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-dim);
   cursor: pointer;
   flex-shrink: 0;
   padding: 0;
+  transition: background 0.15s var(--ease), border-color 0.15s var(--ease), color 0.15s var(--ease);
 }
 .composer-send-btn:hover:not(:disabled) {
-  filter: brightness(0.9);
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.16);
+  color: var(--text);
 }
 .composer-send-btn:disabled {
   opacity: 0.4;
   cursor: default;
+}
+/* :not(.stop) — the stop variant owns its surface (danger outline); the
+   light-theme frost must not out-specificity it into a gray disc. */
+:root[data-theme="light"] .composer-send-btn:not(.stop) {
+  background: rgba(0, 0, 0, 0.05);
+  border-color: rgba(0, 0, 0, 0.08);
+}
+:root[data-theme="light"] .composer-send-btn:not(.stop):hover:not(:disabled) {
+  background: rgba(0, 0, 0, 0.1);
+  border-color: rgba(0, 0, 0, 0.16);
 }
 .composer-send-btn.stop {
   background: var(--surface-2);
   border: 1px solid var(--danger);
   color: var(--danger);
   font-size: 11px;
+}
+/* The generic hover above out-specificities .stop and would gray out the
+   danger outline — re-declare it with the mic's recording tint instead. */
+.composer-send-btn.stop:hover:not(:disabled) {
+  background: rgba(214, 69, 69, 0.15);
+  border-color: var(--danger);
+  color: var(--danger);
 }
 
 /* --- Message action icons --- */

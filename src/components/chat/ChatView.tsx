@@ -270,6 +270,7 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
   const {
     localModels,
     localLoading,
+    loadingModelName,
     activeLocalModelId,
     setActiveLocalModelId,
     localOverridesMap,
@@ -1975,8 +1976,15 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
               // session meterModel prefers the model the CLI LAST actually
               // ran, so a freshly picked model still displayed as the previous
               // one until the next turn completed.
+              //
+              // While a local-model sidecar is spawning, the session still
+              // stores the PREVIOUS model (it's only committed once the spawn
+              // succeeds) — show the model being loaded instead, so the
+              // spinner names the target rather than the old sidecar.
               activeSession?.agent != null
-                ? (resolvedModel ?? "")
+                ? (localLoading && loadingModelName
+                  ? loadingModelName
+                  : (resolvedModel ?? ""))
                 : ""
             : undefined
         }

@@ -25,6 +25,9 @@
     <symbol id="mesh" viewBox="0 0 24 24"><rect x="9" y="9" width="6" height="6" rx="1"/><path d="M12 3v6m0 6v6M3 12h6m6 0h6M5 5l4 4m6 6 4 4M19 5l-4 4m-6 6-4 4"/></symbol>
     <symbol id="windows" viewBox="0 0 24 24"><path d="M3 4h8v7H3zm10 0h8v7h-8zM3 13h8v7H3zm10 0h8v7h-8z" fill="currentColor" stroke="none"/></symbol>
     <symbol id="android" viewBox="0 0 24 24"><path d="M17.523 15.3414c-.5511 0-.9993-.4486-.9993-.9997s.4483-.9993.9993-.9993c.5511 0 .9993.4483.9993.9993.0001.5511-.4482.9997-.9993.9997m-11.046 0c-.5511 0-.9993-.4486-.9993-.9997s.4483-.9993.9993-.9993c.5511 0 .9993.4483.9993.9993 0 .5511-.4483.9997-.9993.9997m11.4045-6.02l1.9973-3.4592a.416.416 0 00-.1521-.5676.416.416 0 00-.5676.1521l-2.0223 3.503C15.5902 8.2439 13.8533 7.8508 12 7.8508s-3.5902.3931-5.1367 1.0989L4.841 5.4477a.4161.4161 0 00-.5677-.1521.4157.4157 0 00-.1521.5676l1.9973 3.4592C2.6889 11.1867.3432 14.6589 0 18.761h24c-.3435-4.1021-2.6892-7.5743-6.1185-9.4396" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="agents" viewBox="0 0 24 24"><circle cx="8" cy="7" r="3"/><path d="M2.5 20a5.5 5.5 0 0 1 11 0"/><circle cx="17.5" cy="9.5" r="2.5"/><path d="M14 20a4.2 4.2 0 0 1 8.4 0"/></symbol>
+    <symbol id="cursor" viewBox="0 0 24 24"><path d="M4.5 3.5 19 9.2l-6.3 2.4L10 18z"/><path d="M15 15l4.5 4.5"/></symbol>
+    <symbol id="pulse" viewBox="0 0 24 24"><path d="M2.5 12h4l2.5-6 3.5 12 2.5-6h6.5"/></symbol>
     <symbol id="plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
     <symbol id="book" viewBox="0 0 24 24"><path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></symbol>
     <symbol id="search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></symbol>
@@ -129,14 +132,15 @@
       <div class="story-copy">
         <span class="story-category"><svg class="icon"><use href="#book"/></svg>KNOWLEDGE YOU OWN</span>
         <h2>A knowledge base <br />your agent can <em>use.</em></h2>
-        <p>Vault is a folder of plain markdown on your disk — notes, docs, and wikilinks. Search it locally with tags and operators, and let the agent read, write, move, and file what it learns straight into it. Point Relay at any folder and hybrid search pulls the right passages into the turn.</p>
-        <div class="story-details"><span>Markdown vault</span><span>Wikilinks &amp; graph</span><span>Local folder search</span></div>
+        <p>Vault is a folder of plain markdown on your disk — notes, docs, and wikilinks. Search it locally with tags and operators, and let the agent read, write, move, and file what it learns straight into it. Point Relay at any folder and hybrid search pulls the right passages into the turn — or point it at a codebase and generate a <em>project wiki</em>, whose pages cite the file, line range, and blob SHA behind every claim and re-derive themselves when those files change.</p>
+        <div class="story-details"><span>Markdown vault</span><span>Generated project wiki</span><span>Wikilinks &amp; graph</span><span>Local folder search</span></div>
       </div>
       <div class="vault-visual" aria-label="Diagram of a markdown vault with a search, matching notes, and wikilinks">
         <div class="vault-bar"><svg class="icon"><use href="#book"/></svg> Vault <span>~/notes</span></div>
         <div class="vault-search"><svg class="icon"><use href="#search"/></svg><span>memory consolidation → 2 notes</span></div>
         <div class="vault-hit"><b>Memory design.md</b><small>…the judge decides <em>ADD / UPDATE / NOOP</em>…</small></div>
         <div class="vault-hit"><b>Session mesh.md</b><small>…agents can message <em>[[peer sessions]]</em>…</small></div>
+        <div class="vault-hit"><b>wiki/architecture.md</b><small>…12 claims, each citing <em>src/chat/ · L40–72</em>…</small></div>
         <div class="vault-note-card">
           <span class="mini-label">MEMORY DESIGN.MD</span>
           <p>The agent files what it learns back into <em>[[Session Mesh]]</em> and <em>[[Compaction]]</em>.</p>
@@ -157,7 +161,7 @@
       <article class="make-card"><svg class="icon"><use href="#doc"/></svg><h3>Documents</h3><p>Generate DOCX, PPTX, XLSX, and PDF from a plan — with a design layer and page-level checks.</p></article>
       <article class="make-card"><svg class="icon"><use href="#diagram"/></svg><h3>Diagrams</h3><p>Author Mermaid diagrams that restyle with your theme and export as transparent PNG.</p></article>
       <article class="make-card"><svg class="icon"><use href="#image"/></svg><h3>Images</h3><p>Paint PNGs with a local diffusion model. No cloud, no key, nothing leaving the machine.</p></article>
-      <article class="make-card"><svg class="icon"><use href="#mic"/></svg><h3>Voice</h3><p>Dictate prompts and have answers, docs, and PDFs read aloud — an in-process voice with a transport bar.</p></article>
+      <article class="make-card"><svg class="icon"><use href="#mic"/></svg><h3>Voice</h3><p>Dictate prompts, and have answers read aloud as they stream — hands-free, and it steps aside the moment you speak. Local TTS and STT; nothing leaves the machine.</p></article>
     </div>
   </section>
 
@@ -167,9 +171,12 @@
     <div class="toolkit-grid">
       <article class="tool-card"><svg class="icon"><use href="#terminal"/></svg><h3>Terminal panes</h3><p>Real PTY shells beside your agents, with background runs and per-task cleanup.</p></article>
       <article class="tool-card"><svg class="icon"><use href="#globe"/></svg><h3>Native browser</h3><p>WebView panes your agents can drive — read, click, type, and screenshot the page.</p></article>
+      <article class="tool-card"><svg class="icon"><use href="#cursor"/></svg><h3>Computer use</h3><p>Agents also operate Relay itself — clicking by element or by viewport pixel for canvas, charts and maps, then reading back what they hit.</p></article>
+      <article class="tool-card"><svg class="icon"><use href="#agents"/></svg><h3>Subagents</h3><p>Named agents with their own prompt, tools, model and worktree policy — spawned from a task, a button, the mesh, or an automation.</p></article>
       <article class="tool-card"><svg class="icon"><use href="#branch"/></svg><h3>Git &amp; pull requests</h3><p>Diffs, branches, worktrees, commit graph, and GitHub PRs without leaving the window.</p></article>
       <article class="tool-card"><svg class="icon"><use href="#clock"/></svg><h3>Automations</h3><p>Cron plus webhook, file-change, git-HEAD, and new-email triggers. Runs unattended — even while Relay is closed.</p></article>
       <article class="tool-card"><svg class="icon"><use href="#coin"/></svg><h3>Cost &amp; budgets</h3><p>Live token and cost tracking, auto-refreshed pricing, and what prompt caching saved you.</p></article>
+      <article class="tool-card"><svg class="icon"><use href="#pulse"/></svg><h3>Local model logs</h3><p>Every local-model request logged with tokens, time-to-first-token and throughput — plus a loopback gateway other apps can route through.</p></article>
       <article class="tool-card"><svg class="icon"><use href="#plug"/></svg><h3>Connectors</h3><p>OAuth to Notion, GitHub, Google Drive, Gmail, Calendar, YouTube, Canva, and more.</p></article>
       <article class="tool-card"><svg class="icon"><use href="#layers"/></svg><h3>MCP servers</h3><p>Attach gallery or custom MCP servers on demand, and reach them from any engine.</p></article>
       <article class="tool-card"><svg class="icon"><use href="#bolt"/></svg><h3>Hooks</h3><p>Run your own scripts before and after every tool call — deny, ask, or rewrite the arguments.</p></article>
@@ -203,7 +210,7 @@
       <h2 id="faq-title">A few good <br />questions.</h2>
     </div>
     <div class="faq-list">
-      <details><summary>What exactly is Relay?<svg class="icon"><use href="#plus"/></svg></summary><p>Relay is a local-first desktop workspace for AI coding agents. It hosts the agent CLIs you already use — Claude Code, Kimi Code, OpenCode, Pi, Omp, and CommandCode — alongside a built-in chat, plus a terminal, native browser, git tools, a markdown vault, persistent memory, and scheduled automations.</p></details>
+      <details><summary>What exactly is Relay?<svg class="icon"><use href="#plus"/></svg></summary><p>Relay is a local-first desktop workspace for AI coding agents. It hosts the agent CLIs you already use — Claude Code, Kimi Code, OpenCode, Pi, Omp, and CommandCode — alongside a built-in chat, plus a terminal, a native browser the agent can drive (and Relay's own interface too), git tools, a markdown vault and generated project wiki, named subagents, persistent memory, and scheduled automations.</p></details>
       <details><summary>Do I need to switch my coding agent?<svg class="icon"><use href="#plus"/></svg></summary><p>No. Bring the CLIs you already run, or use built-in chat with your own model provider. Sessions keep their history, and you can move a conversation between engines mid-thread.</p></details>
       <details><summary>Can I use local models?<svg class="icon"><use href="#plus"/></svg></summary><p>Yes. Browse and download GGUF models from Hugging Face and run them on your machine with llama-server. Local image generation and on-device voice are built in too. Performance depends on your hardware and the model you choose.</p></details>
       <details><summary>Where does my data live?<svg class="icon"><use href="#plus"/></svg></summary><p>Your workspace, chats, notes, and memory live on your machine, in a local database and folders you choose. The file tools stay inside the folders you grant. Cloud providers and connected services still receive whatever you send them.</p></details>
@@ -228,7 +235,7 @@
       <figure class="phone-visual">
         <div class="phone">
           <div class="phone-screen">
-            <img src="./app-mobile.webp" alt="The Relay mobile app on a phone: an offline badge above the heading “What are we building?”, a “Pair with your desktop” panel explaining the QR pairing step, a Scan QR button, and Home and Settings tabs." width="1179" height="2556" loading="lazy" />
+            <img src="./app-mobile.webp" alt="A real Relay Mobile home screen on Android: a green Connected badge beside the menu button, the greeting “Good evening — How can I help you tonight?”, suggestion cards for writing a document, explaining a concept, writing code and researching a topic, a local model chip above the message field, and the message composer." width="1080" height="2204" loading="lazy" />
           </div>
         </div>
         <figcaption>Relay Mobile — pair once by QR, then your chats follow you.</figcaption>

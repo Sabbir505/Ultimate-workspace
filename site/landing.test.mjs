@@ -23,8 +23,9 @@ test('the page shows real app captures, not hand-built mocks', () => {
   expect(mobile).not.toBeNull();
   expect(mobile.getAttribute('src')).toBe('./app-mobile.webp');
   expect(mobile.getAttribute('alt').length).toBeGreaterThan(40);
-  expect(mobile.getAttribute('width')).toBe('1179');
-  expect(mobile.getAttribute('height')).toBe('2556');
+  // A real device capture (Android home screen, status bar cropped).
+  expect(mobile.getAttribute('width')).toBe('1080');
+  expect(mobile.getAttribute('height')).toBe('2204');
 
   // The page must not resurrect the invented project name the old mock used.
   expect(document.body.textContent).not.toMatch(/\borbit\b/i);
@@ -37,6 +38,7 @@ test('page asserts the hero, the workspace, and the capability pillars', () => {
   for (const text of [
     'One workspace.', 'Many minds.', 'One window. Your whole project.',
     'Session Mesh', 'Vault', 'Automations', 'Mobile', 'Claude Code', 'OpenCode',
+    'Computer use', 'Subagents', 'project wiki',
   ]) {
     expect(document.body.textContent, text).toContain(text);
   }

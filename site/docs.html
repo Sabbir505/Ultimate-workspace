@@ -54,7 +54,7 @@
 
         <div class="prose">
           <h2 id="what">What Relay is</h2>
-          <p>Relay is a local-first desktop workspace for AI coding agents, built for Windows. It wraps the agent CLIs you already run — Claude Code, Kimi Code, OpenCode, Pi, Omp, and CommandCode — next to a built-in chat that talks to cloud providers or models on your own machine. Around the chats: a native browser pane, a git sidebar, a markdown Vault, scheduled automations, a cost dashboard, and a phone companion — one window instead of ten.</p>
+          <p>Relay is a local-first desktop workspace for AI coding agents, built for Windows. It wraps the agent CLIs you already run — Claude Code, Kimi Code, OpenCode, Pi, Omp, and CommandCode — next to a built-in chat that talks to cloud providers or models on your own machine. Around the chats: a native browser pane agents can drive (along with Relay's own interface), a git sidebar, a markdown Vault with a generated project wiki, a registry of named subagents, scheduled automations, a cost dashboard, and a phone companion — one window instead of ten.</p>
 
           <h2 id="install">Install &amp; update</h2>
           <ol>
@@ -65,17 +65,19 @@
 
           <h2 id="agents">Bring your agents</h2>
           <p>In <strong>Settings → Agent harnesses</strong> you can one-click install any supported CLI; if you already have one, Relay finds it on your PATH. Each agent runs in its own pane with real terminal emulation, keeps its own sessions, and can be resumed later. Or skip the CLIs: the <strong>built-in chat</strong> connects to Anthropic, OpenAI, OpenRouter, any OpenAI-compatible endpoint, or local GGUF models — your keys, your accounts, stored in your OS keychain.</p>
-          <p>Agents are not islands: up to <strong>six chats share one window</strong> as resizable panes, and the Session Mesh lets them see, consult, and message each other.</p>
+          <p>Agents are not islands: up to <strong>six chats share one window</strong> as resizable panes, and the Session Mesh lets them see, consult, and message each other. Reach for <strong>fork</strong> and a copy of a conversation — its config and its history up to the message you picked — opens beside it. Agents can also operate the browser pane, and Relay itself: by element ref, or by viewport pixel for the canvas and map content the DOM cannot name.</p>
 
           <h2 id="workspace">Workspace &amp; permissions</h2>
           <p>Pick a working folder and Relay scopes its file tools to the roots you grant — the agent works where you point it, not everywhere. Permission modes (read-only, plan, auto-edit, full auto) are one switch away in the composer, and native dialogs gate the few surfaces that execute arbitrary commands. A git sidebar with status, diffs, branches, worktrees and an AI diff review keeps the changes visible.</p>
 
           <h2 id="models">Local models</h2>
-          <p>The built-in <strong>Model Market</strong> browses and downloads GGUF models from Hugging Face and serves them with llama-server — chat, read-aloud (Kokoro TTS), speech-to-text (whisper), and even image generation (sd.cpp) can run entirely on your machine, with optional CUDA builds one click away in Settings.</p>
+          <p>The built-in <strong>Model Market</strong> browses and downloads GGUF models from Hugging Face and serves them with llama-server — chat, read-aloud (Kokoro TTS), speech-to-text (whisper), and even image generation (sd.cpp) can run entirely on your machine, with optional CUDA builds one click away in Settings. Every local call is logged — prompt, response, tokens, time-to-first-token, throughput — and a <strong>loopback gateway</strong> lets other apps route through the same sidecars.</p>
 
           <h2 id="beyond">Vault, automations &amp; more</h2>
           <ul>
             <li><strong>Vault</strong> — a bound folder of markdown notes the model can genuinely work in: operator search, atomic writes, vault-wide <code>[[wikilink]]</code> rewrites, recoverable deletes, a local graph, and an in-app PDF viewer.</li>
+            <li><strong>Project wiki</strong> — point Relay at a codebase and it builds a per-project knowledge base: a repo analysis, an outline, and one page per section, each ending in a grounded-claims ledger (file, line range, blob SHA). Freshness is computed from git, so only the pages whose evidence changed are re-derived.</li>
+            <li><strong>Subagents</strong> — define named agents with their own prompt, tool allowlist, permission scope, model, and worktree policy. Run them from the Task tool, a Run button, another session, or an automation — and import the subagents your CLI harness already ships.</li>
             <li><strong>Automations</strong> — cron schedules that fire even while Relay is closed, plus event triggers: an inbound webhook, a watched file, a git HEAD change, or new Gmail activity.</li>
             <li><strong>Making things</strong> — designed DOCX/PPTX/PDF documents, mermaid diagrams, and local image generation surface as artifacts you can preview, export, and voice-read.</li>
             <li><strong>Memory</strong> — a persistent, inspectable memory survives across chats; a Settings browser shows every stored fact and its evidence.</li>

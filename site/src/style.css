@@ -285,8 +285,10 @@ html.js [data-reveal].is-visible { opacity: 1; transform: none; }
 .mobile-cta .button-light { box-shadow: 0 3px 0 #00000045; }
 .mobile-cta-note { font-family: var(--font-mono); font-size: 8px; letter-spacing: .5px; color: #7f9a9c; }
 .phone-visual { display: flex; flex-direction: column; align-items: center; gap: 16px; margin: 0; }
-.phone { width: 272px; border-radius: 32px; border: 1px solid #38474d; background: #151d22; padding: 10px; box-shadow: 0 30px 60px #00000055; }
-.phone-screen { border-radius: 23px; overflow: hidden; background: #171614; }
+/* The figure is a real screen capture, so there is no bezel to draw: the
+   wrapper only rounds the crop and lifts it off the band with a shadow. */
+.phone { width: 272px; border-radius: 26px; overflow: hidden; box-shadow: 0 34px 70px #00000073, 0 2px 0 #ffffff0f; }
+.phone-screen { background: var(--night); }
 .phone-screen img { width: 100%; height: auto; display: block; }
 .phone-visual figcaption { font-family: var(--font-mono); font-size: 8px; letter-spacing: .5px; color: #7f9a9c; text-align: center; }
 

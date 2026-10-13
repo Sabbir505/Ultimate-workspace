@@ -42,7 +42,7 @@ function tool(title: string, detail = "", kind = "web"): string {
 
 afterEach(() => {
   cleanup();
-  useChatStore.setState({ stoppedPartial: {} });
+  useChatStore.setState({ stoppedPartial: {}, expandProcessIds: {} });
 });
 
 describe("MessageBubble stopped turns", () => {
@@ -65,6 +65,30 @@ describe("MessageBubble stopped turns", () => {
     useChatStore.setState({ stoppedPartial: { s1: "some other turn's partial" } });
     const { queryByText } = render(
       <MessageBubble message={assistantMsg(content)} chatSessionId="s1" />,
+    );
+    expect(queryByText(/solana validators/)).toBeNull();
+  });
+});
+
+describe("MessageBubble queued-follow-up turns", () => {
+  it("keeps a completed turn expanded while its message id is pinned", () => {
+    // A follow-up was queued mid-stream: onDone pinned this row's id
+    // (expandProcessIds) so the live→persisted swap doesn't fold the section
+    // the user was watching. The label stays "Worked" (not "Stopped").
+    const content = tool("Searching the web", "solana validators");
+    useChatStore.setState({ expandProcessIds: { s1: 1 } });
+    const { queryByText, container } = render(
+      <MessageBubble message={assistantMsg(content)} msgId={1} chatSessionId="s1" />,
+    );
+    expect(queryByText(/solana validators/)).not.toBeNull();
+    expect(container.querySelector(".chat-process-label")?.textContent).toBe("Worked");
+  });
+
+  it("still collapses completed turns pinned for a different row", () => {
+    const content = tool("Searching the web", "solana validators");
+    useChatStore.setState({ expandProcessIds: { s1: 2 } });
+    const { queryByText } = render(
+      <MessageBubble message={assistantMsg(content)} msgId={1} chatSessionId="s1" />,
     );
     expect(queryByText(/solana validators/)).toBeNull();
   });

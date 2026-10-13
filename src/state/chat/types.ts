@@ -241,11 +241,16 @@ export interface ChatState {
    *  the app lands ready-to-send on what the user last used. Null until the
    *  first pick (or when the stored blob is corrupt). */
   lastSelection: LastSelection | null;
-  error: string | null;
-  /** Machine-readable classification of the last chat:error for the active
-   *  session ("context_overflow", …) — null when unclassified. Cleared with
-   *  `error` everywhere `error` is cleared. */
-  errorCode: string | null;
+  /** Per-session error banner text (chatSessionId -> message). Absent = no
+   *  error for that chat. Keyed by session because every open chat view
+   *  (split panes included) renders its own banner — the old global scalars
+   *  painted one chat's failure into every other chat. Cleared (for the
+   *  sending session only) when its next turn starts. */
+  errorBySession: Record<string, string>;
+  /** Machine-readable classification of a session's last chat:error
+   *  ("context_overflow", …). Absent = unclassified. Cleared with the
+   *  session's `errorBySession` entry. */
+  errorCodeBySession: Record<string, string>;
   /** Reasoning effort sent with messages ("" = provider default). */
   effort: string;
   /** Per-session extended-thinking toggle. `true` enables the thinking
@@ -397,6 +402,14 @@ export interface ChatState {
    *  into an empty-looking "Worked" row erased it. Completed turns never
    *  match (their content differs), so they keep collapsing normally. */
   stoppedPartial: Record<string, string>;
+  /** Per-session message id whose persisted bubble keeps its process section
+   *  EXPANDED (set by onDone when the turn completed with a follow-up already
+   *  queued — the user was watching the section stream live, so the
+   *  live→persisted swap must not fold it the moment the queue drains). The
+   *  value is the completed assistant row's message id; a newer queued turn
+   *  supersedes it (the old bubble then collapses normally). In-memory only —
+   *  restarts open chats with completed turns collapsed, as always. */
+  expandProcessIds: Record<string, number>;
   /** Latest end-of-turn citation-integrity verdict per chat session
    *  (`chat:citation-report` — research turns only). Rendered as the trust
    *  strip above the composer: what the mechanical ledger lint verified about

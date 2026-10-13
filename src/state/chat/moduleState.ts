@@ -521,6 +521,8 @@ export function clearSessionState(s: ChatState, chatSessionId: string): Partial<
   delete lastTurnPerf[chatSessionId];
   const stoppedPartial = { ...s.stoppedPartial };
   delete stoppedPartial[chatSessionId];
+  const expandProcessIds = { ...s.expandProcessIds };
+  delete expandProcessIds[chatSessionId];
   const supersededPartial = { ...s.supersededPartial };
   delete supersededPartial[chatSessionId];
   // Turn-identity bookkeeping dies with the session: an armed stale-terminal
@@ -586,6 +588,7 @@ export function clearSessionState(s: ChatState, chatSessionId: string): Partial<
     artifactProposals,
     lastTurnPerf,
     stoppedPartial,
+    expandProcessIds,
     supersededPartial,
     staleTerminalFor,
     turnGeneration,

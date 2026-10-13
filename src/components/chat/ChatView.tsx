@@ -23,7 +23,7 @@ import { QuestionCard } from "./QuestionCard";
 import { PlanProposalCard } from "./PlanProposalCard";
 import type { PermissionMode, ChatTaskProgress } from "../../state/chat";
 import { HARNESS_PERMISSION_MODES, permissionModeToPolicies } from "../../state/chat";
-import { isCliAgent } from "../../state/chat/moduleState";
+import { isCliAgent, omitKey } from "../../state/chat/moduleState";
 import type { ChatPerfPayload, ChatMessageRecord } from "../../lib/ipc";
 // Stable fallback for the tasks-map selector below: a fresh `{}` literal per
 // store notification defeats zustand's Object.is bail-out and re-renders the
@@ -35,6 +35,22 @@ const EMPTY_TASKS: Record<string, ChatTaskProgress> = {};
 // don't churn) keeps the previous conversation — and its artifact chips and
 // turn-changes rows — off the screen until the right rows land.
 const NO_MESSAGES: ChatMessageRecord[] = [];
+// Resolved live-card anchors by FILE PATH (module scope, this app run only):
+// when a generation hands off to a history row — the next generation starts,
+// or the pane remounts — the static row reuses the placement the live card
+// settled on instead of re-deriving it from the content scan. Without this a
+// filename the model never echoes moved the image away from its turn at the
+// handoff. Bounded like the preview cache: only the newest entries matter.
+const RESOLVED_GEN_ANCHORS_MAX = 32;
+const resolvedGenAnchors = new Map<string, string>();
+function rememberGenAnchor(path: string | null, key: string | null) {
+  if (!path || !key) return;
+  if (!resolvedGenAnchors.has(path) && resolvedGenAnchors.size >= RESOLVED_GEN_ANCHORS_MAX) {
+    const oldest = resolvedGenAnchors.keys().next().value;
+    if (oldest != null) resolvedGenAnchors.delete(oldest);
+  }
+  resolvedGenAnchors.set(path, key);
+}
 // TypingIndicator is tiny and eager — imported from its own module so the
 // entry chunk doesn't statically pull in MessageBubble (react-markdown).
 import { TypingIndicator } from "./TypingIndicator";
@@ -138,7 +154,12 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
   const streaming = useChatStore((s) => s.streaming);
   const livePerf = useChatStore((s) => s.livePerf);
   const chatStatus = useChatStore((s) => s.chatStatus);
-  const error = useChatStore((s) => s.error);
+  // THIS view's session error only: every open chat view (split panes
+  // included) renders its own banner — a failure in one chat must never
+  // paint the others (the old global `error` scalar did exactly that).
+  const error = useChatStore((s) =>
+    activeChatSessionId ? s.errorBySession[activeChatSessionId] : undefined,
+  );
   const loaded = useChatStore((s) => s.loaded);
   const lastSelection = useChatStore((s) => s.lastSelection);
   const loadSessions = useChatStore((s) => s.loadSessions);
@@ -383,9 +404,11 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
   // meter ticks down right after compaction instead of waiting up to 2s for
   // the next interval.
   const compactionRevision = useChatStore((s) => s.compactionRevision);
-  // Classified chat:error code for the active session — keys the overflow
+  // Classified chat:error code for THIS view's session — keys the overflow
   // banner's actionable copy (see the chat-error block below).
-  const errorCode = useChatStore((s) => s.errorCode);
+  const errorCode = useChatStore((s) =>
+    activeChatSessionId ? s.errorCodeBySession[activeChatSessionId] : undefined,
+  );
   const liveUsage = useContextMeter({
     chatSessionId: activeChatSessionId,
     isLocal,
@@ -465,11 +488,17 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
         // (start_local_model stops any existing one), then point the session
         // at the local provider so subsequent sends hit its endpoint. On
         // failure the model is left untouched and the error is surfaced via
-        // the store's `error` field (the same `chat-error` banner provider
-        // errors use; formatChatError scrubs the noisy llama.cpp logs).
+        // the store's per-session `errorBySession` entry (the same
+        // `chat-error` banner provider errors use; formatChatError scrubs the
+        // noisy llama.cpp logs).
         const startErr = await spawnLocalModel(localMatch);
         if (startErr) {
-          useChatStore.setState({ error: startErr });
+          // Banner lands on THIS view's session only — the old global write
+          // painted the failure into every open chat.
+          useChatStore.setState((s) => ({
+            errorBySession: { ...s.errorBySession, [activeChatSessionId]: startErr },
+            errorCodeBySession: omitKey(s.errorCodeBySession, activeChatSessionId),
+          }));
           return;
         }
         // start_local_model persists chat.local_gguf.model + chat.active_provider
@@ -535,7 +564,10 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
       }
       const startErr = await spawnLocalModel(match, overrides);
       if (startErr) {
-        useChatStore.setState({ error: startErr });
+        useChatStore.setState((s) => ({
+          errorBySession: { ...s.errorBySession, [activeChatSessionId]: startErr },
+          errorCodeBySession: omitKey(s.errorCodeBySession, activeChatSessionId),
+        }));
         return;
       }
       const status = await localModelStatus().catch(() => null);
@@ -631,7 +663,10 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
         if (match) {
           const startErr = await spawnLocalModel(match);
           if (startErr) {
-            useChatStore.setState({ error: startErr });
+            useChatStore.setState((s) => ({
+              errorBySession: { ...s.errorBySession, [activeChatSessionId]: startErr },
+              errorCodeBySession: omitKey(s.errorCodeBySession, activeChatSessionId),
+            }));
             return;
           }
         }
@@ -920,7 +955,16 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
   // streaming bubble for the active session if tokens are arriving.
   const activeStream = activeChatSessionId ? (streaming[activeChatSessionId] ?? "") : "";
   const imageGenBusy = useImageGenStore((s) => s.busy);
-  const imageGenUpdate = useImageGenStore((s) => s.update);
+  // Slim subscriptions: the transcript only needs the lifecycle phase, the
+  // file path, and presence flags — the CARD reads the full update itself.
+  // Subscribing to the whole object made every step event (several per
+  // render) re-render the entire ChatView: ref churn, height writes, item
+  // re-splices — the churn that read as flaky while scrolling during a
+  // generation.
+  const imageGenHasUpdate = useImageGenStore((s) => s.update != null);
+  const imageGenPhase = useImageGenStore((s) => s.update?.phase ?? "");
+  const imageGenPath = useImageGenStore((s) => s.update?.path ?? "");
+  const imageGenHasDataUri = useImageGenStore((s) => s.update?.dataUri != null);
   const imageGenAnchorSessionId = useImageGenStore((s) => s.anchorSessionId);
   const attachImageGenSession = useImageGenStore((s) => s.attachSession);
   const imageGenHistory = useImageGenStore((s) => s.history);
@@ -941,11 +985,11 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
   // only pane. Owner-tagged events (chat tool path) set the anchor in the
   // store directly and never reach this effect.
   useEffect(() => {
-    if (!imageGenUpdate || imageGenAnchorSessionId != null) return;
+    if (!imageGenHasUpdate || imageGenAnchorSessionId != null) return;
     if (activeChatSessionId == null) return;
     if (isPaneView && !(activeChatSessionId in streaming)) return;
     attachImageGenSession(activeChatSessionId);
-  }, [imageGenUpdate, imageGenAnchorSessionId, activeChatSessionId, isPaneView, streaming, attachImageGenSession]);
+  }, [imageGenHasUpdate, imageGenAnchorSessionId, activeChatSessionId, isPaneView, streaming, attachImageGenSession]);
   // When a NEW generation starts, re-arm the transcript's follow/pin settle
   // window so the "Creating image" card mounts on-screen above the composer
   // dock. It arrives as a synthetic row without a message, so neither the
@@ -953,11 +997,23 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
   // streaming ABOVE the card churns row heights for its first seconds (the
   // virtualizer's estimates oscillate), so the re-arm repeats through that
   // window — and once more on "done", when the card swaps to the image.
-  // The timers live in a REF, not the effect's cleanup: the cleanup runs on
-  // the next progress event (milliseconds later on a warm server) and would
-  // otherwise kill the whole schedule before a single timer fired.
+  // The schedule stays short (the first seconds only): late re-arms used to
+  // fire 5–8s in, AFTER the swap, yanking a user who had scrolled away to
+  // look at the finished image back down — that read as the post-render
+  // shake. The timers live in a REF, not the effect's cleanup: the cleanup
+  // runs on the next progress event (milliseconds later on a warm server)
+  // and would otherwise kill the whole schedule before a single timer fired.
   const prevGenPhaseRef = useRef<string | null>(null);
   const genFollowTimersRef = useRef<number[]>([]);
+  // Frozen placement (key) for the live gen row, resolved once per generation
+  // — plus the message-list length captured when the generation started
+  // (`msgLen`), which is how the card finds its OWN turn's row (see the
+  // gen-row block below).
+  const genAnchorKeyRef = useRef<{ genId: number; key: string | null; msgLen: number | null }>({
+    genId: -1,
+    key: null,
+    msgLen: null,
+  });
   useEffect(
     () => () => {
       genFollowTimersRef.current.forEach((t) => window.clearTimeout(t));
@@ -965,7 +1021,7 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
     [],
   );
   useEffect(() => {
-    if (!imageGenUpdate) return;
+    if (!imageGenHasUpdate) return;
     // Foreign generations (another pane/session) don't get to yank THIS
     // pane's scroll position.
     if (
@@ -973,7 +1029,7 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
       imageGenAnchorSessionId !== activeChatSessionId
     )
       return;
-    const phase = imageGenUpdate.phase;
+    const phase = imageGenPhase;
     const isNewGen =
       (phase === "starting" || phase === "rendering") &&
       (prevGenPhaseRef.current == null ||
@@ -981,14 +1037,22 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
         prevGenPhaseRef.current === "error");
     prevGenPhaseRef.current = phase;
     if (isNewGen) {
+      // Pin for the card's FIRST appearance only — it mounts below the fold
+      // and would otherwise sit unseen. The later re-arms (the timers below,
+      // and the done swap) must NOT force the latch back on: they run while
+      // the render is still minutes away from finishing, and forcing them
+      // yanked whoever had scrolled up to read (the "flaky while scrolling
+      // during generation" report). The hook's nonce handler only re-settles
+      // a view that is still stuck.
+      stickToBottomRef.current = true;
       setGenFollowNonce((n) => n + 1);
       genFollowTimersRef.current.forEach((t) => window.clearTimeout(t));
-      genFollowTimersRef.current = [1500, 3000, 5000, 8000].map((ms) =>
+      genFollowTimersRef.current = [1500, 3000].map((ms) =>
         window.setTimeout(() => setGenFollowNonce((n) => n + 1), ms),
       );
     }
     if (phase === "done") setGenFollowNonce((n) => n + 1);
-  }, [imageGenUpdate, imageGenAnchorSessionId, activeChatSessionId]);
+  }, [imageGenHasUpdate, imageGenPhase, imageGenAnchorSessionId, activeChatSessionId]);
   const activeIsStreaming =
     activeChatSessionId != null && activeChatSessionId in streaming;
   const isStreaming = activeIsStreaming && activeStream.length > 0;
@@ -1471,15 +1535,22 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
   // messages.length, the live/typing rows flipping, or a session switch; only
   // the few proposal cards can change structure independently, so just their
   // ids + states fold into the signature.
+  //
+  // Image-gen rows are spliced into `items` in the render body (OUTSIDE these
+  // memos), so their mount/move/phase changes never move `persistedItems` —
+  // fold the gen state in explicitly, or the reconcile pass below never runs
+  // for a card mount / the done-swap and rows below sit at stale offsets for
+  // a frame (the shake right after a render completes).
+  const genStructureSig = `${imageGenGenId}:${imageGenPhase}:${imageGenPath}:${imageGenHistory.length}:${imageGenBusy ? 1 : 0}:${imageGenSuppressed ? 1 : 0}:${imageGenAnchorSessionId ?? ""}`;
   const structureSig = useMemo(() => {
     const proposals = activeChatSessionId
       ? artifactProposalsBySession[activeChatSessionId] ?? []
       : [];
-    let sig = `${activeChatSessionId ?? ""}|${persistedItems.length}|${messages.length}|${activeIsStreaming ? 1 : 0}${waitingForFirstToken ? 1 : 0}`;
+    let sig = `${activeChatSessionId ?? ""}|${persistedItems.length}|${messages.length}|${activeIsStreaming ? 1 : 0}${waitingForFirstToken ? 1 : 0}|${genStructureSig}`;
     for (const p of proposals) sig += `|${p.id}:${p.state}`;
     return sig;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [persistedItems, messages.length, activeChatSessionId, activeIsStreaming, waitingForFirstToken, artifactProposalsBySession]);
+  }, [persistedItems, messages.length, activeChatSessionId, activeIsStreaming, waitingForFirstToken, artifactProposalsBySession, genStructureSig]);
   useEffect(() => {
     // Reconcile mounted rows whose real DOM height drifted from the
     // virtualizer's cached size. The dangerous case: a row that mounts ALREADY
@@ -1523,11 +1594,12 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
   }, [structureSig, messages.length]);
 
   // Local image generation: inject the generating/finished card as a row
-  // anchored by CONTENT — under the assistant turn whose text cites the
-  // generated file (the harness reply embeds the exact path), falling back
-  // to the list end while that turn streams. The card stays attached to ITS
-  // assistant message when newer turns arrive, and PAST renders of this
-  // session re-attach the same way after an app restart (store history).
+  // anchored to the turn that produced it — the turn's persisted assistant
+  // row (preferred) or, for ownerless background renders, the message that
+  // cites the generated file. Falling back to the list end while nothing
+  // resolves. The card stays attached to ITS assistant message when newer
+  // turns arrive, and PAST renders of this session re-attach the same way
+  // after an app restart (store history).
   // Live-card visibility: hidden while a user-cancelled render's stale event
   // state lingers (suppressed && !busy — cancel keeps `update` so the store
   // can keep swallowing the abandoned render's late events), and only in the
@@ -1537,15 +1609,15 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
   const imageGenOwnedHere =
     imageGenAnchorSessionId == null || imageGenAnchorSessionId === activeChatSessionId;
   const imageGenActive =
-    imageGenUpdate != null && !(imageGenSuppressed && !imageGenBusy) && imageGenOwnedHere;
+    imageGenHasUpdate && !(imageGenSuppressed && !imageGenBusy) && imageGenOwnedHere;
   const genHistory = imageGenHistory.filter((h) => {
     if (h.sessionId !== activeChatSessionId) return false;
     // The live card is already showing this render as a finished image —
     // don't duplicate it as a static row too.
     return !(
-      imageGenUpdate?.phase === "done" &&
-      imageGenUpdate.dataUri != null &&
-      imageGenUpdate.path === h.path
+      imageGenPhase === "done" &&
+      imageGenHasDataUri &&
+      imageGenPath === h.path
     );
   });
   const genRowKey = `__imagegen__${imageGenGenId}`;
@@ -1560,11 +1632,14 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
   }
   // One pass over the timeline resolves EVERY generation basename at once —
   // per-entry findIndex scans were O(items × history) on every render pass
-  // (every token flush, every step event).
-  const genAnchorIndex = new Map<string, number>();
+  // (every token flush, every step event). Values are the matched item's KEY,
+  // not its index: the live card is spliced into `items` later in this same
+  // pass, so captured indices would be stale by the time the history rows
+  // below resolve their anchors (a history row then landed one slot off).
+  const genAnchorKeys = new Map<string, string>();
   {
     const bases: string[] = [];
-    const liveBase = imageGenUpdate?.path?.split(/[\\/]/).pop();
+    const liveBase = imageGenPath ? imageGenPath.split(/[\\/]/).pop() : undefined;
     if (imageGenActive && liveBase) bases.push(liveBase);
     genHistory.forEach((h) => {
       const b = h.path.split(/[\\/]/).pop() ?? h.path;
@@ -1575,35 +1650,111 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
         const c = items[i].content;
         if (typeof c !== "string") continue;
         for (const base of bases) {
-          if (!genAnchorIndex.has(base) && c.includes(base)) genAnchorIndex.set(base, i);
+          if (!genAnchorKeys.has(base) && c.includes(base)) {
+            genAnchorKeys.set(base, items[i].key);
+          }
         }
-        if (genAnchorIndex.size === bases.length) break;
+        if (genAnchorKeys.size === bases.length) break;
       }
     }
   }
-  const genAnchorFor = (base: string) => (base ? genAnchorIndex.get(base) ?? -1 : -1);
+  const genAnchorKeyFor = (base: string) => (base ? genAnchorKeys.get(base) : undefined);
   const genAlreadyInjected = items.some((it) => it.key === genRowKey);
-  const genFile = imageGenUpdate?.path?.split(/[\\/]/).pop();
+  const genFile = imageGenPath ? imageGenPath.split(/[\\/]/).pop() : undefined;
   if (imageGenActive) {
-    let genAnchorIdx = genFile ? genAnchorFor(genFile) : -1;
-    if (genAnchorIdx < 0) genAnchorIdx = items.length - 1;
+    // Placement is resolved ONCE per generation, then FROZEN to the resolved
+    // item's key. Two rules, in order:
+    //
+    //  1. TURN ANCHOR (primary): the generation ran inside a streaming turn,
+    //     so the first assistant message that lands at/after the list length
+    //     captured at generation start IS that turn's row. This is what keeps
+    //     the finished image attached to ITS turn. The content scan alone
+    //     can't: it usually first matches the LIVE bubble (the tool-call
+    //     markup carries the filename), whose key dies at the turn-end
+    //     identity swap — the anchor then never resolves and the card rides
+    //     the live edge into the NEXT turn. And when the model never echoes a
+    //     backend-chosen filename, the scan never matches at all.
+    //  2. CONTENT SCAN (fallback, persisted rows only): for generations with
+    //     no owning turn (background/ownerless), anchor to a message that
+    //     cites the file — never a live row (its key vanishes at turn end).
+    //
+    // Until a rule resolves, the card rides the live edge; when one first
+    // resolves, the row moves there exactly once and then stays put.
+    if (genAnchorKeyRef.current.genId !== imageGenGenId) {
+      genAnchorKeyRef.current = {
+        genId: imageGenGenId,
+        key: null,
+        msgLen: activeIsStreaming ? messages.length : null,
+      };
+    }
+    const anchorState = genAnchorKeyRef.current;
+    if (anchorState.key == null && anchorState.msgLen != null) {
+      for (let i = anchorState.msgLen; i < messages.length; i++) {
+        const m = messages[i];
+        // A retired (edit-forked) row is not the generating turn — the fork's
+        // replacement row owns the image.
+        if (m.role === "assistant" && m.id > 0 && !m.supersededBy) {
+          anchorState.key = `msg-${m.id}`;
+          break;
+        }
+      }
+    }
+    if (
+      anchorState.key == null &&
+      anchorState.msgLen == null &&
+      genFile &&
+      // NEVER resolve mid-stream: a persisted row an earlier turn wrote (or
+      // the model's own "I'll render X.png" text) would freeze the card into
+      // the middle of the transcript WHILE the agent streams — the preview
+      // appearing "in between the streaming position". Mid-stream the card
+      // rides the live edge; the scan may place it once the turn is over.
+      !activeIsStreaming
+    ) {
+      // Only for generations with NO owning turn (background/ownerless, or
+      // first seen after its turn ended). A turn-owned generation skips it
+      // entirely — a filename the model described in an EARLIER turn would
+      // otherwise freeze the card onto that old message.
+      const anchorKey = genAnchorKeyFor(genFile);
+      if (anchorKey != null) {
+        const matched = items.find((it) => it.key === anchorKey);
+        // Never a live row: its key dies at the turn-end identity swap.
+        if (matched && !matched.live) anchorState.key = anchorKey;
+      }
+    }
+    // Remember the resolved placement for the history row this path becomes
+    // at the next generation handoff (or a pane remount).
+    if (anchorState.key != null) rememberGenAnchor(imageGenPath || null, anchorState.key);
+    const frozenKey = anchorState.key;
     if (!genAlreadyInjected) {
-      items.splice(Math.min(genAnchorIdx + 1, items.length), 0, {
+      const anchorIdx =
+        frozenKey != null ? items.findIndex((it) => it.key === frozenKey) : -1;
+      const insertAt = anchorIdx >= 0 ? anchorIdx + 1 : items.length;
+      items.splice(Math.min(insertAt, items.length), 0, {
         key: genRowKey,
         role: "assistant",
         imagegen: true,
       } as unknown as (typeof items)[number]);
     } else {
-      // Follow the anchor if it moved (live bubble → persisted message swap).
       const cur = items.findIndex((it) => it.key === genRowKey);
-      if (cur >= 0 && cur !== genAnchorIdx + 1) {
-        items.splice(cur, 1);
-        items.splice(Math.min(genAnchorIdx + 1, items.length), 0, {
-          key: genRowKey,
-          role: "assistant",
-          imagegen: true,
-        } as unknown as (typeof items)[number]);
+      const anchorIdx =
+        frozenKey != null ? items.findIndex((it) => it.key === frozenKey) : -1;
+      if (cur >= 0 && anchorIdx >= 0) {
+        // Desired slot with the card REMOVED; move only when it disagrees —
+        // a frozen anchor makes later renders a no-op.
+        const desired = cur <= anchorIdx ? anchorIdx : anchorIdx + 1;
+        if (cur !== desired) {
+          items.splice(cur, 1);
+          const anchorIdxNow = items.findIndex((it) => it.key === frozenKey);
+          const target = anchorIdxNow >= 0 ? anchorIdxNow + 1 : items.length;
+          items.splice(Math.min(target, items.length), 0, {
+            key: genRowKey,
+            role: "assistant",
+            imagegen: true,
+          } as unknown as (typeof items)[number]);
+        }
       }
+      // No frozen anchor yet (or its row left the loaded window): leave the
+      // card where it rides — the live edge.
     }
   } else {
     // No live generation (sent, cancelled, or done-with-nothing-in-flight —
@@ -1612,25 +1763,51 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
     if (cur >= 0) items.splice(cur, 1);
   }
   // Past renders (restart persistence): one static row per history entry of
-  // this session, anchored by the same content rule; unknown anchors append
-  // at the end so the image is never lost.
+  // this session, anchored by the live card's remembered placement (this
+  // run), then the content rule; unknown anchors append at the end so the
+  // image is never lost.
   genHistory.forEach((h) => {
     const key = `__imagegen_h__${h.path}`;
     const base = h.path.split(/[\\/]/).pop() ?? h.path;
-    const anchorIdx = genAnchorFor(base);
+    // The live card's resolved placement wins (this run): the handoff to a
+    // history row must not move the image away from its turn. Falling back to
+    // the content scan (restart persistence) and then the list end.
+    const remembered = resolvedGenAnchors.get(h.path);
+    const rememberedIdx =
+      remembered != null ? items.findIndex((it) => it.key === remembered) : -1;
+    const anchorKey =
+      (rememberedIdx >= 0 ? remembered : undefined) ?? genAnchorKeyFor(base);
+    const anchorIdx = anchorKey != null ? items.findIndex((it) => it.key === anchorKey) : -1;
     const cur = items.findIndex((it) => it.key === key);
     if (cur >= 0) {
-      if (anchorIdx >= 0 && cur !== anchorIdx + 1) {
-        items.splice(cur, 1);
-        items.splice(Math.min(anchorIdx + 1, items.length), 0, {
-          key,
-          role: "assistant",
-          imagegen: true,
-          genEntry: h,
-        } as unknown as (typeof items)[number]);
+      if (anchorIdx >= 0) {
+        // Same desired-slot math as the live row: resolve against the array
+        // WITHOUT the row itself, so a row sitting above its anchor doesn't
+        // inherit the removal shift (the old `cur !== anchorIdx + 1` check
+        // then inserted one slot off).
+        const desired = cur <= anchorIdx ? anchorIdx : anchorIdx + 1;
+        if (cur !== desired) {
+          items.splice(cur, 1);
+          const anchorIdxNow =
+            anchorKey != null ? items.findIndex((it) => it.key === anchorKey) : -1;
+          const target = anchorIdxNow >= 0 ? anchorIdxNow + 1 : items.length;
+          items.splice(Math.min(target, items.length), 0, {
+            key,
+            role: "assistant",
+            imagegen: true,
+            genEntry: h,
+          } as unknown as (typeof items)[number]);
+        }
       }
     } else {
-      const insertAt = anchorIdx >= 0 ? anchorIdx + 1 : items.length;
+      let insertAt = anchorIdx >= 0 ? anchorIdx + 1 : items.length;
+      if (anchorIdx < 0) {
+        // Unanchored: never BELOW the in-progress card — the live generation
+        // is the live edge and must stay the last row on screen; an older
+        // finished image stacking beneath it read as misaligned cards.
+        const liveIdx = items.findIndex((it) => it.key === genRowKey);
+        if (liveIdx >= 0) insertAt = liveIdx;
+      }
       items.splice(insertAt, 0, {
         key,
         role: "assistant",

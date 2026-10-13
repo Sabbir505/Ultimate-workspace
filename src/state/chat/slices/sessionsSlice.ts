@@ -43,6 +43,7 @@ import {
   markManuallyRenamed,
   maybeEnsureWorktree,
   mergeOptimistic,
+  omitKey,
   patchSessions,
   policiesToPermissionMode,
   sortSessions,
@@ -206,10 +207,10 @@ export function createSessionsSlice(set: ChatStoreSet, get: ChatStoreGet) {
       const wasUnread = get().sessions.find((s) => s.id === chatSessionId)?.unread ?? false;
       // Reset the per-session thinking override to the provider default
       // whenever the user switches chats. The "brain" button is per-session.
+      // Errors need no clearing here: they live per session
+      // (`errorBySession`) and surface only in their own chat's view.
       set((s) => ({
         activeChatSessionId: chatSessionId,
-        error: null,
-        errorCode: null,
         thinking: null,
         sessions: s.sessions.map((sess) =>
           sess.id === chatSessionId && sess.unread ? { ...sess, unread: false } : sess,
@@ -439,8 +440,10 @@ export function createSessionsSlice(set: ChatStoreSet, get: ChatStoreGet) {
               : Object.fromEntries(
                   Object.entries(s.sessionProjects).filter(([id]) => id !== active.id),
                 ),
-          error: null,
-          errorCode: null,
+          // The reused chat is being re-seeded as a fresh one — drop ITS
+          // error (and only its) so a stale banner can't survive the reset.
+          errorBySession: omitKey(s.errorBySession, active.id),
+          errorCodeBySession: omitKey(s.errorCodeBySession, active.id),
         }));
         // Give the (possibly just rebound) chat its own worktree, fire-and-forget.
         void maybeEnsureWorktree(get().sessions.find((s) => s.id === active.id), set);
@@ -473,8 +476,6 @@ export function createSessionsSlice(set: ChatStoreSet, get: ChatStoreGet) {
           activeChatSessionId: session.id,
           messages: [],
           messagesSessionId: session.id,
-          error: null,
-          errorCode: null,
           // Seed the in-memory binding cache from the persisted value so the
           // composer notch + working-dir resolution work before first send.
           sessionProjects:

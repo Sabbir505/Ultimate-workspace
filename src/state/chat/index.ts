@@ -84,8 +84,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   turnGeneration: {},
   config: null,
   lastSelection: null,
-  error: null,
-  errorCode: null,
+  errorBySession: {},
+  errorCodeBySession: {},
   effort: "",
   // null = no override (provider default). The composer's "brain" button
   // flips this to true/false and resets to null on session change.
@@ -134,6 +134,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   sessionMetrics: {},
   loopState: {},
   stoppedPartial: {},
+  expandProcessIds: {},
   citationReports: {},
 
   ...createSessionsSlice(set, get),

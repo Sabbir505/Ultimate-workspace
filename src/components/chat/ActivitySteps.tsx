@@ -1104,10 +1104,10 @@ export function ProcessSummary({
 }: {
   live: boolean;
   label: string;
-  /** True when the turn ended WITHOUT a duration (the user pressed stop).
-   *  Completed turns auto-collapse; a stopped turn keeps whatever expansion
-   *  it had — its process steps are the only content it produced, and
-   *  folding them into an empty-looking "Worked" row erases the turn. */
+  /** True when the turn ended but its process section must NOT auto-collapse:
+   *  the user pressed stop (the steps are the only content that turn
+   *  produced), or a follow-up was already queued when it completed (the
+   *  user was watching the section live — see `expandProcessIds`). */
   keepExpandedOnEnd?: boolean;
   /** Titles of the visualization cards that render INSIDE this region (the
    *  mid-turn ones). Naming them in the collapsed row is what keeps an

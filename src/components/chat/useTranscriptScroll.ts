@@ -539,11 +539,13 @@ export function useTranscriptScroll({
   // card, extra input line) re-pins the view instead of eating the gap.
   useEffect(() => {
     // A bumped followNonce means new out-of-band content (the image-gen
-    // card): want the live edge again, even if the user had scrolled away —
-    // the card mounts below the fold and would otherwise sit unseen.
+    // card): re-arm the settle window below. It must NOT force the latch
+    // back on — the CALLER pins explicitly for the card's first appearance
+    // (see ChatView's gen-follow effect), and forcing here made every later
+    // re-arm (the 1.5s/3s bumps, the done swap) yank a reader who had
+    // scrolled up mid-render back to the bottom.
     if (followNonce != null && followNonce !== prevFollowNonceRef.current) {
       prevFollowNonceRef.current = followNonce;
-      stickToBottomRef.current = true;
     }
     const patchTailAndPin = () => {
       const el = messagesContainerRef.current;

@@ -29,13 +29,16 @@ function useWave(active: boolean) {
   return phase;
 }
 
-function DotMatrix({ phase, elapsed }: { phase: number; elapsed: number }) {
+function DotMatrix({ phase, elapsed, aspect }: { phase: number; elapsed: number; aspect?: string }) {
   const dots = Array.from({ length: DOT_COUNT }, (_, i) => i);
   return (
     <div
       style={{
         width: 300,
-        height: 300,
+        // Same box as the finished image (the render's own aspect, known from
+        // the starting/rendering payload): the progress→done swap is then a
+        // pure content change with ZERO height delta.
+        aspectRatio: aspect ?? "1 / 1",
         background: "#0b0b0d",
         borderRadius: 12,
         padding: 12,
@@ -105,10 +108,17 @@ function SaveIcon() {
 function GenImageDone({
   dataUri,
   filename,
+  width,
+  height,
 }: {
   dataUri: string;
   filename?: string;
+  /** The render's pixel size from the payload — reserves the box's aspect
+   *  before the bitmap decodes (see the img comment below). */
+  width?: number;
+  height?: number;
 }) {
+  const aspect = width && height ? `${width} / ${height}` : undefined;
   const copyImage = async () => {
     try {
       const blob = await (await fetch(dataUri)).blob();
@@ -132,6 +142,11 @@ function GenImageDone({
         alt="Generated image"
         style={{
           width: "100%",
+          // Reserve the payload's aspect box BEFORE the bitmap decodes: an
+          // image with no intrinsic size starts at ~0 height and snaps to
+          // full height one frame later, shifting every row below it — the
+          // transcript shake right after a render completes.
+          ...(aspect ? { aspectRatio: aspect } : null),
           borderRadius: 12,
           display: "block",
           border: "1px solid var(--border, rgba(255,255,255,0.08))",
@@ -260,6 +275,8 @@ export function ImageGenCard({
         <GenImageDone
           dataUri={staticUri}
           filename={entryPath?.split(/[\\/]/).pop()}
+          width={entry.width}
+          height={entry.height}
         />
       );
     }
@@ -268,7 +285,11 @@ export function ImageGenCard({
         <div
           style={{
             width: 300,
-            height: 200,
+            // Hold the finished image's box while the file hydrates (fallback
+            // 3:2 matches the old placeholder) — the row never resizes when
+            // the preview lands.
+            aspectRatio:
+              entry.width && entry.height ? `${entry.width} / ${entry.height}` : "3 / 2",
             borderRadius: 12,
             border: "1px solid var(--border, rgba(255,255,255,0.08))",
             background: "rgba(255,255,255,0.02)",
@@ -307,7 +328,13 @@ export function ImageGenCard({
         <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-dim)" }}>
           Creating image
         </div>
-        <DotMatrix phase={wave} elapsed={elapsed} />
+        <DotMatrix
+          phase={wave}
+          elapsed={elapsed}
+          aspect={
+            update.width && update.height ? `${update.width} / ${update.height}` : undefined
+          }
+        />
       </div>
     );
   }
@@ -317,6 +344,8 @@ export function ImageGenCard({
       <GenImageDone
         dataUri={update.dataUri}
         filename={update.path?.split(/[\\/]/).pop()}
+        width={update.width}
+        height={update.height}
       />
     );
   }

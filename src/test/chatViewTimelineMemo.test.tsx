@@ -109,7 +109,7 @@ beforeEach(() => {
     artifactsByMessage: {},
     tasks: {},
     loopState: {},
-    error: null,
+    errorBySession: {},
   });
 });
 

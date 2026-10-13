@@ -296,8 +296,8 @@ export function createStreamingSlice(set: ChatStoreSet, get: ChatStoreGet) {
             [activeChatSessionId]: (s.turnGeneration[activeChatSessionId] ?? 0) + 1,
           },
           staleTerminalFor: omitKey(s.staleTerminalFor, activeChatSessionId),
-          error: null,
-          errorCode: null,
+          errorBySession: omitKey(s.errorBySession, activeChatSessionId),
+          errorCodeBySession: omitKey(s.errorCodeBySession, activeChatSessionId),
         };
       });
 
@@ -371,17 +371,15 @@ export function createStreamingSlice(set: ChatStoreSet, get: ChatStoreGet) {
           const chatStatus = { ...get().chatStatus };
           delete streaming[activeChatSessionId];
           delete chatStatus[activeChatSessionId];
-          // Gate the banner on the session still being the active one — a
-          // split-pane send failure must not surface the error in every open
-          // chat view (same guard as onError).
+          // Write the banner to THIS session's slot only — a split-pane send
+          // failure must not surface the error in every open chat view; every
+          // chat carries its own error.
           set((s) => ({
             streamingChatSessionId: null,
             streaming,
             chatStatus,
-            error:
-              s.activeChatSessionId === activeChatSessionId ? String(err) : s.error,
-            errorCode:
-              s.activeChatSessionId === activeChatSessionId ? null : s.errorCode,
+            errorBySession: { ...s.errorBySession, [activeChatSessionId]: String(err) },
+            errorCodeBySession: omitKey(s.errorCodeBySession, activeChatSessionId),
           }));
           return;
         }
@@ -415,17 +413,15 @@ export function createStreamingSlice(set: ChatStoreSet, get: ChatStoreGet) {
         const chatStatus = { ...get().chatStatus };
         delete streaming[activeChatSessionId];
         delete chatStatus[activeChatSessionId];
-        // Gate the banner on the session still being the active one — a
-        // split-pane send failure must not surface the error in every open
-        // chat view (same guard as onError).
+        // Write the banner to THIS session's slot only — a split-pane send
+        // failure must not surface the error in every open chat view; every
+        // chat carries its own error.
         set((s) => ({
           streamingChatSessionId: null,
           streaming,
           chatStatus,
-          error:
-            s.activeChatSessionId === activeChatSessionId ? String(err) : s.error,
-          errorCode:
-            s.activeChatSessionId === activeChatSessionId ? null : s.errorCode,
+          errorBySession: { ...s.errorBySession, [activeChatSessionId]: String(err) },
+          errorCodeBySession: omitKey(s.errorCodeBySession, activeChatSessionId),
         }));
       }
     },
@@ -954,6 +950,14 @@ cancelStream: async (sessionIdOverride?: string) => {
             ...bufferWriteBack(s, chatSessionId, messages, { merge: true }),
             artifactsByMessage,
             pendingArtifacts: nextPending,
+            // A follow-up was already queued while this turn streamed (the
+            // drain below runs after this set): the user was watching the
+            // process section live, so pin the completed row so the
+            // live→persisted swap doesn't fold it in that same frame.
+            expandProcessIds:
+              lastAssistant && (s.messageQueue[chatSessionId]?.length ?? 0) > 0
+                ? { ...s.expandProcessIds, [chatSessionId]: lastAssistant.id }
+                : s.expandProcessIds,
           };
         });
       }
@@ -1079,7 +1083,9 @@ cancelStream: async (sessionIdOverride?: string) => {
       const partial =
         live.trim().length > 0 ? live : (get().supersededPartial[chatSessionId] ?? "");
       const hadPartial = chatSessionId in get().streaming && partial.trim().length > 0;
-      // Clear streaming state and surface the error for the active session.
+      // Clear streaming state and surface the error for the session that
+      // errored — its own chat view renders the banner, no matter which chat
+      // the user is currently looking at.
       // Also drop this session's live-perf chip and pending-artifact buffer —
       // onDone clears both, and an errored turn must not leave them stuck
       // (audit H3).
@@ -1102,11 +1108,13 @@ cancelStream: async (sessionIdOverride?: string) => {
           : omitKey(s.stoppedPartial, chatSessionId),
         streamingChatSessionId:
           s.streamingChatSessionId === chatSessionId ? null : s.streamingChatSessionId,
-          error:
-            s.activeChatSessionId === chatSessionId ? message : s.error,
-          errorCode:
-            s.activeChatSessionId === chatSessionId ? (code ?? null) : s.errorCode,
-        })),
+        // Keyed by the errored session: the banner renders in THAT chat's
+        // view only, and a send in another chat can't clear it.
+        errorBySession: { ...s.errorBySession, [chatSessionId]: message },
+        errorCodeBySession: code
+          ? { ...s.errorCodeBySession, [chatSessionId]: code }
+          : omitKey(s.errorCodeBySession, chatSessionId),
+      })),
       // Artifact telemetry (SELF_IMPROVING_ARTIFACTS.md §5.2): the turn errored,
       // so open runs count as failed with the classified error code.
       void finishArtifactRuns(chatSessionId, "failed", code ?? undefined).catch(() => {});

@@ -14,6 +14,9 @@
 // 3. Auto-opened artifact tabs are tagged with their chat and swept when the
 //    active chat changes (the shared tool panel used to keep showing the
 //    previous chat's file under the new chat).
+// 4. Chat errors live per session (`errorBySession` / `errorCodeBySession`):
+//    a failure in one chat renders its banner only in that chat's view (the
+//    old global scalar painted it into every open chat).
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const getChatMessagesMock = vi.fn();
@@ -31,6 +34,7 @@ vi.mock("../lib/ipc", () => ({
   touchChatSession: (...a: unknown[]) => touchChatSessionMock(...a),
   setChatSessionUnread: vi.fn().mockResolvedValue(undefined),
   toastError: (...a: unknown[]) => toastErrorMock(...a),
+  finishArtifactRuns: vi.fn().mockResolvedValue(undefined),
   // The store imports further members at module load; stub the rest so the
   // module evaluates without a Tauri runtime.
   deleteChatSession: vi.fn().mockResolvedValue(undefined),
@@ -107,8 +111,8 @@ beforeEach(() => {
     rememberedChatPaneState: null,
     streaming: {},
     chatStatus: {},
-    error: null,
-    errorCode: null,
+    errorBySession: {},
+    errorCodeBySession: {},
   });
   useUiStore.setState({
     openTabs: [],
@@ -188,6 +192,31 @@ describe("chat-switch buffer ownership", () => {
     );
     expect(patch).toEqual({});
     expect(useChatStore.getState().messages.map((m) => m.id)).toEqual([1]);
+  });
+});
+
+describe("chat errors are scoped to their chat", () => {
+  it("an error from one chat never appears in another chat's slot", () => {
+    // Chat B's turn errors while chat A is the active one (e.g. a pinned
+    // split pane). The old global `error` scalar painted B's banner in every
+    // open chat view.
+    useChatStore
+      .getState()
+      .onError("b", "HTTP 400 Bad Request: bad request", "invalid_request");
+    const s = useChatStore.getState();
+    expect(s.errorBySession["b"]).toContain("bad request");
+    expect(s.errorCodeBySession["b"]).toBe("invalid_request");
+    expect(s.errorBySession["a"]).toBeUndefined();
+    expect(s.errorCodeBySession["a"]).toBeUndefined();
+  });
+
+  it("errors from two chats coexist independently", () => {
+    useChatStore.getState().onError("a", "chat a broke", null);
+    useChatStore.getState().onError("b", "chat b broke", "usage_limit");
+    const s = useChatStore.getState();
+    expect(s.errorBySession).toEqual({ a: "chat a broke", b: "chat b broke" });
+    // A null code must not plant a classification for the chat.
+    expect(s.errorCodeBySession).toEqual({ b: "usage_limit" });
   });
 });
 

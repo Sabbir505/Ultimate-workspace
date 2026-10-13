@@ -1977,7 +1977,23 @@ async fn post_generation(
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("image generation request failed: {e}"))?;
+        .map_err(|e| {
+            // reqwest's Display only says "error sending request for url (…)"
+            // — the actual cause (connection refused vs. a connection that
+            // died mid-render) lives in the source chain. Without it a dead
+            // sidecar and a foreign process on the port read identically in
+            // the UI, which is exactly the ambiguity that made this failure
+            // undiagnosable from the chat card.
+            let mut msg = format!("image generation request failed: {e}");
+            let mut source: Option<&(dyn std::error::Error + 'static)> =
+                std::error::Error::source(&e);
+            while let Some(s) = source {
+                msg.push_str(" — ");
+                msg.push_str(&s.to_string());
+                source = std::error::Error::source(s);
+            }
+            msg
+        })?;
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {

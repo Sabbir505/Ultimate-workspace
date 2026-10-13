@@ -173,6 +173,15 @@ function MessageBubbleInner({
     message.durationSec == null &&
     stoppedPartial != null &&
     stoppedPartial === message.content;
+  // A COMPLETED turn keeps its process section expanded when a follow-up was
+  // already queued while it streamed (onDone pins this row's message id in
+  // `expandProcessIds`). The user was watching the section live; folding it
+  // the instant the queue drains read as the content disappearing. Cleared
+  // implicitly when a newer queued turn pins its own id.
+  const expandProcessId = useChatStore((s) =>
+    chatSessionId ? s.expandProcessIds[chatSessionId] : undefined,
+  );
+  const keepProcessOpen = endedByStop || (msgId != null && expandProcessId === msgId);
 
   // Parse attachment markers (e.g. "[Attached image: x]") out of the content
   // so they render as visual cards above the text instead of inline strings.
@@ -498,7 +507,7 @@ function MessageBubbleInner({
                     <ProcessSummary
                       live={live === true}
                       label={processLabel}
-                      keepExpandedOnEnd={endedByStop}
+                      keepExpandedOnEnd={keepProcessOpen}
                       cards={inside
                         .filter((b): b is Extract<Block, { kind: "viz" }> => b.kind === "viz")
                         .map((b) => b.step.data?.detail ?? b.step.data?.title ?? "")

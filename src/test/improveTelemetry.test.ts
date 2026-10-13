@@ -52,6 +52,7 @@ vi.mock("../lib/ipc", async (importOriginal) => {
 });
 
 import { GOAL_LOOP_MAX, useChatStore } from "../state/chat";
+import { getChatMessages } from "../lib/ipc";
 
 function armLoop(sessionId = "s1") {
   useChatStore.setState({
@@ -66,7 +67,13 @@ beforeEach(() => {
   loopSessionAdvance.mockResolvedValue(undefined);
   loopSessionFinish.mockResolvedValue(undefined);
   finishArtifactRuns.mockResolvedValue(1);
-  useChatStore.setState({ loopState: {}, activeChatSessionId: "s1", streaming: {} });
+  useChatStore.setState({
+    loopState: {},
+    activeChatSessionId: "s1",
+    streaming: {},
+    expandProcessIds: {},
+    messageQueue: {},
+  });
 });
 
 describe("loop backend persistence", () => {
@@ -144,8 +151,43 @@ describe("turn outcome telemetry", () => {
 
   it("telemetry failures never break the turn handlers", async () => {
     finishArtifactRuns.mockRejectedValueOnce(new Error("db closed"));
-    useChatStore.setState({ activeChatSessionId: "s1", error: null, errorCode: null });
+    useChatStore.setState({ activeChatSessionId: "s1", errorBySession: {}, errorCodeBySession: {} });
     await expect(useChatStore.getState().onDone("s1", 1, 1, null)).resolves.toBeUndefined();
-    expect(useChatStore.getState().error).toBeNull();
+    expect(useChatStore.getState().errorBySession["s1"]).toBeUndefined();
+  });
+});
+
+describe("onDone process-section pinning (queued follow-ups)", () => {
+  const assistantRow = (id: number) =>
+    ({
+      id,
+      chatSessionId: "s1",
+      role: "assistant",
+      content: "all done",
+      inputTokens: null,
+      outputTokens: null,
+      costUsd: null,
+      createdAt: 0,
+      startedAt: null,
+      completedAt: null,
+    }) as never;
+
+  it("pins the completed row's process section when a follow-up was queued", async () => {
+    vi.mocked(getChatMessages).mockResolvedValueOnce([assistantRow(7)]);
+    useChatStore.setState({
+      activeChatSessionId: "s1",
+      messageQueue: { s1: [{ id: 99, content: "next please", attachments: [] }] } as never,
+    });
+    await useChatStore.getState().onDone("s1", 1, 1, null);
+    // The persisted row the user was watching must stay expanded across the
+    // live→persisted swap (the queue drains right after onDone).
+    expect(useChatStore.getState().expandProcessIds["s1"]).toBe(7);
+  });
+
+  it("leaves completed turns on the normal collapse path without a queue", async () => {
+    vi.mocked(getChatMessages).mockResolvedValueOnce([assistantRow(7)]);
+    useChatStore.setState({ activeChatSessionId: "s1", messageQueue: {} });
+    await useChatStore.getState().onDone("s1", 1, 1, null);
+    expect(useChatStore.getState().expandProcessIds["s1"]).toBeUndefined();
   });
 });

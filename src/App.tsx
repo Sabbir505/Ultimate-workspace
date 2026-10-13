@@ -55,6 +55,7 @@ import { useChatEvents } from "./hooks/useChatEvents";
 import { useTtsAutoRead, useTtsStreamRead } from "./hooks/useTtsAutoRead";
 import { VoiceLoopController } from "./hooks/useVoiceLoop";
 import { useAutomationEvents } from "./hooks/useAutomationEvents";
+import { warmCostRollups } from "./hooks/useCostRollups";
 import { useBudgetEvents } from "./hooks/useBudgetEvents";
 import { useUsageLimitEvents } from "./hooks/useUsageLimitEvents";
 import { useMemoryEvents } from "./hooks/useMemoryEvents";
@@ -243,8 +244,18 @@ export default function App() {
     const updaterStore = useUpdaterStore.getState();
     void updaterStore.check();
     const FOUR_HOURS = 4 * 60 * 60 * 1000;
-    const timer = window.setInterval(() => void updaterStore.check(), FOUR_HOURS);
-    return () => window.clearInterval(timer);
+    const updaterTimer = window.setInterval(() => void updaterStore.check(), FOUR_HOURS);
+    // Usage dashboard warm-up: the rollup cache is in-memory and per-session
+    // (useCostRollups), so without a boot fetch the first dashboard open of
+    // every launch is the cold path — spinner plus the full window
+    // aggregation. Deferred a beat so it doesn't compete with the boot IPC
+    // burst above; by the time the dashboard is opened there's a payload to
+    // paint immediately.
+    const warmTimer = window.setTimeout(() => warmCostRollups(), 2000);
+    return () => {
+      window.clearInterval(updaterTimer);
+      window.clearTimeout(warmTimer);
+    };
   }, []);
 
   useTheme();

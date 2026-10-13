@@ -20,12 +20,35 @@ export function CostDashboard() {
   // Live price table (LiteLLM): age of the stored blob + a manual re-fetch,
   // so the user can see (and fix) stale rates without leaving the dashboard.
   const [priceFetchedAt, setPriceFetchedAt] = useState<number | null>(null);
+  // True while the open-time price re-fetch is in flight (below) so the bar
+  // can say so instead of changing silently.
+  const [pricesUpdating, setPricesUpdating] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  // The stored blob is refreshed by a background job ~60s after boot and then
+  // only once a day (lib.rs setup), and a failed run sleeps 24h before
+  // retrying — so without this the "Live prices updated" line (and the rates
+  // behind it) sits at the last background fetch, a day stale however often
+  // the dashboard is opened. Every open re-fetches: the same deal the plan
+  // windows get, so the "Live prices updated" line tracks a fetch the user
+  // just triggered rather than one that happened at boot.
   useEffect(() => {
     let cancelled = false;
-    void getPriceInfo()
-      .then(info => { if (!cancelled) setPriceFetchedAt(info.fetchedAt); })
-      .catch(() => { /* non-fatal — the price bar just shows no age */ });
+    void (async () => {
+      try {
+        const info = await getPriceInfo();
+        if (cancelled) return;
+        setPriceFetchedAt(info.fetchedAt);
+        setPricesUpdating(true);
+        const report = await pricesRefreshNow();
+        if (cancelled) return;
+        if (report) setPriceFetchedAt(report.fetchedAt);
+      } catch {
+        // Non-fatal: the bar keeps reporting the stored blob's age — stale
+        // rates beat no rates (same tolerance as a failed manual fetch).
+      } finally {
+        if (!cancelled) setPricesUpdating(false);
+      }
+    })();
     return () => { cancelled = true; };
   }, []);
   // OPEN pulls a fresh-ish snapshot instead of only re-reading local caches:
@@ -86,6 +109,9 @@ export function CostDashboard() {
                 ? `Live prices updated ${new Date(priceFetchedAt * 1000).toLocaleString()}`
                 : "Live prices not fetched yet — using the built-in rate table"}
             </span>
+            {/* Open-time re-fetch (see the effect above): without this cue
+                the dashboard spins and the line never visibly moves. */}
+            {pricesUpdating && <span className="cost-refreshing-note">Updating…</span>}
           </div>
           {error && (
             <div className="cost-error">

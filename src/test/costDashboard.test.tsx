@@ -1,7 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { CostDashboard } from "../components/cost-dashboard/CostDashboard";
-import { getCostRollups } from "../lib/ipc";
+import { getCostRollups, getPriceInfo, pricesRefreshNow } from "../lib/ipc";
 
 // Shared fixture: the hoisted factory mock below resolves with it, and the
 // in-place range-switch test re-uses it as the payload that eventually
@@ -27,6 +27,11 @@ vi.mock("../lib/ipc", async (importOriginal) => {
     ...actual,
     getCostRollups: vi.fn().mockResolvedValue(ROLLUPS_PAYLOAD),
     safeListen: vi.fn().mockResolvedValue(() => {}),
+    // Stored price blob markers. Default: never fetched (null age) — the
+    // per-test overrides below drive both branches of the open-time
+    // staleness gate.
+    getPriceInfo: vi.fn().mockResolvedValue({ fetchedAt: null }),
+    pricesRefreshNow: vi.fn().mockResolvedValue(null),
     getArtifactCosts: vi.fn().mockResolvedValue([
       {
         artifactId: "a1",
@@ -44,6 +49,14 @@ vi.mock("../lib/ipc", async (importOriginal) => {
 });
 
 describe("CostDashboard", () => {
+  beforeEach(() => {
+    // The price mocks are module-level spies: clear CALLS only (implementations
+    // are re-set per test below) so call-count assertions don't leak between
+    // tests, and a held promise from one test can't resolve into another.
+    (getPriceInfo as unknown as ReturnType<typeof vi.fn>).mockReset();
+    (pricesRefreshNow as unknown as ReturnType<typeof vi.fn>).mockReset();
+  });
+
   it("renders the raw token cost and the model breakdown", async () => {
     render(<CostDashboard />);
     expect(await screen.findByText(/\$100/)).toBeTruthy();
@@ -111,5 +124,71 @@ describe("CostDashboard", () => {
     release(ROLLUPS_PAYLOAD);
     await waitFor(() => expect(panel.className).toBe("cost-rollups-body"));
     expect(screen.queryByText("Updating…")).toBeNull();
+  });
+
+  // ---- Live price table: open-time freshness (the "Live prices updated …" line) ----
+
+  const priceFn = (fn: unknown) => fn as unknown as ReturnType<typeof vi.fn>;
+
+  it("re-fetches the price table on open so the updated time is fresh", async () => {
+    // The reported bug: the dashboard spun (rollups + plan windows) but the
+    // price line kept showing the previous fetch time. Every open re-fetches,
+    // so the bar must land on the NEW fetch time.
+    const staleAt = Math.floor(Date.now() / 1000) - 2 * 60 * 60;
+    const freshAt = staleAt + 90;
+    priceFn(getPriceInfo).mockResolvedValue({ fetchedAt: staleAt });
+    priceFn(pricesRefreshNow).mockResolvedValue({ stored: 42, fetchedAt: freshAt });
+
+    render(<CostDashboard />);
+    // The bar lands on the FRESH fetch time, not the stored one.
+    await waitFor(() => {
+      const note = document.querySelector(".cost-footer-note");
+      expect(note?.textContent).toContain(
+        `Live prices updated ${new Date(freshAt * 1000).toLocaleString()}`,
+      );
+    });
+    expect(priceFn(pricesRefreshNow)).toHaveBeenCalled();
+  });
+
+  it("shows an updating cue while the open-time price fetch is in flight", async () => {
+    let release: (v: unknown) => void = () => {};
+    priceFn(getPriceInfo).mockResolvedValue({
+      fetchedAt: Math.floor(Date.now() / 1000) - 2 * 60 * 60,
+    });
+    priceFn(pricesRefreshNow).mockReturnValue(
+      new Promise((resolve) => { release = resolve; }),
+    );
+
+    render(<CostDashboard />);
+    // In flight: the PRICE BAR says so instead of changing silently (scoped
+    // to the bar — the header has its own "Updating…" for the rollups).
+    await waitFor(() => {
+      const bar = document.querySelector(".cost-price-bar");
+      expect(bar?.textContent).toContain("Updating…");
+    });
+
+    release({ stored: 42, fetchedAt: Math.floor(Date.now() / 1000) });
+    await waitFor(() => {
+      const bar = document.querySelector(".cost-price-bar");
+      expect(bar?.textContent).not.toContain("Updating…");
+    });
+  });
+
+  it("re-fetches on every open, even with a fresh stored blob", async () => {
+    // No staleness gate: a blob fetched a minute ago still re-fetches, so the
+    // "Live prices updated" line always tracks an open the user just made.
+    const recentAt = Math.floor(Date.now() / 1000) - 60;
+    const freshAt = recentAt + 30;
+    priceFn(getPriceInfo).mockResolvedValue({ fetchedAt: recentAt });
+    priceFn(pricesRefreshNow).mockResolvedValue({ stored: 42, fetchedAt: freshAt });
+
+    render(<CostDashboard />);
+    await waitFor(() => {
+      const note = document.querySelector(".cost-footer-note");
+      expect(note?.textContent).toContain(
+        `Live prices updated ${new Date(freshAt * 1000).toLocaleString()}`,
+      );
+    });
+    expect(priceFn(pricesRefreshNow)).toHaveBeenCalled();
   });
 });

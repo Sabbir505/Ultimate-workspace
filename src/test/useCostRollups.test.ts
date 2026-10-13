@@ -7,7 +7,7 @@ vi.mock("../lib/ipc", () => ({
   safeListen: vi.fn().mockResolvedValue(() => {}),
 }));
 
-import { useCostRollups, __resetCostRollupCacheForTests } from "../hooks/useCostRollups";
+import { useCostRollups, warmCostRollups, __resetCostRollupCacheForTests } from "../hooks/useCostRollups";
 
 describe("useCostRollups", () => {
   beforeEach(() => {
@@ -89,6 +89,19 @@ describe("useCostRollups", () => {
     settle({ rangeDays: 90 });
     await waitFor(() => expect(result.current.rollups).toEqual({ rangeDays: 90 }));
     expect(result.current.stale).toBe(false);
+  });
+
+  it("warms the cache at boot so the first open paints without a spinner", async () => {
+    getCostRollupsMock.mockResolvedValue({ rangeDays: 30, marker: "boot-warm" });
+    warmCostRollups();
+    await waitFor(() => expect(getCostRollupsMock).toHaveBeenCalledWith(30));
+
+    // The first mount of the session now has a payload: no full-page spinner,
+    // data on screen flagged stale and refreshed underneath.
+    const { result } = renderHook(() => useCostRollups(30));
+    expect(result.current.loading).toBe(false);
+    expect(result.current.stale).toBe(true);
+    expect(result.current.rollups).toEqual({ rangeDays: 30, marker: "boot-warm" });
   });
 
   it("does not let a stale in-flight range resolve over the newer one", async () => {

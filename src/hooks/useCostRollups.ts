@@ -73,6 +73,21 @@ export function __resetCostRollupCacheForTests() {
   cacheListeners.clear();
 }
 
+/** Warm the module cache at app boot. Without this the cache only exists
+ *  once the dashboard has been opened, so the FIRST open of every session is
+ *  the cold path: a full-page spinner while `get_cost_rollups` runs — and
+ *  the backend's own rollup cache is cold at that point too, so that first
+ *  call is the full window aggregation. Warming here means the first open
+ *  already has a payload to paint (last figures, dimmed behind "Updating…",
+ *  refreshed underneath). Range 30 is the dashboard default; 7/90 warm on
+ *  their first toggle. Quiet: a failure just leaves the cache cold. */
+export function warmCostRollups(): void {
+  bindBackgroundListener();
+  void fetchInto(30).catch(() => {
+    /* offline / DB busy — the dashboard's own mount fetch retries */
+  });
+}
+
 export function useCostRollups(rangeDays: Range) {
   // Seeded from the cache: a reopen renders data on the FIRST frame.
   const [rollups, setRollups] = useState<CostRollups | null>(

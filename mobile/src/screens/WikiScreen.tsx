@@ -145,7 +145,7 @@ export default function WikiScreen() {
 
       {page ? (
         // Page reader
-        <FadeIn style={styles.flex}>
+        <FadeIn key="wiki-reader" style={styles.flex}>
           <ScrollView style={styles.list} contentContainerStyle={styles.pageBody}>
             <Text style={[styles.pageTitle, { color: c.text }]}>{page.title}</Text>
             {page.brief ? (
@@ -179,7 +179,7 @@ export default function WikiScreen() {
         !status ? (
           <ScreenLoading label="Loading wiki" />
         ) : (
-          <FadeIn style={styles.flex}>
+          <FadeIn key="wiki-project" style={styles.flex}>
             <ScrollView style={styles.list} contentContainerStyle={styles.body}>
               {status.jobRunning ? (
                 <View style={[styles.jobBanner, { backgroundColor: c.surface2, borderColor: c.border }]}>
@@ -282,7 +282,7 @@ export default function WikiScreen() {
             </Text>
           </View>
         ) : (
-          <FadeIn>
+          <FadeIn key="wiki-projects">
             <ScrollView style={styles.list} contentContainerStyle={styles.body}>
               {summaries.map((s) => (
                 <TouchableOpacity

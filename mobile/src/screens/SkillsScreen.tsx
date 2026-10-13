@@ -166,7 +166,7 @@ export default function SkillsScreen() {
               <Text style={{ color: c.white, fontWeight: '700', fontSize: 13 }}>Edit</Text>
             </TouchableOpacity>
           </View>
-          <ScrollView style={styles.readmeScroll} nestedScrollEnabled>
+          <ScrollView key={editing.slug} style={styles.readmeScroll} nestedScrollEnabled>
             {draft.trim() ? (
               <MarkdownText content={draft} />
             ) : (

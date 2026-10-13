@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { ScrollView, StyleSheet, Text, TouchableOpacity, View, KeyboardAvoidingView, Platform, Image } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import Ionicons from '@expo/vector-icons/Ionicons';
-import { useRelay, getRelayUrl, onAcpAgentList, type AcpAgentInfo} from '../hooks/useRelay';
+import { useRelay, onAcpAgentList, type AcpAgentInfo} from '../hooks/useRelay';
 import { theme, useTheme } from '../theme';
 import { useScreenMountTiming } from '../lib/screenTiming';
 import ConnectionIndicator from '../components/ConnectionIndicator';
@@ -51,7 +51,7 @@ export default function HomeScreen() {
   // old two-way connected/offline flip re-rendered the entire screen between
   // its starter-card layout and its pairing layout on every reconnect
   // attempt, which read as the app flashing for the first few seconds.
-  const { connected, connecting, connect, providers, harnesses, defaultModel, startLocalModel, transcribeAudio, listConnectors, getSessionConnectors, setSessionConnectors, listAcpAgents } = useRelay();
+  const { connected, connecting, relayUrl, connect, providers, harnesses, defaultModel, startLocalModel, transcribeAudio, listConnectors, getSessionConnectors, setSessionConnectors, listAcpAgents } = useRelay();
   // Actions only: subscribing to the drawer's STATE would re-render the
   // home screen on every open/close, including the close that accompanies a
   // navigation away from it.
@@ -64,7 +64,13 @@ export default function HomeScreen() {
   // screen even while offline (the composer shows an offline notice and the
   // header dot flips) — it must never bounce back to the pairing screen on
   // every reconnect retry.
-  const hasSavedPairing = useMemo(() => getRelayUrl() != null, []);
+  //
+  // Reads the hook's REACTIVE `relayUrl`, not getRelayUrl() under an empty-dep
+  // memo: that snapshot was taken once at mount, so pairing from this very
+  // screen (scan QR, or a token deep link) left it null and the layout stayed
+  // on "Pair with your desktop" while the relay was actually connected — only
+  // a restart, which re-read the persisted URL, cleared it.
+  const hasSavedPairing = relayUrl != null;
   const [qrVisible, setQrVisible] = useState(false);
   const [modelSheetOpen, setModelSheetOpen] = useState(false);
   // ACP agents for the picker's Agents · ACP rail (desktop parity).

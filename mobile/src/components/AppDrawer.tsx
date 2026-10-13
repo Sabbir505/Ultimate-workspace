@@ -15,7 +15,7 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 // app. This wrapper preserves the lucide call-site's (size, color) props.
 const PencilSquare = ({ size, color }: { size?: number; color?: string }) =>
   <Ionicons name="create-outline" size={size} color={color} />;
-import { getRelayUrl, onSearchResults, onSessionCreated, useRelay, type ChatSearchHit, type Session } from '../hooks/useRelay';
+import { onSearchResults, onSessionCreated, useRelay, type ChatSearchHit, type Session } from '../hooks/useRelay';
 import { useProjects } from '../hooks/useProjects';
 import { screenCacheGet } from '../lib/screenCache';
 import { theme, useTheme } from '../theme';
@@ -268,7 +268,7 @@ export default function AppDrawer() {
   const [pinnedExpanded, setPinnedExpanded] = React.useState(false);
   const [mounted, setMounted] = React.useState(false);
 
-  const { sessions, connected, deleteSession, spawnSession, setSessionStarred, searchChatMessages } = useRelay();
+  const { sessions, connected, relayUrl, deleteSession, spawnSession, setSessionStarred, searchChatMessages } = useRelay();
   const { pendingProject, setPendingProject } = useDrawerActions();
   // Registered projects (ListProjects) for the drawer's Projects section.
   const drawerProjects = useProjects(isOpen);
@@ -445,8 +445,10 @@ export default function AppDrawer() {
   const translateX = progress.interpolate({ inputRange: [0, 1], outputRange: [-panelWidth - 24, 0] });
   const scrimOpacity = progress.interpolate({ inputRange: [0, 1], outputRange: [0, 1] });
 
-  // Never render the pairing token fragment on screen.
-  const rawUrl = getRelayUrl();
+  // Never render the pairing token fragment on screen. `relayUrl` is the
+  // hook's reactive mirror, so the host updates the moment a scan pairs —
+  // getRelayUrl() read here would keep the stale "Not paired" row.
+  const rawUrl = relayUrl;
   const host = rawUrl ? rawUrl.split('#')[0] : 'Not paired — add your desktop';
 
   return (

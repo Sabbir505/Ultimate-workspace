@@ -31,7 +31,14 @@ const OTHER_COLOR = '#6B6862';
 
 function normalizeProvider(p: string): string {
   if (p === 'chat:anthropic_compatible' || p === 'chat:anthropic') return 'chat:anthropic';
-  if (p === 'chat:openai_compatible' || p === 'chat:openai') return 'chat:openai';
+  if (
+    p === 'chat:openai_compatible' ||
+    p === 'chat:openai_chat' ||
+    p === 'chat:openai_responses' ||
+    p === 'chat:openai'
+  ) {
+    return 'chat:openai';
+  }
   return p;
 }
 

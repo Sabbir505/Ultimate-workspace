@@ -183,6 +183,13 @@ export function railBrandIcon(
   const kind = key.split('-')[0];
   if (kind === 'openrouter') return <OpenRouterIcon {...props} />;
   if (kind === 'anthropic' || kind === 'anthropic_compatible') return <AnthropicIcon {...props} />;
-  if (kind === 'openai' || kind === 'openai_compatible') return <OpenAiIcon {...props} />;
+  if (
+    kind === 'openai' ||
+    kind === 'openai_compatible' ||
+    kind === 'openai_chat' ||
+    kind === 'openai_responses'
+  ) {
+    return <OpenAiIcon {...props} />;
+  }
   return null;
 }

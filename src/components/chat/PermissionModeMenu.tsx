@@ -11,6 +11,7 @@
 // confirmation modal instead; selecting full_auto in this menu calls
 // onModeChange("full_auto") only as a request the store may intercept.
 import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type { PermissionMode } from "../../state/chat";
 
 export interface ModeOption {
@@ -87,37 +88,65 @@ export function PermissionModeMenuInner({ mode, onModeChange, variant = "pill", 
   const popupRef = useRef<HTMLDivElement>(null);
   const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const [activeIndex, setActiveIndex] = useState(0);
-  // Override for the popup's horizontal position when the default right-aligned
-  // placement would push it off-screen (narrow chat column — collapsed sidebar
-  // + browser pane open). Computed against the viewport on open.
-  const [popupStyle, setPopupStyle] = useState<React.CSSProperties | undefined>(undefined);
-
-  // Clamp the popup horizontally inside the viewport. The popup is absolutely
-  // positioned `right: 0` to the trigger, so in a narrow column it can extend
-  // past the left edge; measure the rendered popup and shift it right (or
-  // left) when it would overflow.
+  // Viewport anchor for the PORTALED popup. The popup used to be absolutely
+  // positioned inside the composer card, but the card's backdrop-filter makes
+  // it a backdrop root AND a stacking context: the popup's z-index only ever
+  // competed INSIDE the card, so the docked question / plan-proposal notch (a
+  // sibling of the card at z-index 1) painted straight over it — opening the
+  // mode menu with a question pending buried the menu under the question (and
+  // under the queued-message stack's card chrome). Portaled to <body> and
+  // anchored to the trigger's viewport rect it floats above every composer
+  // surface, exactly like the agent/model popup. Re-measured on resize and
+  // capture-phase scroll (the transcript scrolls inside a nested container)
+  // so the menu tracks the chip.
+  const [popupPos, setPopupPos] = useState<{ left: number; bottom: number } | null>(null);
   useLayoutEffect(() => {
     if (!open) {
-      setPopupStyle(undefined);
+      setPopupPos(null);
       return;
     }
-    const popup = popupRef.current;
-    const root = rootRef.current;
-    if (!popup || !root) return;
-    const pr = popup.getBoundingClientRect();
-    const rr = root.getBoundingClientRect();
-    const margin = 8;
-    let dx = 0;
-    if (pr.left < margin) dx = margin - pr.left;
-    else if (pr.right > window.innerWidth - margin) dx = window.innerWidth - margin - pr.right;
-    if (dx !== 0) setPopupStyle({ left: pr.left - rr.left + dx, right: "auto" });
+    const measure = () => {
+      const rect = rootRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const margin = 8;
+      const width = popupRef.current?.offsetWidth ?? 0;
+      // Open UPWARD from the trigger's top edge (what `bottom:
+      // calc(100% + 6px)` expressed when the popup lived inside the card),
+      // CENTERED on the trigger — the "Build" label then reads as the
+      // popup's midpoint — clamped inside the viewport so the popup's fixed
+      // 320px width can't hang off either edge in a narrow chat column.
+      const triggerCenter = rect.left + rect.width / 2;
+      const left = width
+        ? Math.min(
+            Math.max(margin, triggerCenter - width / 2),
+            Math.max(margin, window.innerWidth - width - margin),
+          )
+        : Math.max(margin, rect.left);
+      const bottom = Math.max(margin, window.innerHeight - rect.top + 6);
+      // Skip no-op updates (scroll events fire constantly).
+      setPopupPos((prev) =>
+        prev && prev.left === left && prev.bottom === bottom ? prev : { left, bottom },
+      );
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    window.addEventListener("scroll", measure, true);
+    return () => {
+      window.removeEventListener("resize", measure);
+      window.removeEventListener("scroll", measure, true);
+    };
   }, [open]);
 
-  // Close on outside pointer.
+  // Close on outside pointer — EXCEPT inside the portaled popup: it renders
+  // outside rootRef (body-level portal), so without this a click on a mode
+  // row would close the menu before the click landed on the item.
   useEffect(() => {
     if (!open) return;
     const onDown = (e: PointerEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
+      const t = e.target as Node;
+      if (rootRef.current?.contains(t)) return;
+      if (popupRef.current?.contains(t)) return;
+      setOpen(false);
     };
     window.addEventListener("pointerdown", onDown);
     return () => window.removeEventListener("pointerdown", onDown);
@@ -180,52 +209,59 @@ export function PermissionModeMenuInner({ mode, onModeChange, variant = "pill", 
         aria-expanded={open}
       >
         <span className="permission-mode-label">{label}</span>
-        <span className="permission-mode-chevron" aria-hidden="true">▾</span>
       </button>
 
-      {open && (
-        <div
-          ref={popupRef}
-          className="permission-mode-popup"
-          role="menu"
-          style={popupStyle}
-          onKeyDown={onKeyDown}
-        >
-          <div className="permission-mode-hint">
-            {modesOverride
-              ? "The harness's own postures — applied when the pane starts. Relay approval cards relay into built-in chat only; this CLI answers its own prompts in-pane."
-              : "Approval posture for tool calls this turn."}
-          </div>
-          <div className="permission-mode-divider" />
-          {modes.map((opt, i) => (
-            <button
-              key={opt.value}
-              ref={(el) => {
-                itemRefs.current[i] = el;
-              }}
-              type="button"
-              role="menuitemradio"
-              aria-checked={opt.value === mode}
-              className={`permission-mode-item${opt.value === mode ? " selected" : ""}${
-                i === activeIndex ? " active" : ""
-              }`}
-              onClick={() => choose(opt.value)}
-              onPointerEnter={() => setActiveIndex(i)}
-            >
-              <span className="permission-mode-item-text">
-                <span className="permission-mode-item-label">
-                  {opt.label}
-                  {opt.value === "manual" && (
-                    <span className="permission-mode-badge">Default</span>
-                  )}
+      {/* Portaled to <body>: rendered inside the composer card the card's
+          backdrop-filter is a backdrop root — the frost sampled the card's own
+          paint instead of the transcript AND the card's stacking context
+          trapped the popup UNDER the docked question / plan notch. Portaled +
+          viewport-anchored it frosts the real page and floats above every
+          composer surface (same fix as the agent/model popup). */}
+      {open &&
+        createPortal(
+          <div
+            ref={popupRef}
+            className="permission-mode-popup"
+            role="menu"
+            style={popupPos ?? undefined}
+            onKeyDown={onKeyDown}
+          >
+            <div className="permission-mode-hint">
+              {modesOverride
+                ? "The harness's own postures — applied when the pane starts. Relay approval cards relay into built-in chat only; this CLI answers its own prompts in-pane."
+                : "Approval posture for tool calls this turn."}
+            </div>
+            <div className="permission-mode-divider" />
+            {modes.map((opt, i) => (
+              <button
+                key={opt.value}
+                ref={(el) => {
+                  itemRefs.current[i] = el;
+                }}
+                type="button"
+                role="menuitemradio"
+                aria-checked={opt.value === mode}
+                className={`permission-mode-item${opt.value === mode ? " selected" : ""}${
+                  i === activeIndex ? " active" : ""
+                }`}
+                onClick={() => choose(opt.value)}
+                onPointerEnter={() => setActiveIndex(i)}
+              >
+                <span className="permission-mode-item-text">
+                  <span className="permission-mode-item-label">
+                    {opt.label}
+                    {opt.value === "manual" && (
+                      <span className="permission-mode-badge">Default</span>
+                    )}
+                  </span>
+                  <span className="permission-mode-item-desc">{opt.description}</span>
                 </span>
-                <span className="permission-mode-item-desc">{opt.description}</span>
-              </span>
-              {opt.value === mode && <span className="permission-mode-check">✓</span>}
-            </button>
-          ))}
-        </div>
-      )}
+                {opt.value === mode && <span className="permission-mode-check">✓</span>}
+              </button>
+            ))}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }

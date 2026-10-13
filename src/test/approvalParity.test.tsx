@@ -57,11 +57,12 @@ describe("native permission catalogs", () => {
   });
 
   it("renders the omp catalog verbatim with the pane-start hint", () => {
-    const { getByTitle, container } = render(
+    const { getByTitle } = render(
       <PermissionModeMenu mode="always-ask" onModeChange={() => {}} modes={HARNESS_PERMISSION_MODES.omp} />,
     );
     fireEvent.click(getByTitle(TRIGGER));
-    const popup = container.querySelector(".permission-mode-popup") as HTMLElement;
+    // Portaled to <body> (see the stacking note in PermissionModeMenu).
+    const popup = document.querySelector(".permission-mode-popup") as HTMLElement;
     for (const label of ["Always ask", "Auto writes", "Yolo"]) {
       expect(popup.textContent).toContain(label);
     }
@@ -70,11 +71,11 @@ describe("native permission catalogs", () => {
   });
 
   it("renders the commandcode catalog with dont-ask", () => {
-    const { getByTitle, container } = render(
+    const { getByTitle } = render(
       <PermissionModeMenu mode="standard" onModeChange={() => {}} modes={HARNESS_PERMISSION_MODES.commandcode} />,
     );
     fireEvent.click(getByTitle(TRIGGER));
-    const popup = container.querySelector(".permission-mode-popup") as HTMLElement;
+    const popup = document.querySelector(".permission-mode-popup") as HTMLElement;
     for (const label of ["Standard", "Accept edits", "Don't ask"]) {
       expect(popup.textContent).toContain(label);
     }

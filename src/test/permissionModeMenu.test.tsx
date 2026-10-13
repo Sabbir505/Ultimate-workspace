@@ -27,10 +27,12 @@ function renderMenu(initial: "manual" | "read_only" | "auto_edit" | "full_auto" 
   );
   // Open the popup and return a scoped query helper: the trigger label now
   // resolves through the same catalog as the items, so while the menu is
-  // open both share text — menu assertions must scope to the popup.
+  // open both share text — menu assertions must scope to the popup. The
+  // popup is PORTALED to <body> (the composer card's backdrop-filter traps
+  // it under the docked question card otherwise), so query the document.
   const open = () => {
     fireEvent.click(result.getByTitle(TRIGGER));
-    const popup = result.container.querySelector(".permission-mode-popup");
+    const popup = document.querySelector(".permission-mode-popup");
     if (!popup) throw new Error("popup did not open");
     return within(popup as HTMLElement);
   };
@@ -71,11 +73,11 @@ describe("PermissionModeMenu", () => {
 
 describe("PermissionModeMenu plan posture", () => {
   it("hides the Plan entry by default (opt-in via planAvailable)", () => {
-    const { getByTitle, container } = render(
+    const { getByTitle } = render(
       <PermissionModeMenu mode="manual" onModeChange={() => {}} />,
     );
     fireEvent.click(getByTitle(TRIGGER));
-    const popup = container.querySelector(".permission-mode-popup") as HTMLElement;
+    const popup = document.querySelector(".permission-mode-popup") as HTMLElement;
     expect(popup).toBeTruthy();
     expect(within(popup).queryByText("Plan")).toBeNull();
     expect(within(popup).getByText("Read Only")).toBeTruthy();
@@ -83,11 +85,11 @@ describe("PermissionModeMenu plan posture", () => {
 
   it("offers Plan when planAvailable and reports the selection", () => {
     const onModeChange = vi.fn();
-    const { getByTitle, container } = render(
+    const { getByTitle } = render(
       <PermissionModeMenu mode="manual" onModeChange={onModeChange} planAvailable />,
     );
     fireEvent.click(getByTitle(TRIGGER));
-    const popup = container.querySelector(".permission-mode-popup") as HTMLElement;
+    const popup = document.querySelector(".permission-mode-popup") as HTMLElement;
     fireEvent.click(within(popup).getByText("Plan"));
     expect(onModeChange).toHaveBeenCalledWith("plan");
   });
@@ -100,10 +102,40 @@ describe("PermissionModeMenu plan posture", () => {
   });
 });
 
+// Regression (stacking): the popup used to render INSIDE the composer card,
+// whose backdrop-filter makes the card a stacking context — so the docked
+// question card (.plan-preview, a sibling ABOVE the card at z-index 1) painted
+// straight over it. Opening the mode menu with a question pending buried the
+// menu under the question. The popup must portal to <body> to escape the
+// card's stacking context and float above the docked notch.
+describe("PermissionModeMenu docked stacking", () => {
+  it("portals the popup to <body>, outside the composer card", () => {
+    const { getByTitle } = renderMenu("manual");
+    fireEvent.click(getByTitle(TRIGGER));
+    const popup = document.querySelector(".permission-mode-popup") as HTMLElement;
+    expect(popup).toBeTruthy();
+    // Body-level portal — no composer-card / question-notch ancestor.
+    expect(popup.parentElement).toBe(document.body);
+    expect(popup.closest(".chat-composer-card")).toBeNull();
+    expect(popup.closest(".plan-preview")).toBeNull();
+  });
+
+  it("does not close when a mode row is clicked (portal-aware outside handler)", () => {
+    const { getByTitle, open, onModeChange } = renderMenu("manual");
+    const menu = open();
+    fireEvent.pointerDown(menu.getByText("Auto-Edit"));
+    // Still open after the pointerdown landed inside the portaled popup…
+    expect(document.querySelector(".permission-mode-popup")).toBeTruthy();
+    fireEvent.click(menu.getByText("Auto-Edit"));
+    // …and the click selects the mode.
+    expect(onModeChange).toHaveBeenCalledWith("auto_edit");
+  });
+});
+
 describe("PermissionModeMenu harness catalog override", () => {
   it("lists ONLY the harness's own postures when modes is set", () => {
     const onModeChange = vi.fn();
-    const { getByTitle, getByText, queryByText, container } = render(
+    const { getByTitle } = render(
       <PermissionModeMenu
         mode="build"
         onModeChange={onModeChange}
@@ -111,10 +143,10 @@ describe("PermissionModeMenu harness catalog override", () => {
           { value: "build", label: "Build", description: "Full agent — reads and writes." },
           { value: "plan", label: "Plan", description: "OpenCode's read-only planning mode." },
         ]}
-      />,
+      />
     );
     fireEvent.click(getByTitle(TRIGGER));
-    const popup = container.querySelector(".permission-mode-popup") as HTMLElement;
+    const popup = document.querySelector(".permission-mode-popup") as HTMLElement;
     // Harness catalog replaces the built-in list wholesale.
     expect(within(popup).getByText("Build")).toBeTruthy();
     expect(within(popup).getByText("OpenCode's read-only planning mode.")).toBeTruthy();

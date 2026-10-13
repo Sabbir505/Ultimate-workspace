@@ -1,6 +1,8 @@
-// Circular context-window meter for the chat composer, sitting below the send
-// button. An SVG ring fills proportionally to how much of the active model's
-// context window the last turn consumed; the percentage shows in the center.
+// Circular context-window meter, living at the right end of the telemetry
+// strip below the composer card (it moved through the control bar and the
+// send-button slot before landing here). The SVG ring fills proportionally
+// to how much of the active model's context window the last turn consumed;
+// the percentage shows in the center.
 // Always rendered (even before the first turn, where it shows 0%) so the
 // affordance is stable.
 //
@@ -242,22 +244,17 @@ export function ContextMeter({
     const el = circleRef.current;
     if (el) {
       const r = el.getBoundingClientRect();
-      // The panel ALWAYS opens to the LEFT of the meter: its right edge sits
-      // a small gap right of the circle's center, so in the composer (meter
-      // at the row's right end) the panel grows into the full chat-column
-      // width and can never run past the window's right edge — regardless
-      // of how narrow the window is. panelPos.left is the panel's LEFT EDGE
-      // (no transforms; this WebView2 drops them), clamped to the viewport.
-      // Computed from the PANEL_WIDTH constant — measuring the mounted
-      // element inside the portal read 0 pre-layout and silently disabled
-      // an earlier clamp.
+      // The panel CENTERS on the meter circle (same contract as the
+      // permission-mode popup — the circle reads as the panel's midpoint),
+      // clamped inside the viewport so the fixed PANEL_WIDTH can't hang off
+      // either edge. panelPos.left is the panel's LEFT EDGE — no transforms
+      // (this WebView2 build silently drops them). Computed from the
+      // PANEL_WIDTH constant, not a mounted-element measurement: reading the
+      // portal's offsetWidth pre-layout returned 0 and silently disabled an
+      // earlier clamp.
       const half = PANEL_WIDTH / 2;
       const circleCenter = r.left + r.width / 2;
-      // The panel sits ENTIRELY to the left of the meter: its right edge
-      // stops 100px left of the circle, so the values column is never near
-      // the window edge (overlapping windows can cover that sliver) and the
-      // meter itself stays visible.
-      const unclampedLeft = circleCenter - half - 100 - PANEL_MARGIN;
+      const unclampedLeft = circleCenter - half;
       const left = Math.min(
         Math.max(unclampedLeft, PANEL_MARGIN),
         window.innerWidth - PANEL_WIDTH - PANEL_MARGIN,

@@ -12,12 +12,11 @@
 // the OS onto the composer card.
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { ArrowUp, ArrowUpToLine, AudioLines, GripVertical, Info, Mic, Pencil, Plug, Puzzle, SquareSlash, Trash2, X } from "lucide-react";
+import { ArrowUp, ArrowUpToLine, AudioLines, GripVertical, Info, Mic, Pencil, Plug, Plus, Puzzle, SquareSlash, Trash2, X } from "lucide-react";
 import { AgentModelPicker, type AgentModelSelection } from "./AgentModelPicker";
 import { PermissionModeMenu } from "./PermissionModeMenu";
 import { ArtifactTypeSelector } from "./ArtifactTypeSelector";
 import type { PermissionMode } from "../../state/chat";
-import { ContextMeter } from "./ContextMeter";
 import { ComposerMetrics } from "./ComposerMetrics";
 import { BranchDropdown } from "./BranchDropdown";
 import { useUiStore } from "../../state/ui";
@@ -1910,7 +1909,10 @@ export const ChatComposer = memo(function ChatComposer({
               aria-expanded={attachMenuOpen}
               onClick={() => setAttachMenuOpen((o) => !o)}
             >
-              +
+              {/* Stroke icon, not a text "+": a font glyph centers on its
+                  baseline box, which sat visibly off-center in the round
+                  button — an SVG centers exactly. */}
+              <Plus size={15} strokeWidth={1.8} style={{ flexShrink: 0 }} aria-hidden />
             </button>
             {attachMenuOpen && (
               <div className="composer-attach-menu" role="menu">
@@ -1973,30 +1975,6 @@ export const ChatComposer = memo(function ChatComposer({
               </div>
             )}
           </div>
-          {showAgentSelector && <span className="composer-control-vdiv" aria-hidden="true" />}
-          {showAgentSelector && (
-            <div className="composer-control-chip composer-control-agent">
-              <AgentModelPicker
-                agent={agent}
-                model={model ?? ""}
-                provider={provider}
-                modelLabels={modelLabels}
-                loading={agentLoading || modelLoading}
-                onPick={onAgentModelPick}
-                effort={effort}
-                onEffortChange={onEffortChange}
-                harnessEffort={harnessEffort}
-                onHarnessEffortChange={onHarnessEffortChange}
-                autoBias={autoBias}
-                onAutoBiasChange={onAutoBiasChange}
-                onEjectLocalModel={onEjectLocalModel}
-                localModelActive={localModelActive}
-                localOverridesMap={localOverridesMap}
-                onLoadLocalModel={onLoadLocalModel}
-              />
-            </div>
-          )}
-          {showModeSelector && <span className="composer-control-vdiv" aria-hidden="true" />}
           {showModeSelector && (
             <PermissionModeMenu
               mode={permissionMode!}
@@ -2021,6 +1999,32 @@ export const ChatComposer = memo(function ChatComposer({
             </span>
           )}
           <div className="composer-control-spacer" />
+
+          {/* Right cluster: the agent/model picker beside the voice/send
+              group. (The context meter moved to the telemetry strip BELOW
+              the card — usage belongs with the metrics it quantifies.) */}
+          {showAgentSelector && (
+            <div className="composer-control-chip composer-control-agent">
+              <AgentModelPicker
+                agent={agent}
+                model={model ?? ""}
+                provider={provider}
+                modelLabels={modelLabels}
+                loading={agentLoading || modelLoading}
+                onPick={onAgentModelPick}
+                effort={effort}
+                onEffortChange={onEffortChange}
+                harnessEffort={harnessEffort}
+                onHarnessEffortChange={onHarnessEffortChange}
+                autoBias={autoBias}
+                onAutoBiasChange={onAutoBiasChange}
+                onEjectLocalModel={onEjectLocalModel}
+                localModelActive={localModelActive}
+                localOverridesMap={localOverridesMap}
+                onLoadLocalModel={onLoadLocalModel}
+              />
+            </div>
+          )}
 
           <div className="composer-send-wrap">
             {/* Three states, one slot: a running turn shows only Stop; a
@@ -2077,13 +2081,18 @@ export const ChatComposer = memo(function ChatComposer({
             )}
           </div>
         </div>
-        <ComposerMetrics
-          chatSessionId={effectiveSessionId}
-          streaming={streaming}
-          variant="hud"
-          contextMeter={contextMeterProps}
-        />
       </div>
+      {/* Telemetry strip — a sibling BELOW the card (it used to dock inside
+          it above a hairline), centered on the card's column by
+          .composer-metrics-row.is-hud, with the context meter right-aligned
+          at its end. Outside the card it no longer participates in the
+          card's backdrop-filter root. */}
+      <ComposerMetrics
+        chatSessionId={effectiveSessionId}
+        streaming={streaming}
+        variant="hud"
+        contextMeter={contextMeterProps}
+      />
       {/* Command (@/slash) decks — children of .chat-composer, NOT the card:
           inside .chat-composer-card they were trapped in its backdrop-filter
           root (blur silently dead), and a document.body portal broke under

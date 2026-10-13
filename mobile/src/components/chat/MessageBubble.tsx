@@ -13,8 +13,11 @@
  * Segment parser: a direct port of the desktop algorithm (src/components/
  * chat/MessageBubble.tsx `parseSegments`). Markers may arrive UNTERMINATED
  * mid-stream (`done: false`); parallel subagent fan-out opens several
- * `<tool>` markers back-to-back, so a repeated opener terminates the
- * current tool segment instead of being swallowed into its JSON.
+ *  `<tool>` markers back-to-back, so a repeated opener terminates the
+ *  current tool segment instead of being swallowed into its JSON. The
+ *  `RELAY_ASK:` question channel is masked before parsing, exactly like the
+ *  desktop — the raw directive line streams as ordinary token text and must
+ *  never render as the answer prose that follows the QuestionCard.
  */
 import React, { useMemo, useRef, useEffect, useState } from 'react';
 import { View, Text, StyleSheet, Animated, TouchableOpacity } from 'react-native';
@@ -25,6 +28,7 @@ import ThinkingBlock from './ThinkingBlock';
 import ActivityRow, { type ToolData } from './ActivityRow';
 import { parseAttachments, MessageAttachmentCards, LocalImageCards } from './MessageAttachments';
 import { formatDuration } from '../../lib/format';
+import { maskRelayAsk } from '../../lib/relayAsk';
 
 export type { ToolData };
 
@@ -52,8 +56,13 @@ export type Segment =
  *  `<think>` reasoning blocks, and `<tool>` process cards. A block whose
  *  closing tag hasn't streamed in yet is marked `done: false`. */
 export function parseSegments(content: string): Segment[] {
+  // Live-mask the RELAY_ASK question channel before any other parsing
+  // (desktop src/lib/segments.ts parseSegments parity) so the raw directive
+  // line never renders as the answer's closing paragraph — the QuestionCard
+  // is the surface for it. Persisted replies are already stripped
+  // backend-side, so this is a no-op for history.
   const segs: Segment[] = [];
-  let rest = content;
+  let rest = maskRelayAsk(content);
   const tagRe = /<(think|tool)>/;
   for (;;) {
     const m = tagRe.exec(rest);

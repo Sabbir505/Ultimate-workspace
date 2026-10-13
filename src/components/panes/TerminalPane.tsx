@@ -67,16 +67,37 @@ function xtermTheme(appTheme: string): Record<string, string> {
   const cs = getComputedStyle(document.documentElement);
   const tok = (name: string, fallback: string) => cs.getPropertyValue(name).trim() || fallback;
   const light = appTheme === "light";
+  // App wallpaper on: the terminal follows it. The backdrop goes transparent
+  // (allowTransparency is enabled at construction, and the pane body steps
+  // aside in the same mode — panes.css) so the wallpaper-tinted canvas reads
+  // through instead of the solid --editor-bg plane.
+  const onWallpaper = document.documentElement.dataset.wallpaper !== undefined;
+  const backdrop = onWallpaper ? "rgba(0, 0, 0, 0)" : tok("--editor-bg", light ? "#fafafa" : "#1a1a1a");
   return {
-    // Solid terminal backdrop (was transparent for the old glass blur).
-    background: tok("--editor-bg", light ? "#fafafa" : "#1a1a1a"),
+    background: backdrop,
     foreground: tok("--editor-fg", light ? "#1a1a1a" : "#e4e4e4"),
     cursor: tok("--editor-cursor", light ? "#1a1a1a" : "#e4e4e4"),
-    cursorAccent: tok("--editor-bg", light ? "#fafafa" : "#1a1a1a"),
+    cursorAccent: backdrop,
     selectionBackground: light
       ? tok("--editor-selection", "rgba(0, 120, 168, 0.2)")
       : tok("--editor-selection", "rgba(64, 64, 64, 0.4)"),
   };
+}
+
+/** Whether the app wallpaper is on (html[data-wallpaper], set by
+ *  useWallpaper). Observed rather than read once, so an open terminal
+ *  re-paints when the wallpaper is toggled in Settings. */
+function useWallpaperOn(): boolean {
+  const [on, setOn] = useState(
+    () => typeof document !== "undefined" && document.documentElement.dataset.wallpaper !== undefined,
+  );
+  useEffect(() => {
+    const el = document.documentElement;
+    const obs = new MutationObserver(() => setOn(el.dataset.wallpaper !== undefined));
+    obs.observe(el, { attributes: true, attributeFilter: ["data-wallpaper"] });
+    return () => obs.disconnect();
+  }, []);
+  return on;
 }
 
 function resolvedAppTheme(setting: string): string {
@@ -522,6 +543,7 @@ export function TerminalPane({ pane, focused, visible = true }: Props) {
   // changes when the OS flips, so without this the terminal kept the stale
   // scheme until a settings visit.
   const appTheme = useSettingsStore((s) => s.theme);
+  const wallpaperOn = useWallpaperOn();
   useEffect(() => {
     const apply = () => {
       const term = termRef.current;
@@ -532,7 +554,7 @@ export function TerminalPane({ pane, focused, visible = true }: Props) {
     const mq = window.matchMedia("(prefers-color-scheme: dark)");
     mq.addEventListener("change", apply);
     return () => mq.removeEventListener("change", apply);
-  }, [appTheme]);
+  }, [appTheme, wallpaperOn]);
 
   // Re-fit when a hidden (display:none) terminal becomes visible again —
   // while hidden its container has zero size and fit() would collapse it.

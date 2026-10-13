@@ -106,15 +106,19 @@
   font-family: var(--font-ui);
   font-size: 13px;
   color: var(--text-dim);
-  background: var(--surface-2);
+  /* Tile resting on the panel canvas (the --glass-card family, like the
+     settings/skills cards): the app wallpaper reads through instead of the
+     old opaque --surface-2 square. */
+  background: var(--glass-card);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
+  box-shadow: var(--glass-rim-soft);
   cursor: pointer;
   transition: background 0.15s var(--ease), color 0.15s var(--ease), border-color 0.15s var(--ease), transform 0.1s var(--ease);
 }
 .tool-panel-picker-btn:hover {
   color: var(--text);
-  background: var(--surface-3);
+  background: var(--glass-card-2);
   border-color: var(--accent);
   transform: translateY(-1px);
 }
@@ -129,20 +133,37 @@
   inset: 0;
   z-index: 9998;
 }
+/* Portaled to <body> by ToolPanel — the panel's overflow:hidden (the collapse
+   slide) used to clip this menu at the panel's left edge whenever the panel
+   was narrow — and placed with inline fixed coordinates. */
 .tool-panel-picker-menu {
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
   z-index: 9999;
   min-width: 160px;
-  background: var(--surface-2);
-  border: 1px solid var(--border);
+  /* A floating menu, so it wears the app's liquid-glass recipe
+     (.glass-select-list / .branch-dropdown): the flat --surface-2 slab read
+     as a hole in the wallpaper'd panel behind it. */
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 45%, transparent),
+    color-mix(in srgb, var(--surface-glass) 25%, transparent)
+  );
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius-md);
-  box-shadow: var(--glass-drop-lg);
+  box-shadow: var(--glass-rim), var(--glass-drop);
   padding: 5px;
   display: flex;
   flex-direction: column;
   gap: 1px;
+}
+/* Light theme: the same contrast bump every other glass surface gets. */
+:root[data-theme="light"] .tool-panel-picker-menu {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 55%, transparent),
+    color-mix(in srgb, var(--surface-glass) 38%, transparent)
+  );
 }
 .tool-panel-picker-item {
   display: flex;
@@ -160,7 +181,7 @@
   transition: background 0.12s var(--ease), color 0.12s var(--ease);
 }
 .tool-panel-picker-item:hover:not(:disabled) {
-  background: var(--surface-3);
+  background: var(--glass-card-2);
 }
 .tool-panel-picker-item:disabled {
   color: var(--text-dim);
@@ -195,7 +216,9 @@
   gap: 4px;
   padding: 4px 8px;
   border-bottom: 1px solid var(--border);
-  background: var(--surface-2);
+  /* Same reason as the picker tiles: glass over the panel canvas, not an
+     opaque strip across the wallpaper. */
+  background: var(--glass-card-2);
   position: relative;
   flex: none;
 }
@@ -236,7 +259,7 @@
   font-size: 12px;
   font-weight: 500;
   color: var(--text-dim);
-  background: var(--surface);
+  background: var(--glass-card);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   cursor: pointer;
@@ -246,7 +269,7 @@
 }
 .tool-panel-tabchip:hover {
   color: var(--text);
-  background: var(--surface-3);
+  background: var(--glass-card-2);
   border-color: var(--border-strong);
 }
 .tool-panel-tabchip.active {
@@ -315,7 +338,7 @@
 }
 .tool-panel-add-btn:hover {
   color: var(--text);
-  background: var(--surface-3);
+  background: var(--glass-card-2);
 }
 .tool-panel-body {
   flex: 1;
@@ -329,12 +352,14 @@
   display: flex;
   flex-direction: column;
 }
-/* Pane slot: terminals/browsers render through PaneFrame, which brings its
-   own glass card — give it breathing room like the old pane grid. */
+/* Terminal slot: the terminal IS the panel's content, so it runs full bleed —
+   the tab bar above is the only chrome. (The old 10px inset sat the xterm on
+   a rounded glass card floating inside the panel; the browser slot made the
+   same move.) */
 .tool-panel-pane-slot {
   flex: 1;
   min-height: 0;
-  padding: 10px;
+  padding: 0;
   display: flex;
   flex-direction: column;
 }
@@ -342,6 +367,25 @@
   flex: 1;
   min-height: 0;
   min-width: 0;
+  /* Flush card chrome: no border, no radius, no rim/glow — the panel edge is
+     the frame. Solid backdrop like every other terminal/editor body. */
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  background: var(--surface-solid);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+.tool-panel-pane-slot .pane.focused {
+  border: none;
+  box-shadow: none;
+}
+/* Wallpaper on: the terminal follows the app background. Fully transparent
+   here (not the pane-grid's tinted frame) because the panel canvas behind it
+   already carries the canvas tint — a second layer would just double-darken
+   it. */
+:root[data-wallpaper] .tool-panel-pane-slot .pane {
+  background: transparent;
 }
 /* Browser slot: edge-to-edge like the docs/html canvas — no glass-card inset.
    The page content owns the panel; the pane's own tab bar + URL bar are the

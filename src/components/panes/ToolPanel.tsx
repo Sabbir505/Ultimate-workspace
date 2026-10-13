@@ -13,6 +13,7 @@
 // left-edge drag handle doubles as the chat|panel splitter (same pattern as
 // DevDiffPanel's resize handle), with the width persisted in the ui store.
 import { lazy, useState, Suspense, useCallback, useEffect, useMemo, useRef, memo } from "react";
+import { createPortal } from "react-dom";
 import { LazyReactMarkdown } from "../common/LazyMarkdown";
 import remarkGfm from "remark-gfm";
 import { Globe, Terminal, FileDiff, GitPullRequest, Bot, FileCode, NotebookText, GitBranch } from "lucide-react";
@@ -167,6 +168,11 @@ export function ToolPanel() {
   const setWidth = useUiStore((s) => s.setToolPanelWidth);
   // Dropdown picker state: opened by clicking the "+" button in the tab bar.
   const [tabPickerOpen, setTabPickerOpen] = useState(false);
+  // The dropdown portals to <body> (the panel clips with overflow:hidden for
+  // its collapse slide) — anchored to the "+", so it is measured at open time
+  // like the other portaled popovers.
+  const addBtnRef = useRef<HTMLButtonElement>(null);
+  const addBtnRect = tabPickerOpen ? addBtnRef.current?.getBoundingClientRect() : undefined;
   // Drag-to-reorder state: the index of the chip being dragged. A ref is used
   // for the actual drag tracking (so the value is always current during the
   // DnD cycle regardless of React's re-render timing); the state pair is only
@@ -500,6 +506,7 @@ export function ToolPanel() {
             </div>
             <div className="tool-panel-add-wrap">
               <button
+                ref={addBtnRef}
                 className="ghost tool-panel-add-btn"
                 onClick={() => setTabPickerOpen((v) => !v)}
                 title="Add a pane"
@@ -507,34 +514,49 @@ export function ToolPanel() {
               >
                 +
               </button>
-              {tabPickerOpen && (
-                <>
-                  <div className="tool-panel-picker-scrim" onClick={() => setTabPickerOpen(false)} />
-                  <div className="tool-panel-picker-menu" role="menu">
-                    {TABS.filter((t) => t.id !== "artifact" && t.id !== "plan").map((t) => (
-                      <button
-                        key={t.id}
-                        className="tool-panel-picker-item"
-                        onClick={() => {
-                          // Browser is pane-backed: "+" must spawn a fresh pane
-                          // (or adopt an unclaimed one) with its own bound chip
-                          // — a bare addTab showed the existing pane's tabs.
-                          if (t.id === "browser") openBrowserPane();
-                          else addTab(t.id);
-                          setTabPickerOpen(false);
-                        }}
-                        role="menuitem"
-                      >
-                        <t.Icon size={13} className="tool-panel-picker-item-icon" aria-hidden />
-                        <span className="tool-panel-picker-item-label">{t.label}</span>
-                        {openTabs.some((o) => o.kind === t.id) && (
-                          <span className="tool-panel-picker-item-tag">+{openTabs.filter((o) => o.kind === t.id).length}</span>
-                        )}
-                      </button>
-                    ))}
-                  </div>
-                </>
-              )}
+              {tabPickerOpen &&
+                createPortal(
+                  <>
+                    <div className="tool-panel-picker-scrim" onClick={() => setTabPickerOpen(false)} />
+                    <div
+                      className="tool-panel-picker-menu"
+                      role="menu"
+                      style={{
+                        position: "fixed",
+                        top: (addBtnRect?.bottom ?? 0) + 6,
+                        // Right-aligned to the "+", clamped into the window.
+                        right: Math.max(
+                          8,
+                          window.innerWidth - (addBtnRect?.right ?? window.innerWidth - 8),
+                        ),
+                        left: "auto",
+                      }}
+                    >
+                      {TABS.filter((t) => t.id !== "artifact" && t.id !== "plan").map((t) => (
+                        <button
+                          key={t.id}
+                          className="tool-panel-picker-item"
+                          onClick={() => {
+                            // Browser is pane-backed: "+" must spawn a fresh pane
+                            // (or adopt an unclaimed one) with its own bound chip
+                            // — a bare addTab showed the existing pane's tabs.
+                            if (t.id === "browser") openBrowserPane();
+                            else addTab(t.id);
+                            setTabPickerOpen(false);
+                          }}
+                          role="menuitem"
+                        >
+                          <t.Icon size={13} className="tool-panel-picker-item-icon" aria-hidden />
+                          <span className="tool-panel-picker-item-label">{t.label}</span>
+                          {openTabs.some((o) => o.kind === t.id) && (
+                            <span className="tool-panel-picker-item-tag">+{openTabs.filter((o) => o.kind === t.id).length}</span>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  </>,
+                  document.body,
+                )}
             </div>
           </div>
           </>

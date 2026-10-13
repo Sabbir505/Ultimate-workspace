@@ -5,6 +5,7 @@
 // viewing. Rows navigate: chat completions jump to the chat, pane events
 // focus the pane, automation rows open the Automations view.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   Bell,
   Bot,
@@ -75,6 +76,10 @@ export function NotificationBell() {
   // this viewing even though opening marks them seen.
   const [freshIds, setFreshIds] = useState<Set<string>>(() => new Set());
   const wrapRef = useRef<HTMLDivElement>(null);
+  // The panel portals to <body> (out of the toolbar's backdrop root, so its
+  // frost can sample the page instead of the glass bar it hangs from) — the
+  // outside-click check therefore has to count it as "inside" separately.
+  const panelRef = useRef<HTMLDivElement>(null);
 
   const toggle = useCallback(() => {
     setOpen((prev) => {
@@ -101,7 +106,14 @@ export function NotificationBell() {
       if (e.key === "Escape") setOpen(false);
     };
     const onPointerDown = (e: PointerEvent) => {
-      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
+      const t = e.target as Node;
+      if (
+        wrapRef.current &&
+        !wrapRef.current.contains(t) &&
+        !panelRef.current?.contains(t)
+      ) {
+        setOpen(false);
+      }
     };
     window.addEventListener("keydown", onKey);
     document.addEventListener("pointerdown", onPointerDown);
@@ -150,6 +162,10 @@ export function NotificationBell() {
     [items],
   );
 
+  // Fixed placement for the portaled panel (340px wide, shell.css):
+  // right-aligned to the bell and clamped inside the window.
+  const bellRect = wrapRef.current?.getBoundingClientRect();
+
   return (
     <div className="notification-bell-wrap" ref={wrapRef}>
       <button
@@ -167,45 +183,67 @@ export function NotificationBell() {
           </span>
         )}
       </button>
-      {open && (
-        <div className="notifications-panel" role="dialog" aria-label="Notifications">
-          <div className="notifications-panel-head">
-            <strong>Notifications</strong>
-            <div className="notifications-panel-actions">
-              <button
-                type="button"
-                className="ghost notif-panel-btn"
-                onClick={markAllSeen}
-                disabled={unseen === 0}
-                title="Mark all as read"
-              >
-                <CheckCheck size={13} strokeWidth={1.8} /> Read all
-              </button>
-              <button
-                type="button"
-                className="ghost notif-panel-btn"
-                onClick={clear}
-                disabled={items.length === 0}
-                title="Clear all notifications"
-              >
-                <Trash2 size={13} strokeWidth={1.8} /> Clear
-              </button>
-            </div>
-          </div>
-          <div className="notifications-panel-list">
-            {items.length === 0 ? (
-              <div className="notifications-empty">
-                <Bell size={20} strokeWidth={1.5} />
-                <span>You're all caught up</span>
+      {open &&
+        createPortal(
+          <div
+            ref={panelRef}
+            className="notifications-panel"
+            role="dialog"
+            aria-label="Notifications"
+            style={{
+              position: "fixed",
+              top: (bellRect?.bottom ?? 0) + 8,
+              left: Math.max(
+                8,
+                Math.min(
+                  (bellRect?.right ?? window.innerWidth - 8) - 340,
+                  window.innerWidth - 348,
+                ),
+              ),
+              // The panel's old z-index, now in the body's stacking context:
+              // above the app's own layers (overlays 40, glass dropdown 80),
+              // below modal overlays (1000).
+              zIndex: 90,
+            }}
+          >
+            <div className="notifications-panel-head">
+              <strong>Notifications</strong>
+              <div className="notifications-panel-actions">
+                <button
+                  type="button"
+                  className="ghost notif-panel-btn"
+                  onClick={markAllSeen}
+                  disabled={unseen === 0}
+                  title="Mark all as read"
+                >
+                  <CheckCheck size={13} strokeWidth={1.8} /> Read all
+                </button>
+                <button
+                  type="button"
+                  className="ghost notif-panel-btn"
+                  onClick={clear}
+                  disabled={items.length === 0}
+                  title="Clear all notifications"
+                >
+                  <Trash2 size={13} strokeWidth={1.8} /> Clear
+                </button>
               </div>
-            ) : (
-              items.map((n) => (
-                <NotifRow key={n.id} n={n} fresh={freshIds.has(n.id)} onOpen={handleOpenRow} />
-              ))
-            )}
-          </div>
-        </div>
-      )}
+            </div>
+            <div className="notifications-panel-list">
+              {items.length === 0 ? (
+                <div className="notifications-empty">
+                  <Bell size={20} strokeWidth={1.5} />
+                  <span>You're all caught up</span>
+                </div>
+              ) : (
+                items.map((n) => (
+                  <NotifRow key={n.id} n={n} fresh={freshIds.has(n.id)} onOpen={handleOpenRow} />
+                ))
+              )}
+            </div>
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }

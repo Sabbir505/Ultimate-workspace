@@ -247,8 +247,28 @@
 :root[data-wallpaper] .subagent-view,
 :root[data-wallpaper] .wiki-view,
 :root[data-wallpaper] .logs-view,
+/* The right tool panel column is a canvas too — without this its opaque
+   --surface slab read as a black cutout beside the wallpaper'd views. */
+:root[data-wallpaper] .tool-panel,
 :root[data-wallpaper] .popout-chat-root {
   background: color-mix(in srgb, var(--bg-tint) var(--wallpaper-canvas-tint, 76%), transparent);
+}
+/* …and the same rule one layer down: with a wallpaper on, the flat-paint
+   tokens resolve to glass for EVERY surface inside the shell — cards, rows,
+   chips, inputs, code panes (tokens.css: "the plain --surface tokens are
+   fully opaque paints — right on the app shell, wrong one layer inside a
+   glass panel"). Without this, inner surfaces kept painting opaque slabs
+   over the wallpaper (git graph tables, browser chrome, PR bodies, …).
+   Mixed from --surface-1 (the same elevated tone in both themes) because a
+   token cannot be redefined in terms of itself. --surface-solid is NOT
+   remapped: terminal/editor/code bodies keep their solid backdrop, and
+   portaled popovers outside .app keep their own glass recipes. */
+:root[data-wallpaper] .app {
+  --surface: color-mix(in srgb, var(--surface-1) 55%, transparent);
+  --surface-2: color-mix(in srgb, var(--surface-1) 70%, transparent);
+  --surface-3: color-mix(in srgb, var(--surface-1) 85%, transparent);
+  --surface-glass: color-mix(in srgb, var(--surface-1) 60%, transparent);
+  --surface-glass-2: color-mix(in srgb, var(--surface-1) 78%, transparent);
 }
 
 .main {
@@ -2035,25 +2055,37 @@ button.git-goal-stop:hover {
 .notification-bell.has-unseen {
   color: var(--text);
 }
+/* Portaled to <body> (see NotificationBell) and dropped under the bell with
+   inline fixed placement — out of the toolbar's backdrop root, so the frost
+   below the bar samples the page and not just the glass it hangs from. */
 .notifications-panel {
-  position: absolute;
-  top: calc(100% + 8px);
-  right: 0;
-  z-index: 90;
   width: 340px;
   /* Head (~37px) + the first 4 rows (rows run 50-66px) — row 5 lands below
      the fold, so everything past four scrolls. */
   max-height: 300px;
   display: flex;
   flex-direction: column;
-  background: var(--surface-glass);
-  backdrop-filter: blur(28px) saturate(150%);
-  -webkit-backdrop-filter: blur(28px) saturate(150%);
+  /* The composer card's liquid glass, verbatim. */
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 45%, transparent),
+    color-mix(in srgb, var(--surface-glass) 25%, transparent)
+  );
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
   border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  box-shadow: var(--glass-rim), var(--glass-shadow-lg);
+  border-radius: 16px;
+  box-shadow: var(--glass-rim), var(--glass-drop);
   overflow: hidden;
   animation: glass-select-in 0.16s var(--ease);
+}
+/* Light theme: the same contrast bump every other glass surface gets. */
+:root[data-theme="light"] .notifications-panel {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 55%, transparent),
+    color-mix(in srgb, var(--surface-glass) 38%, transparent)
+  );
 }
 .notifications-panel-head {
   display: flex;
@@ -2080,7 +2112,9 @@ button.git-goal-stop:hover {
   cursor: pointer;
 }
 .notif-panel-btn:hover:not(:disabled) {
-  background: var(--surface-2);
+  /* Chip on the panel's own glass — the opaque --surface-2 laid a flat
+     square over the frost. */
+  background: var(--glass-card-2);
   color: var(--text);
 }
 .notif-panel-btn:disabled {

@@ -378,6 +378,16 @@
   /* Solid terminal backdrop â€” the old translucent fill was for the glass blur. */
   background: var(--surface-solid);
 }
+/* Wallpaper on: panes follow the app background — the frame takes the same
+   tinted glass as the view canvases, and the body steps aside (the xterm
+   theme goes transparent in the same mode, see TerminalPane) so the wallpaper
+   reads through the terminal instead of a solid plane. */
+:root[data-wallpaper] .pane {
+  background: color-mix(in srgb, var(--bg-tint) var(--wallpaper-canvas-tint, 76%), transparent);
+}
+:root[data-wallpaper] .pane-body {
+  background: transparent;
+}
 .pane-body .xterm {
   height: 100%;
   padding: 6px;

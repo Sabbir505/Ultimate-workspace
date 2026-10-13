@@ -31,7 +31,7 @@ import {
 } from "../../lib/ipc";
 import { openInBrowserPane } from "../../lib/openBrowserPane";
 import { parseUnifiedDiff } from "../../lib/diff";
-import { langForPath, loadDiffHighlighter, type HighlightLinesFn } from "../../lib/diffHighlight";
+import { useDiffHighlightRows } from "../../hooks/useDiffHighlight";
 import { useChatStore } from "../../state/chat";
 import { useProjectsStore } from "../../state/projects";
 import { prListCacheKey, usePullRequestsStore, type PrListState } from "../../state/pullRequests";
@@ -1149,67 +1149,15 @@ function MdBody({ text }: { text: string }) {
 // GitHub's per-file `patch` field starts at the `@@` hunk header with no
 // `diff --git` preamble — parseUnifiedDiff keys a file off that header, so a
 // synthetic one (from the file path we already have) opens the parse. Rows
-// are then syntax-highlighted IDE-style: the old side (context + deletions)
-// and the new side (context + additions) are each tokenized as one program so
-// multi-line comments/strings keep their color across rows, and each row
-// renders its serialized fragment. Plain text until the highlighter chunk
-// lands — no layout shift on upgrade.
+// are then syntax-highlighted IDE-style by the shared diff highlighter
+// (useDiffHighlightRows — the same one the Changes panel renders through).
 function PullsPatch({ path, patch }: { path: string; patch: string }) {
-  const [highlight, setHighlight] = useState<HighlightLinesFn | null>(null);
-  useEffect(() => {
-    let live = true;
-    loadDiffHighlighter()
-      .then((fn) => {
-        // The loaded value IS a function — pass it via an updater fn, or
-        // React's basicStateReducer invokes it as a setState updater with the
-        // previous state (null) as its argument (same trap as DiffCard).
-        if (live) setHighlight(() => fn);
-      })
-      .catch(() => {
-        /* highlighting is cosmetic — plain text stays readable */
-      });
-    return () => {
-      live = false;
-    };
-  }, []);
-
-  const lang = useMemo(() => langForPath(path), [path]);
   const lines = useMemo(() => {
     const files = parseUnifiedDiff(`diff --git a/${path} b/${path}\n${patch}`);
     return files.flatMap((file) => file.lines.filter((l) => l.type !== "meta"));
   }, [path, patch]);
 
-  // Per-row HTML keyed by row index. Context rows paint from the new side
-  // first (GitHub's convention); the old side fills any rows the new side
-  // didn't cover. Hunk-header rows join neither stream — they render as the
-  // accent-colored @@ line.
-  const htmlByRow = useMemo(() => {
-    if (!highlight || !lang) return null;
-    const oldText: string[] = [];
-    const newText: string[] = [];
-    const oldRows: number[] = [];
-    const newRows: number[] = [];
-    lines.forEach((l, i) => {
-      if (l.type === "del" || l.type === "context") {
-        oldText.push(l.text);
-        oldRows.push(i);
-      }
-      if (l.type === "add" || l.type === "context") {
-        newText.push(l.text);
-        newRows.push(i);
-      }
-    });
-    const byRow = new Array<string | null>(lines.length).fill(null);
-    const paint = (text: string, rows: number[]) => {
-      const html = highlight(text, lang);
-      rows.forEach((row, i) => {
-        if (byRow[row] === null && html[i] != null) byRow[row] = html[i];
-      });
-    };
-    paint(newText.join("\n"), newRows);
-    paint(oldText.join("\n"), oldRows);
-    return byRow;
-  }, [highlight, lang, lines]);
+  const htmlByRow = useDiffHighlightRows(lines, path);
 
   return (
     <div className="pulls-patch">

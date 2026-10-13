@@ -5,6 +5,42 @@ import react from "@vitejs/plugin-react";
 export default defineConfig(async () => ({
   plugins: [react()],
 
+  // Dev-only: the dep scanner walks the STATIC import graph from index.html,
+  // so every dep reachable only through a lazy route — the terminal pane's
+  // xterm + addons, the vault editor's CodeMirror/katex, the viewers'
+  // docx-preview / html-to-image / dompurify, the dynamically imported
+  // plugin-fs/opener, @babel/standalone (JSX preview), mermaid's ELK layout —
+  // misses the first optimization pass. The server then optimizes them on
+  // demand mid-session, which rewrites the deps dir and strands every open
+  // window with dep URLs that no longer resolve: the failing route dies as
+  // "Failed to fetch dynamically imported module" (the terminal tab hit it
+  // through @xterm/xterm's 504) and stays dead until the dev server is
+  // restarted, even across a page reload. Listing them keeps the optimizer's
+  // map stable and warms each route's deps up front.
+  optimizeDeps: {
+    include: [
+      "@xterm/xterm",
+      "@xterm/addon-fit",
+      "@xterm/addon-search",
+      "@xterm/addon-serialize",
+      "@codemirror/state",
+      "@codemirror/view",
+      "@codemirror/commands",
+      "@codemirror/search",
+      "@codemirror/language",
+      "@codemirror/autocomplete",
+      "@codemirror/lang-markdown",
+      "@tauri-apps/plugin-fs",
+      "@tauri-apps/plugin-opener",
+      "@babel/standalone",
+      "@mermaid-js/layout-elk",
+      "katex",
+      "dompurify",
+      "docx-preview",
+      "html-to-image",
+    ],
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   clearScreen: false,
   build: {

@@ -35,9 +35,10 @@ import {
   generateDiffReview,
   type BranchChanges,
 } from "../../lib/ipc";
-import { parseUnifiedDiff } from "../../lib/diff";
+import { parseUnifiedDiff, type DiffFile } from "../../lib/diff";
 import { pathUnderChanged } from "../../lib/paths";
 import { startPointerDrag } from "../../lib/pointerDrag";
+import { useDiffHighlightRows } from "../../hooks/useDiffHighlight";
 import { useChatStore, selectContextSessionId } from "../../state/chat";
 import { usePanesStore } from "../../state/panes";
 import { useProjectsStore } from "../../state/projects";
@@ -834,30 +835,7 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
   ) : diffFiles.length === 0 ? (
     <div className="dev-diff-empty">No changes in {selectedFile}.</div>
   ) : (
-    diffFiles.map((file, i) => {
-      const visibleLines = file.lines.filter((l) => l.type !== "meta");
-      const capped = visibleLines.length > DIFF_LINE_CAP;
-      const rows = capped ? visibleLines.slice(0, DIFF_LINE_CAP) : visibleLines;
-      return (
-        <div className="diff-file" key={`${file.newPath}-${i}`}>
-          {rows.map((line, j) => (
-            <div key={j} className={`diff-line ${line.type}`}>
-              <span className="diff-line-gutter diff-line-gutter-old">{line.oldLine ?? ""}</span>
-              <span className="diff-line-gutter diff-line-gutter-new">{line.newLine ?? ""}</span>
-              <span className="diff-line-content">
-                {line.type === "add" ? "+ " : line.type === "del" ? "- " : line.type === "hunk" ? "" : "  "}
-                {line.text}
-              </span>
-            </div>
-          ))}
-          {capped && (
-            <div className="diff-line meta">
-              <span className="diff-line-content">… {(visibleLines.length - DIFF_LINE_CAP).toLocaleString()} more lines not shown (large diff truncated)</span>
-            </div>
-          )}
-        </div>
-      );
-    })
+    diffFiles.map((file, i) => <DiffFileRows key={`${file.newPath}-${i}`} file={file} />)
   );
 
   const fileList = visibleFiles.length === 0 ? (
@@ -1180,6 +1158,49 @@ function toRepoRelativePath(filePath: string, repoCwd: string | null | undefined
   const full = norm(filePath);
   if (!full.startsWith(base + "\\")) return filePath;
   return filePath.slice(base.length + 1).replace(/\\/g, "/");
+}
+
+/** One file's diff rows. Syntax highlighting comes from the shared diff
+ *  highlighter (useDiffHighlightRows) — the same language detection and token
+ *  colors the Pulls panel's patch view uses, so a change reads identically in
+ *  either surface. Rows the highlighter can't cover (hunk headers, unknown
+ *  extensions) stay plain text, and the body upgrades in place once the
+ *  lazily-imported engine lands. */
+function DiffFileRows({ file }: { file: DiffFile }) {
+  const visibleLines = useMemo(() => file.lines.filter((l) => l.type !== "meta"), [file.lines]);
+  const capped = visibleLines.length > DIFF_LINE_CAP;
+  const rows = useMemo(
+    () => (capped ? visibleLines.slice(0, DIFF_LINE_CAP) : visibleLines),
+    [capped, visibleLines],
+  );
+  const htmlByRow = useDiffHighlightRows(rows, file.newPath);
+  return (
+    <div className="diff-file">
+      {rows.map((line, j) => {
+        const html = htmlByRow?.[j] ?? null;
+        return (
+          <div key={j} className={`diff-line ${line.type}`}>
+            <span className="diff-line-gutter diff-line-gutter-old">{line.oldLine ?? ""}</span>
+            <span className="diff-line-gutter diff-line-gutter-new">{line.newLine ?? ""}</span>
+            <span className="diff-line-content">
+              {line.type === "add" ? "+ " : line.type === "del" ? "- " : line.type === "hunk" ? "" : "  "}
+              {html !== null ? (
+                // Serializer output is fully escaped source text — safe.
+                <span dangerouslySetInnerHTML={{ __html: html }} />
+              ) : (
+                line.text
+              )}
+            </span>
+          </div>
+        );
+      })}
+      {capped && (
+        <div className="diff-line meta">
+          <span className="diff-line-content">… {(visibleLines.length - DIFF_LINE_CAP).toLocaleString()} more lines not shown (large diff truncated)</span>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function shortenCwd(cwd: string): string {

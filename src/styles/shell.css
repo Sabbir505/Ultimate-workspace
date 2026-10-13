@@ -259,16 +259,19 @@
    fully opaque paints — right on the app shell, wrong one layer inside a
    glass panel"). Without this, inner surfaces kept painting opaque slabs
    over the wallpaper (git graph tables, browser chrome, PR bodies, …).
+   The mixes stay LIGHT on purpose: a card that darkens the canvas reads as a
+   black slab however translucent it is, so these ride the wallpaper and let
+   their border do the separating.
    Mixed from --surface-1 (the same elevated tone in both themes) because a
    token cannot be redefined in terms of itself. --surface-solid is NOT
    remapped: terminal/editor/code bodies keep their solid backdrop, and
    portaled popovers outside .app keep their own glass recipes. */
 :root[data-wallpaper] .app {
-  --surface: color-mix(in srgb, var(--surface-1) 55%, transparent);
-  --surface-2: color-mix(in srgb, var(--surface-1) 70%, transparent);
-  --surface-3: color-mix(in srgb, var(--surface-1) 85%, transparent);
-  --surface-glass: color-mix(in srgb, var(--surface-1) 60%, transparent);
-  --surface-glass-2: color-mix(in srgb, var(--surface-1) 78%, transparent);
+  --surface: color-mix(in srgb, var(--surface-1) 30%, transparent);
+  --surface-2: color-mix(in srgb, var(--surface-1) 42%, transparent);
+  --surface-3: color-mix(in srgb, var(--surface-1) 58%, transparent);
+  --surface-glass: color-mix(in srgb, var(--surface-1) 36%, transparent);
+  --surface-glass-2: color-mix(in srgb, var(--surface-1) 50%, transparent);
 }
 
 .main {

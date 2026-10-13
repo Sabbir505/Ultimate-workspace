@@ -735,7 +735,14 @@ export function appendUserBubble(
   userMsg: ChatMessageRecord,
 ): Partial<ChatState> {
   const target = bufferTargetFor(s, chatSessionId);
-  if (target === "main") return { messages: [...s.messages, userMsg] };
+  if (target === "main") {
+    // Buffer-ownership guard (same H1 shape as selectSession's): right after
+    // a switch the flat list can still hold the OUTGOING chat's rows —
+    // appending onto them would relabel that transcript as this session's.
+    // The persisted twin arrives with the switch's page load.
+    if (s.messagesSessionId !== chatSessionId) return {};
+    return { messages: [...s.messages, userMsg] };
+  }
   if (!target) return {};
   const buf = s.paneBuffers[target];
   if (!buf || buf.sessionId !== chatSessionId) return {};
@@ -771,10 +778,17 @@ export async function loadBufferPage(
   set((s) => ({
     // mergeOptimistic: a session opened while its queued message is mid-
     // drain keeps the in-flight bubble instead of snapping back to the
-    // pre-persist snapshot.
+    // pre-persist snapshot. The merge SOURCE is filtered to this session's
+    // rows: the main buffer can still hold the outgoing chat's optimistic
+    // bubbles while a switch is in flight, and mergeOptimistic carries
+    // unmatched optimistic rows over — they would land in the WRONG chat's
+    // transcript (selectSession's inline version filters for the same reason).
     [k.messages]:
       s[k.target] === chatSessionId
-        ? mergeOptimistic(s[k.messages], messages ?? [])
+        ? mergeOptimistic(
+            s[k.messages].filter((m) => m.chatSessionId === chatSessionId),
+            messages ?? [],
+          )
         : s[k.messages],
     [k.sessionId]: s[k.target] === chatSessionId ? chatSessionId : s[k.sessionId],
     [k.hasMore]: s[k.target] === chatSessionId ? (messages?.length ?? 0) >= 200 : s[k.hasMore],

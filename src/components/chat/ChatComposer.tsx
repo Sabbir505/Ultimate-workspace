@@ -1193,7 +1193,15 @@ export const ChatComposer = memo(function ChatComposer({
     try {
       const message = await persistChatCommandMessage(sessionId, commandText);
       sourceMessageId = message?.id;
-      if (message && useChatStore.getState().activeChatSessionId === sessionId) {
+      // Buffer-ownership guard: appending requires the flat list to actually
+      // hold THIS session's rows — during a switch it can still show the
+      // outgoing chat's page, and stamping messagesSessionId after appending
+      // would relabel that transcript as this session's.
+      if (
+        message &&
+        useChatStore.getState().activeChatSessionId === sessionId &&
+        useChatStore.getState().messagesSessionId === sessionId
+      ) {
         useChatStore.setState((s) => ({
           messages: [...s.messages, message],
           messagesSessionId: sessionId,

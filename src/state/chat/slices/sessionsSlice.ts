@@ -27,7 +27,7 @@ import {
   setChatSessionWorktree,
 } from "../../../lib/ipc";
 import { toastError } from "../../../lib/ipc";
-import type { ChatCheckpoint } from "../../../lib/ipc";
+import type { ChatCheckpoint, ChatMessageRecord } from "../../../lib/ipc";
 import type { ApprovalPolicy, ChatArtifact, SandboxPolicy, WatchMode } from "../types";
 import { useAutomationsStore } from "../../automations";
 import { useProjectsStore } from "../../projects";
@@ -222,6 +222,12 @@ export function createSessionsSlice(set: ChatStoreSet, get: ChatStoreGet) {
       if (opts?.recordNav !== false && outgoingId !== chatSessionId) {
         useUiStore.getState().recordChatNav(chatSessionId);
       }
+      // Sweep auto-opened artifact tabs that belonged to the chat we just
+      // left: the tool panel is ONE shared surface, so a preview the app
+      // popped up for the outgoing chat kept showing under the incoming one
+      // (the other chat's file "appearing" in this chat). User-opened tabs
+      // stay — those were deliberate, like editor tabs.
+      useUiStore.getState().closeForeignAutoTabs(chatSessionId);
       // Follow the chat's project binding: switching to a chat that was working
       // on a different project moves the global selection (and with it the
       // composer notch, Files tab, and the working directory) to that project.
@@ -233,67 +239,104 @@ export function createSessionsSlice(set: ChatStoreSet, get: ChatStoreGet) {
           ps.selectProject(boundProjectId);
         }
       }
-      const [messages, records, checkpoints] = await Promise.all([
-        getChatMessages(chatSessionId, undefined, 200),
-        listChatArtifacts(chatSessionId),
-        listChatCheckpoints(chatSessionId),
-      ]);
+      // The three loads can REJECT (a transient DB lock while a harness turn
+      // writes, a bad row shape). Before the catch below, a rejection aborted
+      // selectSession right AFTER the synchronous active-id flip above — the
+      // store was left with activeChatSessionId = the new chat and `messages`
+      // still holding the OUTGOING chat's rows, which ChatView rendered (with
+      // that chat's artifact chips and turn-changes rows) until some later
+      // load happened to succeed. Now a failure claims the buffer for the
+      // target session and empties it, so the guard in ChatView shows the
+      // "opening" state plus a toast — never another chat's transcript.
+      let fetched:
+        | [
+            ChatMessageRecord[] | null,
+            Awaited<ReturnType<typeof listChatArtifacts>> | null,
+            ChatCheckpoint[] | null,
+          ]
+        | null = null;
+      let loadError: unknown = null;
+      try {
+        fetched = await Promise.all([
+          getChatMessages(chatSessionId, undefined, 200),
+          listChatArtifacts(chatSessionId),
+          listChatCheckpoints(chatSessionId),
+        ]);
+      } catch (err) {
+        loadError = err;
+      }
       // Only update messages if the user hasn't clicked away to another session
       // while the fetch was in-flight.
       if (get().activeChatSessionId === chatSessionId) {
-        set((s) => ({
-          // mergeOptimistic, scoped to THIS session's still-optimistic rows: a
-          // re-open while the session's send is mid-persist keeps the in-flight
-          // bubble (same as loadBufferPage) — without the session filter the
-          // OUTGOING session's optimistic bubbles would leak into the new
-          // transcript, since the buffer still holds the previous chat's rows
-          // until this write.
-          messages: mergeOptimistic(
-            s.messages.filter((m) => m.chatSessionId === chatSessionId),
-            messages ?? [],
-          ),
-          messagesSessionId: chatSessionId,
-          activeChatSessionId: chatSessionId,
-          hasMoreHistory: (messages?.length ?? 0) >= 200,
-        }));
-        // Restore this chat's generated artifacts (inline diagrams / file chips)
-        // so they reappear when the session is reopened. Skip sessions that are
-        // mid-stream — their live buffers are the source of truth. Per-session
-        // check: the legacy scalar can name another concurrently-streaming chat.
-        if (records && !(chatSessionId in get().streaming)) {
-          const list: ChatArtifact[] = records.map((r) => ({
-            path: r.path,
-            filename: r.filename,
-          }));
-          const byMessage: Record<number, ChatArtifact[]> = {};
-          for (const r of records) {
-            if (r.chatMessageId == null) continue;
-            (byMessage[r.chatMessageId] ??= []).push({
-              path: r.path,
-              filename: r.filename,
+        if (fetched == null) {
+          // Claim the buffer and empty it — unless it ALREADY holds this
+          // session's rows (re-opening the chat you are viewing while a
+          // transient DB lock fails the read): those rows are valid for this
+          // session, and stale-but-correct beats wiping the transcript.
+          if (get().messagesSessionId !== chatSessionId) {
+            set({
+              messages: [],
+              messagesSessionId: chatSessionId,
+              hasMoreHistory: false,
             });
           }
+          toastError("Couldn't open this chat", loadError);
+        } else {
+          const [messages, records, checkpoints] = fetched;
           set((s) => ({
-            artifacts: { ...s.artifacts, [chatSessionId]: list },
-            artifactsByMessage: { ...s.artifactsByMessage, ...byMessage },
+            // mergeOptimistic, scoped to THIS session's still-optimistic rows: a
+            // re-open while the session's send is mid-persist keeps the in-flight
+            // bubble (same as loadBufferPage) — without the session filter the
+            // OUTGOING session's optimistic bubbles would leak into the new
+            // transcript, since the buffer still holds the previous chat's rows
+            // until this write.
+            messages: mergeOptimistic(
+              s.messages.filter((m) => m.chatSessionId === chatSessionId),
+              messages ?? [],
+            ),
+            messagesSessionId: chatSessionId,
+            activeChatSessionId: chatSessionId,
+            hasMoreHistory: (messages?.length ?? 0) >= 200,
           }));
-        }
-        // Checkpoint chips: keyed by messageId (globally unique). Prune only
-        // THIS session's freshly-loaded message ids, then merge the new chips
-        // in — replacing the whole map on every open used to wipe the other
-        // pane's (and every other session's) chips for the rest of the run.
-        // Baselines and safety snapshots (messageId null) are backend-only.
-        if (checkpoints) {
-          const byMessage: Record<number, ChatCheckpoint[]> = {};
-          for (const c of checkpoints) {
-            if (c.messageId == null) continue;
-            (byMessage[c.messageId] ??= []).push(c);
+          // Restore this chat's generated artifacts (inline diagrams / file chips)
+          // so they reappear when the session is reopened. Skip sessions that are
+          // mid-stream — their live buffers are the source of truth. Per-session
+          // check: the legacy scalar can name another concurrently-streaming chat.
+          if (records && !(chatSessionId in get().streaming)) {
+            const list: ChatArtifact[] = records.map((r) => ({
+              path: r.path,
+              filename: r.filename,
+            }));
+            const byMessage: Record<number, ChatArtifact[]> = {};
+            for (const r of records) {
+              if (r.chatMessageId == null) continue;
+              (byMessage[r.chatMessageId] ??= []).push({
+                path: r.path,
+                filename: r.filename,
+              });
+            }
+            set((s) => ({
+              artifacts: { ...s.artifacts, [chatSessionId]: list },
+              artifactsByMessage: { ...s.artifactsByMessage, ...byMessage },
+            }));
           }
-          set((s) => {
-            const next = { ...s.checkpointsByMessage };
-            for (const m of messages ?? []) delete next[m.id];
-            return { checkpointsByMessage: { ...next, ...byMessage } };
-          });
+          // Checkpoint chips: keyed by messageId (globally unique). Prune only
+          // THIS session's freshly-loaded message ids, then merge the new chips
+          // in — replacing the whole map on every open used to wipe the other
+          // pane's (and every other session's) chips for the rest of the run.
+          // Baselines and safety snapshots (messageId null) are backend-only.
+          if (checkpoints) {
+            const byMessage: Record<number, ChatCheckpoint[]> = {};
+            for (const c of checkpoints) {
+              if (c.messageId == null) continue;
+              (byMessage[c.messageId] ??= []).push(c);
+            }
+            set((s) => {
+              const next = { ...s.checkpointsByMessage };
+              for (const m of messages ?? []) delete next[m.id];
+              return { checkpointsByMessage: { ...next, ...byMessage } };
+            });
+          }
         }
       }
       // Touch and reorder in the background. Rejection-tolerant: a failed

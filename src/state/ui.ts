@@ -59,6 +59,14 @@ export interface ToolPanelTabInstance {
   /** For inline (chat code-fence / in-memory svg) artifacts: the live preview
    *  payload — no file on disk, the pane renders the payload directly. */
   artifactInline?: { kind: "jsx" | "tsx" | "svg"; code: string };
+  /** Artifact tabs: the chat session this preview popped up for. Null for
+   *  user-opened tabs whose origin carries no session (gallery browsing). */
+  chatSessionId?: string | null;
+  /** Artifact tabs: opened BY the app (a turn produced a viewable file /
+   *  `open_file` routed one), not by a click. Auto-opened tabs are swept when
+   *  the active chat changes (see `closeForeignAutoTabs`); user-opened tabs
+   *  survive switches like editor tabs. */
+  auto?: boolean;
 }
 
 /** Live progress of a model download from the Hugging Face model market.
@@ -322,12 +330,24 @@ export interface UiState {
   openAgentsTab: (subagentId: string | null) => void;
   /** Open a generated artifact (code/html/image/pdf/markdown/…) as its own
    *  main tab (auto-opens). Dedupes by path: if a matching artifact tab is
-   *  already open, just activates it. */
-  openArtifactTab: (artifact: {
-    path: string;
-    filename: string;
-    inline?: { kind: "jsx" | "tsx" | "svg"; code: string };
-  }) => void;
+   *  already open, just activates it. `opts.auto` marks an app-initiated open
+   *  (turn output / `open_file` routing) — those are swept when the active
+   *  chat changes; `opts.chatSessionId` records the origin chat. A manual
+   *  re-open of an auto tab adopts it (it stops being swept). */
+  openArtifactTab: (
+    artifact: {
+      path: string;
+      filename: string;
+      inline?: { kind: "jsx" | "tsx" | "svg"; code: string };
+    },
+    opts?: { auto?: boolean; chatSessionId?: string | null },
+  ) => void;
+  /** Drop auto-opened artifact tabs that belong to a chat other than
+   *  `chatSessionId` — called on every chat switch. The tool panel is ONE
+   *  shared surface: a preview the app popped up for the chat you just left
+   *  must not keep showing under the chat you switched to (it read as the
+   *  other chat's work appearing in this one). Explicitly opened tabs stay. */
+  closeForeignAutoTabs: (chatSessionId: string | null) => void;
   /** Close a specific open tab by instance id. Does nothing if unknown. */
   closeTab: (instanceId: string) => void;
   /** Activate (focus) an existing open tab instance. */
@@ -726,8 +746,10 @@ export const useUiStore = create<UiState>((set, get) => ({
   // Open a generated code artifact (tsx/jsx/html) as its own tab. If one is
   // already open for the same path, just activate/dedupe it — don't stack
   // duplicate tabs for the same file.
-  openArtifactTab: (artifact) =>
+  openArtifactTab: (artifact, opts) =>
     set((s) => {
+      const auto = opts?.auto === true;
+      const origin = opts?.chatSessionId ?? null;
       // Dedupe by path — inline artifacts (mermaid/jsx) included (audit E-9):
       // exempting them made every re-open stack a duplicate tab and left the
       // refresh branch below dead code.
@@ -741,7 +763,16 @@ export const useUiStore = create<UiState>((set, get) => ({
           // re-rendered) since the tab first opened.
           const openTabs = s.openTabs.map((t) =>
             t.instanceId === existing.instanceId
-              ? { ...t, artifactPath: artifact.path, artifactInline: artifact.inline }
+              ? {
+                  ...t,
+                  artifactPath: artifact.path,
+                  artifactInline: artifact.inline,
+                  // A manual re-open adopts the tab (it stops being swept on
+                  // chat switches); an auto re-open of a manual tab does not
+                  // demote it.
+                  auto: auto ? t.auto : false,
+                  chatSessionId: origin ?? t.chatSessionId,
+                }
               : t,
           );
           return {
@@ -759,6 +790,8 @@ export const useUiStore = create<UiState>((set, get) => ({
         artifactPath: artifact.path,
         artifactFilename: artifact.filename,
         artifactInline: artifact.inline,
+        auto,
+        chatSessionId: origin,
       };
       const openTabs = [...s.openTabs, tab];
       if (openTabs.length > 8) openTabs.splice(0, openTabs.length - 8);
@@ -771,6 +804,37 @@ export const useUiStore = create<UiState>((set, get) => ({
         toolPanelCollapsed: false,
       };
     }),
+  closeForeignAutoTabs: (chatSessionId) => {
+    set((s) => {
+      const doomed = s.openTabs.filter(
+        (t) =>
+          t.kind === "artifact" &&
+          t.auto === true &&
+          t.chatSessionId != null &&
+          t.chatSessionId !== chatSessionId,
+      );
+      if (doomed.length === 0) return {};
+      const doomedIds = new Set(doomed.map((t) => t.instanceId));
+      // A read of a swept artifact would outlive its tab (same rule as
+      // closeTab) — stop it before the tab goes.
+      for (const t of doomed) stopArtifactReadIfPlaying(t.artifactPath);
+      const openTabs = s.openTabs.filter((t) => !doomedIds.has(t.instanceId));
+      let activeTabId = s.activeTabId;
+      let toolPanelTab = s.toolPanelTab;
+      if (activeTabId != null && doomedIds.has(activeTabId)) {
+        const idx = s.openTabs.findIndex((t) => t.instanceId === activeTabId);
+        const next = openTabs[Math.min(idx, openTabs.length - 1)];
+        activeTabId = next?.instanceId ?? null;
+        toolPanelTab = next?.kind ?? "terminal";
+      }
+      return {
+        openTabs,
+        activeTabId,
+        toolPanelTab,
+        toolPanelCollapsed: openTabs.length === 0 ? true : s.toolPanelCollapsed,
+      };
+    });
+  },
   // Close a tab by instance id.
   closeTab: (instanceId) => {
     // A read of THIS artifact would outlive its tab — the floating bar and

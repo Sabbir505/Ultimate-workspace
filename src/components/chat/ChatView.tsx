@@ -23,11 +23,18 @@ import { QuestionCard } from "./QuestionCard";
 import { PlanProposalCard } from "./PlanProposalCard";
 import type { PermissionMode, ChatTaskProgress } from "../../state/chat";
 import { HARNESS_PERMISSION_MODES, permissionModeToPolicies } from "../../state/chat";
-import type { ChatPerfPayload } from "../../lib/ipc";
+import { isCliAgent } from "../../state/chat/moduleState";
+import type { ChatPerfPayload, ChatMessageRecord } from "../../lib/ipc";
 // Stable fallback for the tasks-map selector below: a fresh `{}` literal per
 // store notification defeats zustand's Object.is bail-out and re-renders the
 // whole ChatView on every keystroke/token flush (audit H-3).
 const EMPTY_TASKS: Record<string, ChatTaskProgress> = {};
+// Stable empty transcript for the buffer-ownership guard below: while a chat
+// switch's page fetch is in flight the flat buffer still holds the OUTGOING
+// chat's rows. Rendering [] (one shared instance, so the memo/effect deps
+// don't churn) keeps the previous conversation — and its artifact chips and
+// turn-changes rows — off the screen until the right rows land.
+const NO_MESSAGES: ChatMessageRecord[] = [];
 // TypingIndicator is tiny and eager — imported from its own module so the
 // entry chunk doesn't statically pull in MessageBubble (react-markdown).
 import { TypingIndicator } from "./TypingIndicator";
@@ -112,11 +119,22 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
   const isPaneView = paneId != null;
   const paneBuf = useChatStore((s) => (paneId ? s.paneBuffers[paneId] : undefined));
   const storeMessages = useChatStore((s) => s.messages);
+  const storeMessagesSessionId = useChatStore((s) => s.messagesSessionId);
   const activeChatSessionId = paneId ? (paneBuf?.sessionId ?? null) : storeActiveId;
   // Split-pane focus pin: which pane's chat the shared git rail belongs to
   // (null = the main half). See the GitToolsSidebar render condition below.
   const focusedPin = useChatStore((s) => s.focusedChatSessionId);
-  const messages = paneBuf ? paneBuf.messages : storeMessages;
+  // Buffer-ownership guard: `selectSession` flips activeChatSessionId
+  // synchronously but replaces the rows only after the page fetch lands, so
+  // between the click and the load the flat list still holds the OUTGOING
+  // chat's rows — rendering them under the new chat's header showed the
+  // previous conversation (its artifact chips and changes rows included)
+  // until the fetch resolved, and permanently when the fetch failed.
+  // `messagesSessionId` is the buffer's own identity; a mismatch renders as
+  // "still opening" (the pane buffers carry their session id too).
+  const bufferSessionId = paneBuf ? paneBuf.sessionId : storeMessagesSessionId;
+  const bufferReady = bufferSessionId === activeChatSessionId;
+  const messages = bufferReady ? (paneBuf ? paneBuf.messages : storeMessages) : NO_MESSAGES;
   const streaming = useChatStore((s) => s.streaming);
   const livePerf = useChatStore((s) => s.livePerf);
   const chatStatus = useChatStore((s) => s.chatStatus);
@@ -170,7 +188,18 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
   );
 
   const activeSession = sessions.find((s) => s.id === activeChatSessionId) ?? null;
-  const isLocal = activeSession?.provider === "local_gguf";
+  // The provider column is load-bearing only for the built-in and local
+  // paths. A harness/ACP session runs on its CLI and keeps whichever provider
+  // the row was created under — a chat created while a local model was active
+  // still reads "local_gguf" after the picker switched it to a CLI agent, and
+  // since the CLI send path ignores the provider the row stays that way. Read
+  // as "this chat runs on the sidecar", that stale value leaked the local
+  // model's `-c` into the meter, showed the ⏏ eject button on a CLI chat
+  // whenever a sidecar happened to be live, and re-fired a local prompt
+  // warmup on every switch into one (v0.7.0 report: the sidebar showed the
+  // local glyph for a harness chat).
+  const isLocal =
+    activeSession?.provider === "local_gguf" && !isCliAgent(activeSession.agent);
   // CLI agent selected for this session ("harness:<id>") — the model chip is
   // populated from the CLI's OWN config files + live model listing
   // (listHarnessModels). Sends for these sessions route to the headless CLI
@@ -1868,14 +1897,25 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
           />
         </div>
       ) : (
-        <ChatWelcome
-          sendPrompt={(text) => {
-            stickToBottomRef.current = true;
-            void sendMessage(text);
-          }}
-          prefill={(text) => setDraft({ text, nonce: Date.now() })}
-          hasModel={!!(activeSession?.model || config?.model)}
-        />
+        bufferReady ? (
+          <ChatWelcome
+            sendPrompt={(text) => {
+              stickToBottomRef.current = true;
+              void sendMessage(text);
+            }}
+            prefill={(text) => setDraft({ text, nonce: Date.now() })}
+            hasModel={!!(activeSession?.model || config?.model)}
+          />
+        ) : (
+          // Buffer belongs to another chat and this one's page hasn't landed
+          // yet — explicitly "opening", so neither the outgoing chat's
+          // transcript nor the welcome hero (which claims the chat is empty)
+          // shows for a chat that may be full of history.
+          <div className="chat-loading" role="status" aria-live="polite">
+            <span className="chat-loading-dot" />
+            Opening chat…
+          </div>
+        )
       )}
 
       {/* Plan preview ("Agree & proceed"): renders INLINE in the transcript,
@@ -1888,8 +1928,10 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
           transparency read as glass. Queue chip + approval card ride on top
           of it inside the same overlay. */}
       <div className="chat-composer-dock" ref={composerDockRef}>
-      {/* Goal-loop status lives in the GitToolsSidebar goal card (iteration +
-          timer + stop), not here — the composer-side chip duplicated it. */}
+      {/* Goal-loop status: the GitToolsSidebar goal card carries the full
+          readout (iteration + timer + stop); the composer card itself wears
+          the compact "Pursuing goal" notch (ChatComposer.activeGoal), so
+          nothing goal-related is mounted here. */}
 
       {activeChatSessionId && pendingApprovals[activeChatSessionId] && (
         <div className="composer-approval-wrap">

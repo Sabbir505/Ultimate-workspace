@@ -260,11 +260,11 @@ export function QuotedSelectionRow({
 /** Notch chip beside the agent selector showing the directory the chat is
  *  working in: the custom folder chosen via the "+" picker when set, else the
  *  chat's isolated worktree (roadmap P0 §3.1.1), else the selected project's
- *  folder. The × (visible on hover) fully unbinds the chat from that project —
- *  drop the per-chat binding, any custom-folder override, and the global
- *  selection when it's the same project. Hidden when neither resolves (no
- *  project selected). When the chat works in an isolated worktree a ⛓ chip
- *  sits beside the folder name — clicking it joins the main working tree. */
+ *  folder. At rest it is exactly folder + name; on hover the chip expands
+ *  (smooth width animation) to reveal a × that fully unbinds the chat —
+ *  drop the per-chat binding, any custom-folder override, and the worktree.
+ *  Hidden when nothing resolves (no project selected). Worktree chats join
+ *  the main tree from the sidebar row / nudge banner, not from here. */
 export function FolderNotch() {
   // Shared chrome follows the FOCUSED chat (split-view aware), not the plain
   // active session — see selectContextSessionId.
@@ -296,20 +296,22 @@ export function FolderNotch() {
     <div className="composer-notch-folder" title={path}>
       <FolderIcon />
       <span className="composer-notch-folder-name">{pathBasename(path)}</span>
-      {worktreePath && (
+      {/* Zero-width slot that expands on chip hover — the × has room only
+          while the chip is open, so the resting chip never shows chrome. */}
+      <span className="composer-notch-folder-close-wrap">
         <button
           type="button"
-          className="composer-notch-worktree"
-          title={`Isolated worktree (branch on ${pathBasename(worktreePath)}). Click to join the main working tree.`}
-          aria-label="Join main working tree"
+          className="composer-notch-folder-close"
+          title="Leave this project folder — the chat keeps its history"
+          aria-label="Leave project folder"
           onClick={(e) => {
             e.stopPropagation();
-            void useChatStore.getState().toggleSessionWorktree(activeChatSessionId);
+            useChatStore.getState().unbindProject(activeChatSessionId);
           }}
         >
-          ⛓
+          <X size={11} strokeWidth={2.2} aria-hidden="true" />
         </button>
-      )}
+      </span>
     </div>
   );
 }

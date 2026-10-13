@@ -42,7 +42,7 @@ import { isAppFocused } from "../lib/appFocus";
 import { relayNotify } from "../lib/notifyCenter";
 import { sessionDisplayTitle } from "../lib/sessionTitle";
 import { autoReadFinishedTurn } from "./useTtsAutoRead";
-import { useChatStore } from "../state/chat";
+import { useChatStore, selectContextSessionId } from "../state/chat";
 import { bufferTargetFor } from "../state/chat/moduleState";
 import { useDocQaStore } from "../state/docQa";
 import { useUiStore } from "../state/ui";
@@ -243,7 +243,12 @@ export function useChatEvents(): void {
     );
 
     unlistens.push(
-      listenChatOpenBrowser(({ url }) => {
+      listenChatOpenBrowser(({ chatSessionId, url }) => {
+        // Cross-session gate (same policy as onArtifact's auto-open gate):
+        // the browser pane lives in the ONE shared tool panel, so a
+        // BACKGROUND chat's `open_url` must not yank the panel to that
+        // chat's page while the user works in another session.
+        if (selectContextSessionId(useChatStore.getState()) !== chatSessionId) return;
         openInBrowserPane(url);
       }),
     );
@@ -251,8 +256,17 @@ export function useChatEvents(): void {
     // open_file routed a previewable file to the in-app viewer — open it as a
     // tab in the right-side tool panel (dedupes by path, expands the panel).
     unlistens.push(
-      listenChatOpenPreview(({ path, filename }) => {
-        useUiStore.getState().openArtifactTab({ path, filename });
+      listenChatOpenPreview(({ chatSessionId, path, filename }) => {
+        // Same cross-session gate as chat:open-browser above: a background
+        // chat's open_file used to pop ITS file into the shared panel while
+        // the user was reading a different chat — the other chat's work
+        // appearing in this one. The file stays tracked for its own chat
+        // (artifacts list + bubble chip); the tab waits for that chat.
+        if (selectContextSessionId(useChatStore.getState()) !== chatSessionId) return;
+        useUiStore.getState().openArtifactTab(
+          { path, filename },
+          { auto: true, chatSessionId },
+        );
       }),
     );
 

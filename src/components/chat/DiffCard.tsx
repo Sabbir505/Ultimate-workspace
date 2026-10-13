@@ -13,6 +13,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { useProjectsStore } from "../../state/projects";
 import { useUiStore } from "../../state/ui";
+import {
+  projectIdForCwd,
+  resolveChatCwd,
+  resolveChatProjectId,
+} from "../../lib/chatCwd";
 import type { EditPayload } from "../../lib/segments";
 
 // The canonical EditPayload lives in lib/segments (next to the `<tool>`
@@ -106,11 +111,15 @@ export function DiffCard({
   path,
   edit,
   done,
+  chatSessionId,
 }: {
   path: string;
   edit: EditPayload;
   /** False while the `<tool>` marker is still streaming in. */
   done: boolean;
+  /** The chat this edit belongs to — "Open in Peek" diffs against THIS
+   *  chat's repo (src/lib/chatCwd.ts), not the sidebar-selected project. */
+  chatSessionId?: string | null;
 }) {
   const openPeek = useUiStore((s) => s.openPeek);
   const selectedProjectId = useProjectsStore((s) => s.selectedProjectId);
@@ -129,8 +138,15 @@ export function DiffCard({
   const hiddenCount = expanded ? 0 : lines.length - visible.length;
 
   const openFullDiff = () => {
-    if (!selectedProjectId) return;
-    openPeek({ mode: "diff", projectId: selectedProjectId, filePath: path, cwd: null });
+    const cwd = resolveChatCwd(chatSessionId);
+    // The peek panel renders per PROJECT, so carry the chat's own binding
+    // (falling back to the selection only for chats bound to nothing); the
+    // explicit cwd keeps worktree/override folders diffing against the right
+    // tree.
+    const projectId =
+      projectIdForCwd(cwd) ?? resolveChatProjectId(chatSessionId) ?? selectedProjectId;
+    if (!projectId && !cwd) return;
+    openPeek({ mode: "diff", projectId, filePath: path, cwd });
   };
 
   return (

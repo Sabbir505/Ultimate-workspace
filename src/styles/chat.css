@@ -503,6 +503,32 @@ div[data-index]:has(.chat-session-row.menu-open) {
   justify-content: center;
   padding: 20px max(16px, calc((100% - 780px) / 2));
 }
+
+/* "Opening chat…" placeholder shown while a chat switch's page fetch is in
+   flight (buffer-ownership guard in ChatView): the outgoing chat's
+   transcript must not paint under the new chat's header, and the welcome
+   hero would wrongly claim the new chat is empty. */
+.chat-loading {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--text-secondary, var(--text));
+  opacity: 0.72;
+  font-size: 13px;
+}
+.chat-loading-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: chat-loading-pulse 1s ease-in-out infinite;
+}
+@keyframes chat-loading-pulse {
+  0%, 100% { opacity: 0.25; transform: scale(0.85); }
+  50% { opacity: 1; transform: scale(1); }
+}
 .chat-welcome-inner {
   width: 100%;
   max-width: 720px;

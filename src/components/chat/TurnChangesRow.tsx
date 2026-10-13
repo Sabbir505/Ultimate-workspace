@@ -35,6 +35,7 @@ import {
 } from "../../lib/ipc";
 import type { ChatArtifact } from "../../state/chat";
 import { relativeTime } from "../../lib/relativeTime";
+import { resolveChatCwd } from "../../lib/chatCwd";
 import { useChatStore } from "../../state/chat";
 import { useProjectsStore } from "../../state/projects";
 import { useUiStore } from "../../state/ui";
@@ -143,6 +144,7 @@ export function TurnChangesRow({
   checkpoints,
   artifacts,
   onPreviewArtifact,
+  chatSessionId,
 }: {
   files: TurnFileChange[];
   checkpoints: ChatCheckpoint[];
@@ -150,6 +152,12 @@ export function TurnChangesRow({
    *  preview pane for generated files. */
   artifacts?: ChatArtifact[];
   onPreviewArtifact?: (artifact: ChatArtifact) => void;
+  /** The chat this message belongs to. Drives the working-directory
+   *  resolution below — the row must open files in THIS chat's repo, not in
+   *  whichever project the sidebar happens to select (a split-pane focus or
+   *  a manual project click used to reroute a chat's own "Review" to another
+   *  chat's repo). */
+  chatSessionId?: string | null;
 }) {
   // The newest checkpoint is the undo target; earlier ones on the same
   // message (restore-safety chains) stay out of the way.
@@ -164,7 +172,16 @@ export function TurnChangesRow({
   const openArtifactTab = useUiStore((s) => s.openArtifactTab);
   const projects = useProjectsStore((s) => s.projects);
   const selectedProjectId = useProjectsStore((s) => s.selectedProjectId);
-  const cwd = projects.find((p) => p.id === selectedProjectId)?.path ?? null;
+
+  // Chat-first working directory (src/lib/chatCwd.ts): the chat's picked
+  // folder, then its worktree, then its bound project — with the
+  // sidebar-selected project as the last resort for chats bound to nothing
+  // (matching the Changes panel's own fallback).
+  const resolveTurnCwd = (): string | null =>
+    resolveChatCwd(
+      chatSessionId,
+      projects.find((p) => p.id === selectedProjectId)?.path ?? null,
+    );
 
   if (files.length === 0 && !latest) return null;
 
@@ -200,8 +217,15 @@ export function TurnChangesRow({
   // bound) there is nothing to diff against — the Changes panel would render
   // an empty state — so the file itself opens as a named tab instead.
   const review = (path: string) => {
-    const status = selectedProjectId
-      ? useProjectsStore.getState().gitStatuses[selectedProjectId]
+    const cwd = resolveTurnCwd();
+    // Git status is cached PER PROJECT (and cwd can be a worktree, which no
+    // project row names) — look it up by the cwd's project, and let the
+    // backend answer when the folder is unknown to the cache.
+    const statusProjectId = cwd
+      ? projects.find((p) => p.path === cwd)?.id ?? null
+      : null;
+    const status = statusProjectId
+      ? useProjectsStore.getState().gitStatuses[statusProjectId]
       : undefined;
     if (!cwd || (status && !status.isRepo)) {
       openFileTab(path);
@@ -239,6 +263,7 @@ export function TurnChangesRow({
   // recorded path doesn't exist, look the basename up under the project so
   // the click still lands on the real file.
   const openRecovered = async (path: string) => {
+    const cwd = resolveTurnCwd();
     const isAbsolute = /^[A-Za-z]:[\\/]/.test(path) || path.startsWith("/");
     const root = cwd ? cwd.replace(/[\\/]+$/, "") : "";
     const sep = root.includes("\\") ? "\\" : "/";

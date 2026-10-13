@@ -178,7 +178,10 @@ export function createArtifactsSlice(set: ChatStoreSet, get: ChatStoreGet) {
       // on the producing bubble and in the Artifacts gallery.
       if (selectContextSessionId(get()) !== chatSessionId) return;
       const ui = useUiStore.getState();
-      ui.openArtifactTab({ path, filename });
+      // `auto` marks the tab as app-opened: a later chat switch sweeps it
+      // (see closeForeignAutoTabs) instead of leaving this chat's deliverable
+      // in the shared panel while the user reads another chat.
+      ui.openArtifactTab({ path, filename }, { auto: true, chatSessionId });
       ui.setToolPanelCollapsed(false);
     },
   };

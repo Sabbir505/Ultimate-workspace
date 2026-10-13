@@ -22,6 +22,7 @@ import { useUiStore } from "../../state/ui";
 import { useProjectsStore } from "../../state/projects";
 import { parseUnifiedDiff } from "../../lib/diff";
 import { formatDuration } from "../../lib/format";
+import { resolveChatCwd } from "../../lib/chatCwd";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { useTtsStore } from "../../state/tts";
 import { toggleReadAloud } from "../../lib/tts";
@@ -1344,24 +1345,13 @@ export function EditFileRow({
   const dir = path.slice(0, path.length - fileName.length).replace(/[\\/]$/, "");
   const stats = useMemo(() => (edit ? editLineStats(edit) : null), [edit]);
 
-  // Folder the file lives in, resolved the same way the send path
-  // (streamingSlice) and the Changes panel's chat-follow binding resolve a
-  // working directory: the chat's picked working folder, then its worktree,
-  // then its bound project. Deliberately NOT the sidebar-selected project —
-  // it can point somewhere else entirely, and the Changes panel follows the
-  // CHAT, so a cwd the chat itself doesn't have would only ever render the
-  // panel's "select a project" empty state.
-  const resolveEditCwd = (): string | null => {
-    const chat = useChatStore.getState();
-    const sid = chatSessionId ?? chat.focusedChatSessionId ?? chat.activeChatSessionId;
-    if (!sid) return null;
-    const session = chat.sessions.find((x) => x.id === sid);
-    const boundProjectId = chat.sessionProjects[sid];
-    const boundPath = boundProjectId
-      ? useProjectsStore.getState().projectById(boundProjectId)?.path
-      : undefined;
-    return chat.cwdOverrides[sid] || session?.worktreePath || boundPath || null;
-  };
+  // Folder the file lives in, resolved chat-first (src/lib/chatCwd.ts): the
+  // chat's picked working folder, then its worktree, then its bound project.
+  // Deliberately NOT the sidebar-selected project — it can point somewhere
+  // else entirely, and the Changes panel follows the CHAT, so a cwd the chat
+  // itself doesn't have would only ever render the panel's "select a project"
+  // empty state.
+  const resolveEditCwd = (): string | null => resolveChatCwd(chatSessionId);
 
   // Same routing as the turn-changes rows: an open git repo diff goes to the
   // DevDiffPanel overlay — openFilesTab activates the SINGLETON Changes tab
@@ -1370,7 +1360,10 @@ export function EditFileRow({
   // tab instead of a Changes tab that can only render its empty state.
   const openDiffOverlay = () => {
     const openFileTab = () =>
-      useUiStore.getState().openArtifactTab({ path, filename: fileName });
+      useUiStore.getState().openArtifactTab(
+        { path, filename: fileName },
+        { chatSessionId },
+      );
     const cwd = resolveEditCwd();
     const openDiff = () => {
       useUiStore.getState().setDiffPanelFile(path, cwd);
@@ -1443,7 +1436,12 @@ export function EditFileRow({
       </button>
       {edit && path && (
         <SmoothReveal open={open}>
-          <DiffCard path={path} edit={edit} done={step.done} />
+          <DiffCard
+            path={path}
+            edit={edit}
+            done={step.done}
+            chatSessionId={chatSessionId}
+          />
         </SmoothReveal>
       )}
     </div>

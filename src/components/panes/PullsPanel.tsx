@@ -1,9 +1,14 @@
-// Pulls tab: list / create / review GitHub pull requests for the selected
-// (or chat-bound) project, backed by the GitHub connector's OAuth token.
-// Three views in one panel: the PR list (default), a detail+review view, and
-// the create form. Pure pull-model — refresh on mount + every 30s while the
-// list is visible.
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+// Pulls tab: list / create / review GitHub pull requests (and issues) for the
+// selected (or chat-bound) project, backed by the GitHub connector's OAuth
+// token. Three surfaces in one panel: the list (default), a detail+review
+// view with Conversation/Files tabs, and the create form. Pure pull-model —
+// refresh on mount + every 30s while the list is visible.
+//
+// Panel chrome state (surface tab + both state filters) lives at THIS level
+// and mirrors into PANEL_UI, so it survives the detail-view round-trip and
+// tool-tab switches — going back from a PR must not reset "Closed" to "Open".
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { CircleCheck, CircleDot, GitMerge, GitPullRequest } from "lucide-react";
 import {
   githubAddIssueComment,
   githubCreateIssue,
@@ -25,6 +30,8 @@ import {
   type PullRequestSummary,
 } from "../../lib/ipc";
 import { openInBrowserPane } from "../../lib/openBrowserPane";
+import { parseUnifiedDiff } from "../../lib/diff";
+import { langForPath, loadDiffHighlighter, type HighlightLinesFn } from "../../lib/diffHighlight";
 import { useChatStore } from "../../state/chat";
 import { useProjectsStore } from "../../state/projects";
 import { prListCacheKey, usePullRequestsStore, type PrListState } from "../../state/pullRequests";
@@ -39,6 +46,21 @@ type View =
   | { kind: "issue"; number: number }
   | { kind: "newIssue" };
 
+/** Session-persisted panel chrome — see the file header. */
+const PANEL_UI: {
+  surface: "prs" | "issues";
+  prFilter: PrListState;
+  issueFilter: "open" | "closed" | "all";
+} = { surface: "prs", prFilter: "open", issueFilter: "open" };
+
+/** Test hook: PANEL_UI outlives individual renders, so a suite that touches
+ *  one test's filter would leak it into the next — reset alongside the store. */
+export function _resetPullsPanelUiForTests() {
+  PANEL_UI.surface = "prs";
+  PANEL_UI.prFilter = "open";
+  PANEL_UI.issueFilter = "open";
+}
+
 function toEpoch(iso: string): number {
   const ms = Date.parse(iso);
   return Number.isNaN(ms) ? 0 : Math.floor(ms / 1000);
@@ -49,6 +71,58 @@ const STATE_LABEL: Record<PrListState, string> = {
   closed: "Closed",
   all: "All",
 };
+
+const ISSUE_STATE_LABEL: Record<"open" | "closed" | "all", string> = {
+  open: "Open",
+  closed: "Closed",
+  all: "All",
+};
+
+// ---- State glyphs (the row/status rail) ----
+// Green open, purple merged, red closed, dim draft — the same four realities
+// a review can be in, carried by one glyph so color alone never has to speak.
+
+type PrStateKind = "open" | "merged" | "closed" | "draft";
+
+function prStateOf(pr: Pick<PullRequestSummary, "draft" | "merged" | "state">): PrStateKind {
+  if (pr.draft) return "draft";
+  if (pr.state !== "open") return pr.merged ? "merged" : "closed";
+  return "open";
+}
+
+function PrStateGlyph({ kind, size = 13 }: { kind: PrStateKind; size?: number }) {
+  if (kind === "merged") return <GitMerge size={size} strokeWidth={2} aria-hidden="true" />;
+  return <GitPullRequest size={size} strokeWidth={2} aria-hidden="true" />;
+}
+
+/** Segmented pill — the panel's only filter/switch control. */
+function Segmented<T extends string>({
+  label,
+  options,
+  value,
+  onChange,
+}: {
+  label: string;
+  options: { key: T; text: string }[];
+  value: T;
+  onChange: (next: T) => void;
+}) {
+  return (
+    <div className="pulls-seg" role="group" aria-label={label}>
+      {options.map((o) => (
+        <button
+          key={o.key}
+          type="button"
+          className={`pulls-seg-item${value === o.key ? " active" : ""}`}
+          aria-pressed={value === o.key}
+          onClick={() => onChange(o.key)}
+        >
+          {o.text}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 export function PullsPanel() {
   const projects = useProjectsStore((s) => s.projects);
@@ -62,8 +136,15 @@ export function PullsPanel() {
   const gitStatus = projectId ? gitStatuses[projectId] : undefined;
 
   const [view, setView] = useState<View>({ kind: "list" });
-  // Top-level surface: pull requests (existing) or issues (4.4.6).
-  const [surface, setSurface] = useState<"prs" | "issues">("prs");
+  const [surface, setSurface] = useState<"prs" | "issues">(PANEL_UI.surface);
+  const [prFilter, setPrFilter] = useState<PrListState>(PANEL_UI.prFilter);
+  const [issueFilter, setIssueFilter] = useState<"open" | "closed" | "all">(PANEL_UI.issueFilter);
+
+  useEffect(() => {
+    PANEL_UI.surface = surface;
+    PANEL_UI.prFilter = prFilter;
+    PANEL_UI.issueFilter = issueFilter;
+  }, [surface, prFilter, issueFilter]);
 
   if (!project || !projectId) {
     return (
@@ -85,27 +166,27 @@ export function PullsPanel() {
   return (
     <div className="pulls-panel">
       {view.kind === "list" && (
-        <div className="pulls-toolbar" style={{ gap: 6 }}>
-          {(["prs", "issues"] as const).map((k) => (
-            <button
-              key={k}
-              type="button"
-              className={`dev-diff-filter-item${surface === k ? " active" : ""}`}
-              style={{ borderRadius: 8 }}
-              onClick={() => {
-                setSurface(k);
-                setView({ kind: "list" });
-              }}
-            >
-              {k === "prs" ? "Pull requests" : "Issues"}
-            </button>
-          ))}
+        <div className="pulls-surfacebar">
+          <Segmented
+            label="Pull requests or issues"
+            options={[
+              { key: "prs", text: "Pull requests" },
+              { key: "issues", text: "Issues" },
+            ]}
+            value={surface}
+            onChange={(k) => {
+              setSurface(k);
+              setView({ kind: "list" });
+            }}
+          />
         </div>
       )}
       {surface === "prs" && view.kind === "list" && (
         <PrList
           projectId={projectId}
           currentBranch={gitStatus.branch ?? ""}
+          filter={prFilter}
+          onFilter={setPrFilter}
           onOpen={(number) => setView({ kind: "detail", number })}
           onCreate={() => setView({ kind: "create" })}
         />
@@ -113,6 +194,8 @@ export function PullsPanel() {
       {surface === "issues" && view.kind === "list" && (
         <IssueList
           projectId={projectId}
+          filter={issueFilter}
+          onFilter={setIssueFilter}
           onOpen={(number) => setView({ kind: "issue", number })}
           onCreate={() => setView({ kind: "newIssue" })}
         />
@@ -156,24 +239,25 @@ export function PullsPanel() {
 function PrList({
   projectId,
   currentBranch,
+  filter,
+  onFilter,
   onOpen,
   onCreate,
 }: {
   projectId: string;
   currentBranch: string;
+  filter: PrListState;
+  onFilter: (next: PrListState) => void;
   onOpen: (number: number) => void;
   onCreate: () => void;
 }) {
-  const [stateFilter, setStateFilter] = useState<PrListState>("open");
-  const [filterOpen, setFilterOpen] = useState(false);
-  const filterWrapRef = useRef<HTMLDivElement>(null);
-  const cacheKey = prListCacheKey(projectId, stateFilter);
+  const cacheKey = prListCacheKey(projectId, filter);
   const list = usePullRequestsStore((s) => s.lists[cacheKey]);
   const error = usePullRequestsStore((s) => s.listErrors[cacheKey]);
   const loading = usePullRequestsStore((s) => (s.listLoading[cacheKey] ?? 0) > 0);
   const refreshList = usePullRequestsStore((s) => s.refreshList);
 
-  const refresh = useCallback(() => void refreshList(projectId, stateFilter), [projectId, stateFilter, refreshList]);
+  const refresh = useCallback(() => void refreshList(projectId, filter), [projectId, filter, refreshList]);
   useEffect(() => {
     refresh();
     const t = window.setInterval(refresh, 30_000);
@@ -207,62 +291,21 @@ function PrList({
     }
   }, [setPendingArtifactFormData, setActiveView]);
 
-  // Close the scope menu on any outside click / Escape.
-  useEffect(() => {
-    if (!filterOpen) return;
-    const close = (e: MouseEvent) => {
-      if (filterWrapRef.current && !filterWrapRef.current.contains(e.target as Node)) {
-        setFilterOpen(false);
-      }
-    };
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setFilterOpen(false);
-    document.addEventListener("mousedown", close);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", close);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [filterOpen]);
-
   return (
     <>
       <div className="pulls-toolbar">
-        {/* Custom glass dropdown (same liquid-glass menu as the composer) —
-            the native <select> popup couldn't be styled. */}
-        <div className="dev-diff-filter-wrap" ref={filterWrapRef}>
-          <button
-            type="button"
-            className="dev-diff-filter-btn"
-            onClick={() => setFilterOpen((o) => !o)}
-            aria-haspopup="menu"
-            aria-expanded={filterOpen}
-            aria-label="Filter by state"
-          >
-            {STATE_LABEL[stateFilter]}
-            <svg width={11} height={11} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <polyline points="4 6 8 10 12 6" />
-            </svg>
-          </button>
-          {filterOpen && (
-            <div className="dev-diff-filter-menu" role="menu">
-              {(["open", "closed", "all"] as const).map((k) => (
-                <button
-                  key={k}
-                  role="menuitem"
-                  className={`dev-diff-filter-item${stateFilter === k ? " active" : ""}`}
-                  onClick={() => {
-                    setStateFilter(k);
-                    setFilterOpen(false);
-                  }}
-                >
-                  <span className="dev-diff-filter-check">{stateFilter === k ? "✓" : ""}</span>
-                  {STATE_LABEL[k]}
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
+        <Segmented
+          label="Filter by state"
+          options={(["open", "closed", "all"] as const).map((k) => ({ key: k, text: STATE_LABEL[k] }))}
+          value={filter}
+          onChange={onFilter}
+        />
         <div className="pulls-toolbar-spacer" />
+        {list && list.length > 0 && (
+          <span className="pulls-count" title="Pull requests shown (GitHub caps a page at 50)">
+            {list.length} shown
+          </span>
+        )}
         <button type="button" className="ghost pulls-refresh" onClick={refresh} title="Refresh" disabled={loading}>
           {loading ? <span className="pulls-spinner" aria-hidden="true" /> : "⟳"}
         </button>
@@ -296,7 +339,10 @@ function PrList({
         </div>
       ) : list.length === 0 ? (
         <div className="pulls-empty">
-          <div className="pulls-empty-title">No {stateFilter} pull requests</div>
+          <span className="pulls-empty-icon" aria-hidden="true">
+            <GitPullRequest size={22} strokeWidth={1.5} />
+          </span>
+          <div className="pulls-empty-title">No {filter} pull requests</div>
           <div className="pulls-empty-hint">Push a branch and hit New PR to start one.</div>
         </div>
       ) : (
@@ -311,17 +357,27 @@ function PrList({
 }
 
 function PrRow({ pr, onOpen }: { pr: PullRequestSummary; onOpen: () => void }) {
+  const kind = prStateOf(pr);
   return (
-    <button type="button" className="pulls-row" onClick={onOpen}>
-      <span className="pulls-row-num">#{pr.number}</span>
+    <button type="button" className="pulls-row" onClick={onOpen} aria-label={`PR #${pr.number}: ${pr.title}`}>
+      <span className={`pulls-row-icon ${kind}`}>
+        <PrStateGlyph kind={kind} />
+      </span>
       <span className="pulls-row-main">
         <span className="pulls-row-title">{pr.title}</span>
         <span className="pulls-row-meta">
-          {pr.headBranch} → {pr.baseBranch} · {pr.author} · {relativeTime(toEpoch(pr.updatedAt))}
+          <span className="pulls-row-num">#{pr.number}</span>
+          <span className="pulls-branch">{pr.headBranch}</span>
+          <span className="pulls-meta-sep" aria-hidden="true">→</span>
+          <span className="pulls-branch">{pr.baseBranch}</span>
+          <span className="pulls-meta-sep">·</span>
+          <span>{pr.author}</span>
+          <span className="pulls-meta-sep">·</span>
+          <span>{relativeTime(toEpoch(pr.updatedAt))}</span>
         </span>
       </span>
       {pr.draft && <span className="pulls-chip">Draft</span>}
-      {pr.state !== "open" && <span className="pulls-chip closed">{pr.state}</span>}
+      <span className="pulls-row-chevron" aria-hidden="true">›</span>
     </button>
   );
 }
@@ -342,6 +398,7 @@ function PrDetailView({
   const loadDetail = usePullRequestsStore((s) => s.loadDetail);
   const refreshList = usePullRequestsStore((s) => s.refreshList);
 
+  const [tab, setTab] = useState<"conversation" | "files">("conversation");
   const [reviewBody, setReviewBody] = useState("");
   const [submitting, setSubmitting] = useState<string | null>(null);
   const [expandedFiles, setExpandedFiles] = useState<Record<string, boolean>>({});
@@ -349,6 +406,13 @@ function PrDetailView({
   useEffect(() => {
     void loadDetail(projectId, number);
   }, [projectId, number, loadDetail]);
+
+  // Each PR opens on its conversation; a stale files-expansion from the last
+  // viewed PR must not leak into this one.
+  useEffect(() => {
+    setTab("conversation");
+    setExpandedFiles({});
+  }, [projectId, number]);
 
   const submitReview = async (event: "APPROVE" | "COMMENT" | "REQUEST_CHANGES") => {
     setSubmitting(event);
@@ -384,109 +448,159 @@ function PrDetailView({
     return <div className="pulls-empty"><div className="pulls-empty-hint">Loading PR #{number}…</div></div>;
   }
   const { detail, files, checks } = bundle;
+  const kind = prStateOf(detail);
   const canApprove = submitting === null; // approve allows empty body
   const canCommentOrRequest = submitting === null && reviewBody.trim() !== "";
+  const fileAdds = files.reduce((n, f) => n + f.additions, 0);
+  const fileDels = files.reduce((n, f) => n + f.deletions, 0);
 
   return (
     <div className="pulls-detail">
       <div className="pulls-detail-header">
-        <button type="button" className="ghost" onClick={onBack} aria-label="Back to list">
-          ←
-        </button>
-        <div className="pulls-detail-title-wrap">
+        <div className="pulls-detail-top">
+          <button type="button" className="ghost" onClick={onBack} aria-label="Back to list">
+            ←
+          </button>
+          <span className={`pulls-state ${kind}`}>
+            <PrStateGlyph kind={kind} size={11} />
+            {kind === "draft" ? "Draft" : kind}
+          </span>
           <span className="pulls-detail-title">
             #{detail.number} {detail.title}
           </span>
-          <span className="pulls-detail-meta">
-            {detail.headBranch} → {detail.baseBranch} · {detail.author} ·{" "}
-            <span className="pulls-stat-add">+{detail.additions}</span>{" "}
-            <span className="pulls-stat-del">−{detail.deletions}</span> · {detail.changedFiles} files
-          </span>
+          {checks && checks.state !== "none" && (
+            <span className={`pulls-checks ${checks.state}`} title={`${checks.total} checks, ${checks.failing} failing, ${checks.pending} pending`}>
+              {checks.state === "success" ? "✓" : checks.state === "failure" ? "✗" : "…"} {checks.total}
+            </span>
+          )}
+          <button
+            type="button"
+            className="ghost"
+            title="Open on GitHub"
+            onClick={() => openInBrowserPane(detail.htmlUrl)}
+          >
+            ↗
+          </button>
         </div>
-        {checks && checks.state !== "none" && (
-          <span className={`pulls-checks ${checks.state}`} title={`${checks.total} checks, ${checks.failing} failing, ${checks.pending} pending`}>
-            {checks.state === "success" ? "✓" : checks.state === "failure" ? "✗" : "…"} {checks.total}
-          </span>
-        )}
+        <div className="pulls-detail-meta">
+          <span className="pulls-branch">{detail.headBranch}</span>
+          <span className="pulls-meta-sep" aria-hidden="true">→</span>
+          <span className="pulls-branch">{detail.baseBranch}</span>
+          <span className="pulls-meta-sep">·</span>
+          <span>{detail.author}</span>
+          <span className="pulls-meta-sep">·</span>
+          <span>opened {relativeTime(toEpoch(detail.createdAt))}</span>
+          <span className="pulls-meta-sep">·</span>
+          <span className="pulls-stat-add">+{detail.additions}</span>
+          <span className="pulls-stat-del">−{detail.deletions}</span>
+          <span className="pulls-meta-sep">·</span>
+          <span>{detail.changedFiles} files</span>
+          {detail.mergeable === false && <span className="pulls-conflicts">Conflicts</span>}
+        </div>
+      </div>
+
+      <div className="pulls-tabs" role="tablist" aria-label="PR sections">
         <button
           type="button"
-          className="ghost"
-          title="Open on GitHub"
-          onClick={() => openInBrowserPane(detail.htmlUrl)}
+          role="tab"
+          aria-selected={tab === "conversation"}
+          className={`pulls-tab${tab === "conversation" ? " active" : ""}`}
+          onClick={() => setTab("conversation")}
         >
-          ↗
+          Conversation
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === "files"}
+          className={`pulls-tab${tab === "files" ? " active" : ""}`}
+          onClick={() => setTab("files")}
+        >
+          Files <span className="pulls-tab-count">{detail.changedFiles}</span>
         </button>
       </div>
 
       <div className="pulls-detail-scroll">
-        {detail.body && <pre className="pulls-body">{detail.body}</pre>}
-
-        <div className="pulls-files">
-          {files.map((f) => {
-            const open = expandedFiles[f.path] ?? false;
-            return (
-              <div key={f.path} className="pulls-file">
+        {tab === "conversation" ? (
+          <>
+            {detail.body ? <MdBody text={detail.body} /> : <div className="pulls-nobody">No description.</div>}
+            <div className="pulls-review">
+              <span className="pulls-review-label">Your review</span>
+              <textarea
+                className="pulls-review-body"
+                placeholder="Review comment (required for Comment / Request changes)…"
+                value={reviewBody}
+                onChange={(e) => setReviewBody(e.target.value)}
+                rows={3}
+                disabled={submitting !== null}
+              />
+              <div className="pulls-review-actions">
                 <button
                   type="button"
-                  className="pulls-file-head"
-                  onClick={() => setExpandedFiles((m) => ({ ...m, [f.path]: !open }))}
+                  className="primary pulls-approve"
+                  disabled={!canApprove}
+                  onClick={() => void submitReview("APPROVE")}
+                  title="Approve (body optional)"
                 >
-                  <span className={`pulls-file-status ${f.status}`}>{f.status[0]?.toUpperCase()}</span>
-                  <span className="pulls-file-path">
-                    {f.previousPath ? `${f.previousPath} → ` : ""}{f.path}
-                  </span>
-                  <span className="pulls-file-stats">
-                    <span className="pulls-stat-add">+{f.additions}</span>{" "}
-                    <span className="pulls-stat-del">−{f.deletions}</span>
-                  </span>
-                  <span className="pulls-file-chevron">{open ? "▾" : "▸"}</span>
+                  {submitting === "APPROVE" ? "…" : "Approve"}
                 </button>
-                {open && f.patch && <pre className="pulls-patch">{f.patch}</pre>}
-                {open && !f.patch && <div className="pulls-patch-none">Binary or deleted file — no inline patch.</div>}
+                <button
+                  type="button"
+                  className="ghost"
+                  disabled={!canCommentOrRequest}
+                  onClick={() => void submitReview("COMMENT")}
+                  title="Post a comment review (body required)"
+                >
+                  {submitting === "COMMENT" ? "…" : "Comment"}
+                </button>
+                <button
+                  type="button"
+                  className="ghost pulls-request-changes"
+                  disabled={!canCommentOrRequest}
+                  onClick={() => void submitReview("REQUEST_CHANGES")}
+                  title="Request changes (body required)"
+                >
+                  {submitting === "REQUEST_CHANGES" ? "…" : "Request changes"}
+                </button>
               </div>
-            );
-          })}
-        </div>
-
-        <div className="pulls-review">
-          <textarea
-            className="pulls-review-body"
-            placeholder="Review comment (required for Comment / Request changes)…"
-            value={reviewBody}
-            onChange={(e) => setReviewBody(e.target.value)}
-            rows={3}
-            disabled={submitting !== null}
-          />
-          <div className="pulls-review-actions">
-            <button
-              type="button"
-              className="primary pulls-approve"
-              disabled={!canApprove}
-              onClick={() => void submitReview("APPROVE")}
-              title="Approve (body optional)"
-            >
-              {submitting === "APPROVE" ? "…" : "Approve"}
-            </button>
-            <button
-              type="button"
-              className="ghost"
-              disabled={!canCommentOrRequest}
-              onClick={() => void submitReview("COMMENT")}
-              title="Post a comment review (body required)"
-            >
-              {submitting === "COMMENT" ? "…" : "Comment"}
-            </button>
-            <button
-              type="button"
-              className="ghost pulls-request-changes"
-              disabled={!canCommentOrRequest}
-              onClick={() => void submitReview("REQUEST_CHANGES")}
-              title="Request changes (body required)"
-            >
-              {submitting === "REQUEST_CHANGES" ? "…" : "Request changes"}
-            </button>
-          </div>
-        </div>
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="pulls-files-summary">
+              {files.length} files
+              <span className="pulls-meta-sep">·</span>
+              <span className="pulls-stat-add">+{fileAdds}</span>
+              <span className="pulls-stat-del">−{fileDels}</span>
+            </div>
+            <div className="pulls-files">
+              {files.map((f) => {
+                const open = expandedFiles[f.path] ?? false;
+                return (
+                  <div key={f.path} className="pulls-file">
+                    <button
+                      type="button"
+                      className="pulls-file-head"
+                      onClick={() => setExpandedFiles((m) => ({ ...m, [f.path]: !open }))}
+                    >
+                      <span className={`pulls-file-status ${f.status}`}>{f.status[0]?.toUpperCase()}</span>
+                      <span className="pulls-file-path">
+                        {f.previousPath ? `${f.previousPath} → ` : ""}{f.path}
+                      </span>
+                      <span className="pulls-file-stats">
+                        <span className="pulls-stat-add">+{f.additions}</span>{" "}
+                        <span className="pulls-stat-del">−{f.deletions}</span>
+                      </span>
+                      <span className="pulls-file-chevron">{open ? "▾" : "▸"}</span>
+                    </button>
+                    {open && f.patch && <PullsPatch path={f.path} patch={f.patch} />}
+                    {open && !f.patch && <div className="pulls-patch-none">Binary or deleted file — no inline patch.</div>}
+                  </div>
+                );
+              })}
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
@@ -684,38 +798,124 @@ function PrCreateForm({
 
 // ---- Issues surface (SS4.4.6) ----
 
-const ISSUE_STATE_LABEL: Record<string, string> = { open: "Open", closed: "Closed", all: "All" };
-
 function IssueList({
   projectId,
+  filter,
+  onFilter,
   onOpen,
   onCreate,
 }: {
   projectId: string;
+  filter: "open" | "closed" | "all";
+  onFilter: (next: "open" | "closed" | "all") => void;
   onOpen: (number: number) => void;
   onCreate: () => void;
 }) {
-  const [stateFilter, setStateFilter] = useState<"open" | "closed" | "all">("open");
-  const [issues, setIssues] = useState<GitHubIssueSummary[] | null>(null);
+  const issues = useIssueList(projectId, filter);
+
+  return (
+    <>
+      <div className="pulls-toolbar">
+        <Segmented
+          label="Filter by state"
+          options={(["open", "closed", "all"] as const).map((k) => ({ key: k, text: ISSUE_STATE_LABEL[k] }))}
+          value={filter}
+          onChange={onFilter}
+        />
+        <div className="pulls-toolbar-spacer" />
+        {issues.list && issues.list.length > 0 && (
+          <span className="pulls-count" title="Issues shown (GitHub caps a page at 50)">
+            {issues.list.length} shown
+          </span>
+        )}
+        <button type="button" className="ghost pulls-refresh" onClick={() => void issues.refresh()} title="Refresh" disabled={issues.loading}>
+          {issues.loading ? <span className="pulls-spinner" aria-hidden="true" /> : "⟳"}
+        </button>
+        <button type="button" className="primary pulls-new" onClick={onCreate}>
+          New issue
+        </button>
+      </div>
+      {issues.error && !issues.list ? (
+        <div className="pulls-empty">
+          <div className="pulls-empty-title">Couldn't load issues</div>
+          <div className="pulls-empty-hint">{issues.error}</div>
+        </div>
+      ) : !issues.list ? (
+        <div className="pulls-empty">
+          <span className="pulls-spinner" aria-hidden="true" />
+          <div className="pulls-empty-hint">Loading...</div>
+        </div>
+      ) : issues.list.length === 0 ? (
+        <div className="pulls-empty">
+          <span className="pulls-empty-icon" aria-hidden="true">
+            <CircleDot size={22} strokeWidth={1.5} />
+          </span>
+          <div className="pulls-empty-title">No {filter} issues</div>
+          <div className="pulls-empty-hint">Hit New issue to file the first one.</div>
+        </div>
+      ) : (
+        <div className="pulls-list">
+          {issues.list.map((issue) => {
+            const open = issue.state === "open";
+            return (
+              <button
+                key={issue.number}
+                type="button"
+                className="pulls-row"
+                onClick={() => onOpen(issue.number)}
+                aria-label={`Issue #${issue.number}: ${issue.title}`}
+              >
+                <span className={`pulls-row-icon ${open ? "open" : "done"}`}>
+                  {open ? <CircleDot size={13} strokeWidth={2} aria-hidden="true" /> : <CircleCheck size={13} strokeWidth={2} aria-hidden="true" />}
+                </span>
+                <span className="pulls-row-main">
+                  <span className="pulls-row-title">{issue.title}</span>
+                  <span className="pulls-row-meta">
+                    <span className="pulls-row-num">#{issue.number}</span>
+                    <span className="pulls-meta-sep">·</span>
+                    <span>{issue.author}</span>
+                    <span className="pulls-meta-sep">·</span>
+                    <span>{relativeTime(toEpoch(issue.updatedAt))}</span>
+                    {issue.comments > 0 && (
+                      <>
+                        <span className="pulls-meta-sep">·</span>
+                        <span>{issue.comments} comment{issue.comments === 1 ? "" : "s"}</span>
+                      </>
+                    )}
+                    {issue.labels.slice(0, 2).map((l) => (
+                      <span key={l} className="pulls-label">{l}</span>
+                    ))}
+                  </span>
+                </span>
+                <span className="pulls-row-chevron" aria-hidden="true">›</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </>
+  );
+}
+
+/** Issue list fetch with the stale-response guard (audit H33): switching the
+ *  state filter re-creates `refresh` and re-arms the interval, but the
+ *  PREVIOUS filter's in-flight request had no cancellation — resolving last
+ *  it painted open-issue rows under the "Closed" label (and cleared any
+ *  error). Self-healed only at the next 30s tick. */
+function useIssueList(projectId: string, state: "open" | "closed" | "all") {
+  const [list, setList] = useState<GitHubIssueSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [filterOpen, setFilterOpen] = useState(false);
-  const filterWrapRef = useRef<HTMLDivElement>(null);
-
-  // Stale-response guard (audit H33): switching the state filter (Open →
-  // Closed/All) re-creates `refresh` and re-arms the interval, but the
-  // PREVIOUS filter's in-flight request had no cancellation — resolving last
-  // it painted open-issues rows under the "Closed" label (and cleared any
-  // error). Self-healed only at the next 30s tick.
   const refreshSeqRef = useRef(0);
+
   const refresh = useCallback(async () => {
     const seq = ++refreshSeqRef.current;
     const stale = () => seq !== refreshSeqRef.current;
     setLoading(true);
     try {
-      const next = await githubListIssues(projectId, stateFilter);
+      const next = await githubListIssues(projectId, state);
       if (stale()) return;
-      setIssues(next);
+      setList(next);
       setError(null);
     } catch (err) {
       if (stale()) return;
@@ -723,7 +923,7 @@ function IssueList({
     } finally {
       if (!stale()) setLoading(false);
     }
-  }, [projectId, stateFilter]);
+  }, [projectId, state]);
 
   useEffect(() => {
     void refresh();
@@ -735,84 +935,7 @@ function IssueList({
     };
   }, [refresh]);
 
-  useEffect(() => {
-    if (!filterOpen) return;
-    const close = (e: MouseEvent) => {
-      if (filterWrapRef.current && !filterWrapRef.current.contains(e.target as Node)) setFilterOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setFilterOpen(false);
-    document.addEventListener("mousedown", close);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", close);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [filterOpen]);
-
-  return (
-    <>
-      <div className="pulls-toolbar">
-        <div className="dev-diff-filter-wrap" ref={filterWrapRef}>
-          <button type="button" className="dev-diff-filter-btn" onClick={() => setFilterOpen((o) => !o)} aria-haspopup="menu" aria-expanded={filterOpen}>
-            {ISSUE_STATE_LABEL[stateFilter]}
-            <svg width={11} height={11} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <polyline points="4 6 8 10 12 6" />
-            </svg>
-          </button>
-          {filterOpen && (
-            <div className="dev-diff-filter-menu" role="menu">
-              {(["open", "closed", "all"] as const).map((k) => (
-                <button key={k} role="menuitem" className={`dev-diff-filter-item${stateFilter === k ? " active" : ""}`} onClick={() => { setStateFilter(k); setFilterOpen(false); }}>
-                  <span className="dev-diff-filter-check">{stateFilter === k ? "\u2713" : ""}</span>
-                  {ISSUE_STATE_LABEL[k]}
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-        <div className="pulls-toolbar-spacer" />
-        <button type="button" className="ghost pulls-refresh" onClick={() => void refresh()} title="Refresh" disabled={loading}>
-          {loading ? <span className="pulls-spinner" aria-hidden="true" /> : "\u27f3"}
-        </button>
-        <button type="button" className="primary pulls-new" onClick={onCreate}>
-          New issue
-        </button>
-      </div>
-      {error && !issues ? (
-        <div className="pulls-empty">
-          <div className="pulls-empty-title">Couldn't load issues</div>
-          <div className="pulls-empty-hint">{error}</div>
-        </div>
-      ) : !issues ? (
-        <div className="pulls-empty">
-          <span className="pulls-spinner" aria-hidden="true" />
-          <div className="pulls-empty-hint">Loading...</div>
-        </div>
-      ) : issues.length === 0 ? (
-        <div className="pulls-empty">
-          <div className="pulls-empty-title">No {stateFilter} issues</div>
-          <div className="pulls-empty-hint">Hit New issue to file the first one.</div>
-        </div>
-      ) : (
-        <div className="pulls-list">
-          {issues.map((issue) => (
-            <button key={issue.number} type="button" className="pulls-row" onClick={() => onOpen(issue.number)}>
-              <span className="pulls-row-num">#{issue.number}</span>
-              <span className="pulls-row-main">
-                <span className="pulls-row-title">{issue.title}</span>
-                <span className="pulls-row-meta">
-                  {issue.author} - {relativeTime(toEpoch(issue.updatedAt))}
-                  {issue.comments > 0 ? ` - ${issue.comments} comment${issue.comments === 1 ? "" : "s"}` : ""}
-                  {issue.labels.length > 0 ? ` - ${issue.labels.join(", ")}` : ""}
-                </span>
-              </span>
-              {issue.state !== "open" && <span className="pulls-chip closed">{issue.state}</span>}
-            </button>
-          ))}
-        </div>
-      )}
-    </>
-  );
+  return { list, error, loading, refresh };
 }
 
 function IssueDetailView({ projectId, number, onBack }: { projectId: string; number: number; onBack: () => void }) {
@@ -883,41 +1006,67 @@ function IssueDetailView({ projectId, number, onBack }: { projectId: string; num
       </div>
     );
   }
+  const open = issue.state === "open";
   return (
     <div className="pulls-detail">
-      <div className="pulls-detail-head">
-        <button type="button" className="ghost" onClick={onBack}>{String.fromCharCode(8592)}</button>
-        <span className="pulls-row-num">#{issue.number}</span>
-        <span className="pulls-row-title" style={{ flex: 1 }}>{issue.title}</span>
-        <button type="button" className="ghost" disabled={busy === "state"} onClick={() => void toggleState()}>
-          {issue.state === "open" ? "Close issue" : "Reopen"}
-        </button>
+      <div className="pulls-detail-header">
+        <div className="pulls-detail-top">
+          <button type="button" className="ghost" onClick={onBack} aria-label="Back to list">←</button>
+          <span className={`pulls-state ${open ? "open" : "done"}`}>
+            {open ? <CircleDot size={11} strokeWidth={2} aria-hidden="true" /> : <CircleCheck size={11} strokeWidth={2} aria-hidden="true" />}
+            {open ? "Open" : "Closed"}
+          </span>
+          <span className="pulls-detail-title">#{issue.number} {issue.title}</span>
+          <button
+            type="button"
+            className="ghost"
+            title="Open on GitHub"
+            onClick={() => openInBrowserPane(issue.htmlUrl)}
+          >
+            ↗
+          </button>
+        </div>
+        <div className="pulls-detail-meta">
+          <span>{issue.author}</span>
+          <span className="pulls-meta-sep">·</span>
+          <span>opened {relativeTime(toEpoch(issue.createdAt))}</span>
+          {issue.labels.map((l) => (
+            <span key={l} className="pulls-label">{l}</span>
+          ))}
+          <div className="pulls-toolbar-spacer" />
+          <button type="button" className="ghost" disabled={busy === "state"} onClick={() => void toggleState()}>
+            {issue.state === "open" ? "Close issue" : "Reopen"}
+          </button>
+        </div>
       </div>
-      <div className="pulls-detail-meta">
-        {issue.state} - {issue.author} - {relativeTime(toEpoch(issue.updatedAt))}
-        {issue.labels.length > 0 ? ` - ${issue.labels.join(", ")}` : ""}
-      </div>
-      <div className="pulls-detail-body">{issue.body || "(no description)"}</div>
-      <div className="pulls-detail-comments">
-        {comments.map((c) => (
-          <div key={c.id} className="pulls-detail-comment">
-            <div className="pulls-detail-meta">
-              {c.author} - {relativeTime(toEpoch(c.createdAt))}
+      <div className="pulls-detail-scroll">
+        {issue.body ? <MdBody text={issue.body} /> : <div className="pulls-nobody">No description.</div>}
+        <div className="pulls-detail-comments">
+          {comments.map((c) => (
+            <div key={c.id} className="pulls-comment">
+              <div className="pulls-comment-head">
+                <span className="pulls-comment-author">{c.author}</span>
+                <span>{relativeTime(toEpoch(c.createdAt))}</span>
+              </div>
+              <MdBody text={c.body} />
             </div>
-            <div className="pulls-detail-body">{c.body}</div>
+          ))}
+        </div>
+        <div className="pulls-review">
+          <span className="pulls-review-label">Add a comment</span>
+          <textarea
+            rows={3}
+            value={comment}
+            onChange={(e) => setComment(e.target.value)}
+            placeholder="Write a comment..."
+          />
+          <div className="pulls-review-actions">
+            <div className="pulls-toolbar-spacer" />
+            <button type="button" className="primary" disabled={!comment.trim() || busy === "comment"} onClick={() => void postComment()}>
+              {busy === "comment" ? "Posting..." : "Comment"}
+            </button>
           </div>
-        ))}
-      </div>
-      <div className="pulls-review-compose">
-        <textarea
-          rows={3}
-          value={comment}
-          onChange={(e) => setComment(e.target.value)}
-          placeholder="Write a comment..."
-        />
-        <button type="button" className="primary" disabled={!comment.trim() || busy === "comment"} onClick={() => void postComment()}>
-          {busy === "comment" ? "Posting..." : "Comment"}
-        </button>
+        </div>
       </div>
     </div>
   );
@@ -951,9 +1100,9 @@ function NewIssueForm({
 
   return (
     <div className="pulls-create">
-      <div className="pulls-detail-head">
-        <button type="button" className="ghost" onClick={onCancel}>{String.fromCharCode(8592)}</button>
-        <span className="pulls-row-title" style={{ flex: 1 }}>New issue</span>
+      <div className="pulls-create-header">
+        <button type="button" className="ghost" onClick={onCancel}>←</button>
+        <span className="pulls-detail-title">New issue</span>
       </div>
       <input
         className="pulls-create-title"
@@ -974,6 +1123,116 @@ function NewIssueForm({
           {creating ? "Creating..." : "Create issue"}
         </button>
       </div>
+    </div>
+  );
+}
+
+// PR/issue bodies are GitHub markdown. They render through the same document
+// pipeline as the .md artifact preview (MarkdownDoc), loaded lazily so the
+// remark/KaTeX/Prism chunk only downloads when a body is actually opened —
+// PullsPanel itself is part of the eagerly-loaded tool panel. Until the chunk
+// lands, the raw text shows in the same box (no layout shift on upgrade).
+const MarkdownDocument = lazy(() =>
+  import("../chat/MarkdownDoc").then((m) => ({ default: m.MarkdownDocument })),
+);
+
+function MdBody({ text }: { text: string }) {
+  return (
+    <div className="pulls-md chat-markdown artifact-preview-md" dir="auto">
+      <Suspense fallback={<pre className="pulls-md-fallback">{text}</pre>}>
+        <MarkdownDocument text={text} />
+      </Suspense>
+    </div>
+  );
+}
+
+// GitHub's per-file `patch` field starts at the `@@` hunk header with no
+// `diff --git` preamble — parseUnifiedDiff keys a file off that header, so a
+// synthetic one (from the file path we already have) opens the parse. Rows
+// are then syntax-highlighted IDE-style: the old side (context + deletions)
+// and the new side (context + additions) are each tokenized as one program so
+// multi-line comments/strings keep their color across rows, and each row
+// renders its serialized fragment. Plain text until the highlighter chunk
+// lands — no layout shift on upgrade.
+function PullsPatch({ path, patch }: { path: string; patch: string }) {
+  const [highlight, setHighlight] = useState<HighlightLinesFn | null>(null);
+  useEffect(() => {
+    let live = true;
+    loadDiffHighlighter()
+      .then((fn) => {
+        // The loaded value IS a function — pass it via an updater fn, or
+        // React's basicStateReducer invokes it as a setState updater with the
+        // previous state (null) as its argument (same trap as DiffCard).
+        if (live) setHighlight(() => fn);
+      })
+      .catch(() => {
+        /* highlighting is cosmetic — plain text stays readable */
+      });
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  const lang = useMemo(() => langForPath(path), [path]);
+  const lines = useMemo(() => {
+    const files = parseUnifiedDiff(`diff --git a/${path} b/${path}\n${patch}`);
+    return files.flatMap((file) => file.lines.filter((l) => l.type !== "meta"));
+  }, [path, patch]);
+
+  // Per-row HTML keyed by row index. Context rows paint from the new side
+  // first (GitHub's convention); the old side fills any rows the new side
+  // didn't cover. Hunk-header rows join neither stream — they render as the
+  // accent-colored @@ line.
+  const htmlByRow = useMemo(() => {
+    if (!highlight || !lang) return null;
+    const oldText: string[] = [];
+    const newText: string[] = [];
+    const oldRows: number[] = [];
+    const newRows: number[] = [];
+    lines.forEach((l, i) => {
+      if (l.type === "del" || l.type === "context") {
+        oldText.push(l.text);
+        oldRows.push(i);
+      }
+      if (l.type === "add" || l.type === "context") {
+        newText.push(l.text);
+        newRows.push(i);
+      }
+    });
+    const byRow = new Array<string | null>(lines.length).fill(null);
+    const paint = (text: string, rows: number[]) => {
+      const html = highlight(text, lang);
+      rows.forEach((row, i) => {
+        if (byRow[row] === null && html[i] != null) byRow[row] = html[i];
+      });
+    };
+    paint(newText.join("\n"), newRows);
+    paint(oldText.join("\n"), oldRows);
+    return byRow;
+  }, [highlight, lang, lines]);
+
+  return (
+    <div className="pulls-patch">
+      {lines.map((line, j) => {
+        const prefix =
+          line.type === "add" ? "+ " : line.type === "del" ? "- " : line.type === "hunk" ? "" : "  ";
+        const html = htmlByRow?.[j] ?? null;
+        return (
+          <div key={j} className={`diff-line ${line.type}`}>
+            <span className="diff-line-gutter diff-line-gutter-old">{line.oldLine ?? ""}</span>
+            <span className="diff-line-gutter diff-line-gutter-new">{line.newLine ?? ""}</span>
+            <span className="diff-line-content">
+              {prefix}
+              {html !== null ? (
+                // Serializer output is fully escaped source text — safe.
+                <span dangerouslySetInnerHTML={{ __html: html }} />
+              ) : (
+                line.text
+              )}
+            </span>
+          </div>
+        );
+      })}
     </div>
   );
 }

@@ -48,7 +48,7 @@ vi.mock("../state/chat", () => ({
 }));
 
 import { _resetPullRequestsForTests, prListCacheKey, usePullRequestsStore } from "../state/pullRequests";
-import { PullsPanel } from "../components/panes/PullsPanel";
+import { _resetPullsPanelUiForTests, PullsPanel } from "../components/panes/PullsPanel";
 
 const PR = {
   number: 42,
@@ -58,6 +58,7 @@ const PR = {
   headBranch: "feat/thing",
   baseBranch: "main",
   draft: false,
+  merged: false,
   state: "open",
   htmlUrl: "https://github.com/o/r/pull/42",
   createdAt: "2026-08-01T10:00:00Z",
@@ -68,6 +69,7 @@ beforeEach(() => {
   cleanup();
   vi.clearAllMocks();
   _resetPullRequestsForTests();
+  _resetPullsPanelUiForTests();
   projectsState.projects = [];
   projectsState.selectedProjectId = null;
   projectsState.gitStatuses = {};
@@ -226,14 +228,45 @@ describe("PullsPanel", () => {
     );
     render(<PullsPanel />);
     expect(await screen.findByText("feat: add the thing")).toBeTruthy();
-    // The filter is a custom glass dropdown: open it, pick "Closed".
-    fireEvent.click(screen.getByLabelText("Filter by state"));
-    fireEvent.click(screen.getByRole("menuitem", { name: "Closed" }));
+    // The state filter is a segmented control — pick "Closed".
+    fireEvent.click(screen.getByText("Closed"));
     expect(screen.getByText("Loading…")).toBeTruthy();
     expect(document.querySelector(".pulls-spinner")).toBeTruthy();
     resolveClosed([{ ...PR, number: 7, state: "closed", title: "closed: fix the bug" }]);
     expect(await screen.findByText("closed: fix the bug")).toBeTruthy();
     expect(screen.queryByText("Loading…")).toBeNull();
+  });
+
+  it("keeps the state filter when returning from a PR detail view", async () => {
+    setupGitProject();
+    githubListPrsMock.mockImplementation((_projectId: string, state: string) =>
+      state === "closed"
+        ? Promise.resolve([{ ...PR, number: 7, state: "closed", title: "closed: fix the bug" }])
+        : Promise.resolve([PR]),
+    );
+    githubGetPrMock.mockResolvedValue({
+      ...PR,
+      number: 7,
+      state: "closed",
+      title: "closed: fix the bug",
+      body: "body",
+      headSha: "abc",
+      additions: 1,
+      deletions: 1,
+      changedFiles: 1,
+      mergeable: true,
+    });
+    render(<PullsPanel />);
+    expect(await screen.findByText("feat: add the thing")).toBeTruthy();
+    fireEvent.click(screen.getByText("Closed"));
+    expect(await screen.findByText("closed: fix the bug")).toBeTruthy();
+    // Into the detail view and back — the list must still be the CLOSED list.
+    fireEvent.click(screen.getByText("closed: fix the bug"));
+    expect(await screen.findByText(/#7 closed: fix the bug/)).toBeTruthy();
+    fireEvent.click(screen.getByLabelText("Back to list"));
+    expect(await screen.findByText("closed: fix the bug")).toBeTruthy();
+    expect(screen.getByText("Closed").getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByText("Open").getAttribute("aria-pressed")).toBe("false");
   });
 
   it("keeps cached rows visible and spins the refresh button during a background refresh", async () => {

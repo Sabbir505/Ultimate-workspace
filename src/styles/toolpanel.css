@@ -686,21 +686,43 @@
 .git-sidebar-mesh-row.spawned.running {
   border-color: color-mix(in srgb, #c98ef7 40%, var(--border));
 }
-/* ---- Pull Requests tab (PullsPanel) ---- */
+/* ---- Pull Requests tab (PullsPanel) ----
+   Design notes: one state rail carries the review reality of every row —
+   green open, purple merged, red closed, dim draft — so color alone never
+   has to speak. Filters are segmented pills (3 options beat a dropdown);
+   the segmented control is the panel's only chrome widget. Detail view is
+   GitHub-shaped: status header, then Conversation / Files tabs. */
 .pulls-panel {
   display: flex; flex-direction: column; height: 100%; min-height: 0;
   font-size: 12px; color: var(--text);
 }
+.pulls-surfacebar {
+  display: flex; align-items: center;
+  padding: 8px 10px 6px;
+}
 .pulls-toolbar {
   display: flex; align-items: center; gap: 6px;
-  padding: 8px 10px; border-bottom: 1px solid var(--border);
+  padding: 0 10px 8px; border-bottom: 1px solid var(--border);
 }
 .pulls-toolbar-spacer { flex: 1; }
-.pulls-filter {
-  background: var(--surface-2); color: var(--text);
-  border: 1px solid var(--border); border-radius: 6px;
-  font-size: 11px; padding: 3px 6px;
+/* Segmented control: surface switch and the state filter. */
+.pulls-seg {
+  display: inline-flex; gap: 2px; padding: 2px;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 8px;
 }
+.pulls-seg-item {
+  border: none; background: none; cursor: pointer;
+  color: var(--text-dim); font-size: 11px; font-weight: 500;
+  padding: 3px 10px; border-radius: 6px;
+  transition: background 0.12s, color 0.12s;
+}
+.pulls-seg-item:hover { color: var(--text); }
+.pulls-seg-item.active {
+  background: var(--surface); color: var(--text);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+}
+.pulls-count { color: var(--text-dim); font-size: 10px; flex-shrink: 0; }
 .pulls-new { font-size: 11px; padding: 4px 10px; }
 .pulls-spinner {
   display: inline-block; flex-shrink: 0;
@@ -709,56 +731,154 @@
   animation: tool-spin 0.7s linear infinite;
 }
 .pulls-refresh { display: inline-flex; align-items: center; justify-content: center; }
-.pulls-list { flex: 1; overflow-y: auto; padding: 4px 0; }
+.pulls-list {
+  flex: 1; overflow-y: auto;
+  padding: 6px; display: flex; flex-direction: column; gap: 2px;
+}
 .pulls-row {
-  display: flex; align-items: center; gap: 8px; width: 100%;
-  padding: 7px 10px; background: none; border: none; cursor: pointer;
-  text-align: left; color: var(--text); border-bottom: 1px solid color-mix(in srgb, var(--border) 40%, transparent);
+  display: flex; align-items: center; gap: 9px; width: 100%;
+  padding: 8px 10px; background: none; border: none; border-radius: 9px;
+  cursor: pointer; text-align: left; color: var(--text);
+  transition: background 0.12s;
 }
 .pulls-row:hover { background: var(--surface-2); }
-.pulls-row-num { color: var(--text-dim); font-size: 11px; flex-shrink: 0; }
-.pulls-row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
-.pulls-row-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pulls-row-meta {
-  color: var(--text-dim); font-size: 10px;
+.pulls-row-icon { display: inline-flex; flex-shrink: 0; }
+.pulls-row-icon.open { color: #22c55e; }
+.pulls-row-icon.merged, .pulls-row-icon.done { color: #a855f7; }
+.pulls-row-icon.closed { color: #ef4444; }
+.pulls-row-icon.draft { color: var(--text-dim); opacity: 0.7; }
+.pulls-row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.pulls-row-title {
+  font-weight: 600; font-size: 12.5px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pulls-row-meta {
+  display: flex; align-items: center; gap: 5px;
+  color: var(--text-dim); font-size: 10.5px;
+  overflow: hidden; white-space: nowrap;
+}
+.pulls-row-meta > * { flex-shrink: 0; }
+.pulls-row-num { font-family: var(--font-mono, ui-monospace); font-size: 10px; }
+.pulls-branch {
+  font-family: var(--font-mono, ui-monospace); font-size: 10px;
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+  border-radius: 4px; padding: 1px 5px;
+  max-width: 170px; overflow: hidden; text-overflow: ellipsis;
+}
+.pulls-meta-sep { opacity: 0.55; }
+.pulls-row-chevron {
+  color: var(--text-dim); font-size: 13px; flex-shrink: 0;
+  opacity: 0; transform: translateX(-3px);
+  transition: opacity 0.12s, transform 0.12s;
+}
+.pulls-row:hover .pulls-row-chevron { opacity: 1; transform: none; }
+.pulls-label {
+  font-size: 9px; padding: 1px 6px; border-radius: 99px; flex-shrink: 0;
+  border: 1px solid var(--border); color: var(--text-dim);
 }
 .pulls-chip {
   font-size: 9px; padding: 1px 6px; border-radius: 99px; flex-shrink: 0;
   background: color-mix(in srgb, #eab308 18%, transparent); color: #eab308;
   text-transform: uppercase; letter-spacing: 0.06em;
 }
-.pulls-chip.closed {
-  background: color-mix(in srgb, #a855f7 18%, transparent); color: #a855f7;
-}
 .pulls-empty {
   flex: 1; display: flex; flex-direction: column; align-items: center;
   justify-content: center; gap: 6px; padding: 24px; text-align: center;
 }
+.pulls-empty-icon { color: var(--text-dim); opacity: 0.6; margin-bottom: 2px; }
 .pulls-empty-title { font-size: 13px; font-weight: 600; }
 .pulls-empty-hint { color: var(--text-dim); font-size: 11px; max-width: 280px; }
 
-/* Detail view */
+/* Detail view: status header, Conversation/Files tabs. */
 .pulls-detail { display: flex; flex-direction: column; height: 100%; min-height: 0; }
 .pulls-detail-header {
-  display: flex; align-items: flex-start; gap: 8px;
-  padding: 8px 10px; border-bottom: 1px solid var(--border);
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 10px 12px; border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
 }
-.pulls-detail-title-wrap { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.pulls-detail-title { font-weight: 600; font-size: 12px; }
-.pulls-detail-meta { color: var(--text-dim); font-size: 10px; }
+.pulls-detail-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.pulls-detail-title {
+  flex: 1; min-width: 0;
+  font-weight: 650; font-size: 13px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pulls-state {
+  display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0;
+  font-size: 10px; font-weight: 700; letter-spacing: 0.04em;
+  text-transform: uppercase; padding: 2px 8px; border-radius: 99px;
+}
+.pulls-state.open { background: color-mix(in srgb, #22c55e 15%, transparent); color: #22c55e; }
+.pulls-state.merged, .pulls-state.done {
+  background: color-mix(in srgb, #a855f7 15%, transparent); color: #a855f7;
+}
+.pulls-state.closed { background: color-mix(in srgb, #ef4444 15%, transparent); color: #ef4444; }
+.pulls-state.draft {
+  background: color-mix(in srgb, var(--text) 10%, transparent); color: var(--text-dim);
+}
+.pulls-detail-meta {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding-left: 34px;
+  color: var(--text-dim); font-size: 10.5px;
+}
 .pulls-stat-add { color: #22c55e; }
 .pulls-stat-del { color: #ef4444; }
+.pulls-conflicts {
+  font-size: 10px; font-weight: 600; padding: 1px 7px; border-radius: 99px;
+  background: color-mix(in srgb, #ef4444 14%, transparent); color: #ef4444;
+}
 .pulls-checks { font-size: 10px; padding: 2px 7px; border-radius: 99px; flex-shrink: 0; }
 .pulls-checks.success { background: color-mix(in srgb, #22c55e 16%, transparent); color: #22c55e; }
 .pulls-checks.failure { background: color-mix(in srgb, #ef4444 16%, transparent); color: #ef4444; }
 .pulls-checks.pending { background: color-mix(in srgb, #eab308 16%, transparent); color: #eab308; }
+.pulls-tabs {
+  display: flex; gap: 2px; padding: 5px 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+.pulls-tab {
+  position: relative; border: none; background: none; cursor: pointer;
+  color: var(--text-dim); font-size: 11.5px; font-weight: 500;
+  padding: 6px 12px 7px;
+  border-radius: 8px 8px 0 0;
+  transition: color 0.12s, background 0.12s;
+}
+.pulls-tab:hover {
+  color: var(--text);
+  /* Soft, deliberately contained fill — the strip's top padding keeps it
+     clear of the title/meta row above. */
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+}
+.pulls-tab.active { color: var(--text); }
+.pulls-tab.active::after {
+  content: ""; position: absolute; left: 10px; right: 10px; bottom: -1px;
+  height: 2px; border-radius: 2px;
+  background: var(--accent, #60a5fa);
+}
+.pulls-tab-count {
+  margin-left: 4px; font-size: 9.5px; padding: 0 5px; border-radius: 99px;
+  background: var(--surface-2); color: var(--text-dim);
+}
 .pulls-detail-scroll { flex: 1; overflow-y: auto; padding: 8px 10px; display: flex; flex-direction: column; gap: 10px; }
-.pulls-body {
+.pulls-nobody { color: var(--text-dim); font-size: 11.5px; padding: 6px 2px; }
+/* PR/issue body rendered as a markdown document — same reader surface as the
+   artifact .md preview (chat-markdown + artifact-preview-md carry the
+   typography); .pulls-md only boxes it to the panel. */
+.pulls-md {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+/* Pre-markdown fallback while the MarkdownDoc chunk loads — mirrors the old
+   raw body so the swap to parsed nodes doesn't shift layout. */
+.pulls-md-fallback {
   white-space: pre-wrap; word-break: break-word; margin: 0;
   font-family: inherit; font-size: 12px; line-height: 1.55;
-  background: var(--surface-2); border: 1px solid var(--border);
-  border-radius: 8px; padding: 8px 10px;
+  padding: 10px 12px;
+}
+.pulls-files-summary {
+  display: flex; align-items: center; gap: 6px;
+  color: var(--text-dim); font-size: 10.5px; padding: 2px;
 }
 .pulls-files { display: flex; flex-direction: column; gap: 2px; }
 .pulls-file { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
@@ -782,12 +902,16 @@
 .pulls-file-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, monospace; }
 .pulls-file-stats { font-size: 10px; flex-shrink: 0; }
 .pulls-file-chevron { color: var(--text-dim); font-size: 10px; }
+/* The rows are the shared .diff-line blocks (views.css): typed colors, a
+   two-column line-number gutter, per-line +/− prefixes. Container padding
+   matches .diff-line.add/.del's -10px pull-in so the colored edge lands
+   flush with the patch box. */
 .pulls-patch {
-  margin: 0; padding: 8px; overflow-x: auto;
+  margin: 0; padding: 8px 10px; overflow-x: auto;
   font-family: ui-monospace, monospace; font-size: 10.5px; line-height: 1.5;
   background: var(--surface); color: var(--text);
   border-top: 1px solid var(--border);
-  max-height: 320px; overflow-y: auto; white-space: pre;
+  max-height: 320px; overflow-y: auto;
 }
 .pulls-patch-none {
   padding: 8px; color: var(--text-dim); font-size: 11px;
@@ -797,17 +921,40 @@
   display: flex; flex-direction: column; gap: 6px;
   border-top: 1px solid var(--border); padding-top: 10px;
 }
+.pulls-review-label {
+  font-size: 10px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.05em; color: var(--text-dim);
+}
 .pulls-review-body {
   width: 100%; resize: vertical; min-height: 54px;
   background: var(--surface-2); color: var(--text);
   border: 1px solid var(--border); border-radius: 8px;
   font-family: inherit; font-size: 12px; padding: 8px 10px;
 }
-.pulls-review-body:focus { outline: none; border-color: var(--accent, #60a5fa); }
-.pulls-review-actions { display: flex; gap: 6px; }
+.pulls-detail textarea {
+  width: 100%; resize: vertical;
+  background: var(--surface-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px;
+  font-family: inherit; font-size: 12px; padding: 8px 10px;
+}
+.pulls-detail textarea:focus { outline: none; border-color: var(--accent, #60a5fa); }
+.pulls-review-actions { display: flex; gap: 6px; align-items: center; }
 .pulls-approve { font-size: 11px; }
 .pulls-request-changes { color: #ef4444; }
 .pulls-request-changes:hover { border-color: #ef4444; }
+/* Issue conversation: comment cards under the body. */
+.pulls-detail-comments { display: flex; flex-direction: column; gap: 8px; }
+.pulls-comment {
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--surface-2);
+}
+.pulls-comment .pulls-md { background: none; border: none; border-radius: 0 0 8px 8px; flex-shrink: 1; }
+.pulls-comment-head {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 10px; border-bottom: 1px solid var(--border);
+  color: var(--text-dim); font-size: 10.5px;
+}
+.pulls-comment-author { color: var(--text); font-weight: 600; }
 
 /* Create form */
 .pulls-create {

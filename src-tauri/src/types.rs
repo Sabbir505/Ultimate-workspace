@@ -1293,6 +1293,9 @@ pub struct PullRequestSummary {
     pub head_branch: String,
     pub base_branch: String,
     pub draft: bool,
+    /// True when `merged_at` is set — a closed PR that was merged renders
+    /// purple, not red (the two mean different things on review).
+    pub merged: bool,
     pub state: String,
     pub html_url: String,
     pub created_at: String,

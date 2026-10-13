@@ -12,6 +12,8 @@ export interface PullRequestSummary {
   headBranch: string;
   baseBranch: string;
   draft: boolean;
+  /** `merged_at` is set — a closed PR that was merged renders purple. */
+  merged: boolean;
   state: string;
   htmlUrl: string;
   createdAt: string;

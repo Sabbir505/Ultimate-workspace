@@ -438,13 +438,35 @@ function MessageBubbleInner({
                 // all the tool rows. Text blocks render inside via
                 // renderProcessBlock, which already handles kind "text".)
                 if (!blocks) return null;
-                const lastProc = blocks.reduce(
-                  (last, b, i) => (b.kind !== "text" ? i : last),
-                  -1,
-                );
-                if (lastProc === -1) return null;
-                const inside = blocks.slice(0, lastProc + 1);
-                const outside = blocks.slice(lastProc + 1);
+                 // MIXED placement by design (docs/architecture/
+                 // VIZ_COMPOSITION_AND_PLACEMENT.md): a card that the model
+                 // emitted and then kept working after is MID-TURN work, and
+                 // renders IN PLACE — inside the process region, between the
+                 // tool rows around it — so cards appear as the turn
+                 // progresses instead of all landing at the end. A card with
+                 // nothing after it is the turn's RESULT and still hoists to
+                 // the answer area (it must not vanish inside the collapsed
+                 // "Worked for Xs" region, and it leads the trailing prose).
+                 // (The live streaming marker is still a plain step row — see
+                 // groupSegments — so progress shows while the call runs.)
+                 const lastProc = blocks.reduce(
+                   (last, b, i) => (b.kind !== "text" && b.kind !== "viz" ? i : last),
+                   -1,
+                 );
+                 if (lastProc === -1) return null;
+                 // A hoistable card is the LAST thing before the trailing
+                 // prose: no tool call follows it anywhere in the turn.
+                 const hasLaterCall = (i: number) =>
+                   blocks
+                     .slice(i + 1)
+                     .some((b) => b.kind !== "text" && b.kind !== "viz");
+                 const inside = blocks
+                   .slice(0, lastProc + 1)
+                   .filter((b, i) => b.kind !== "viz" || hasLaterCall(i));
+                 const hoistedViz = blocks
+                   .slice(0, lastProc + 1)
+                   .filter((b, i) => b.kind === "viz" && !hasLaterCall(i));
+                 const outside = [...hoistedViz, ...blocks.slice(lastProc + 1)];
                 // The live bubble's prose grows every token flush — its
                 // markdown must NOT go through the element cache (each
                 // intermediate text would insert a throwaway LRU entry).
@@ -452,6 +474,15 @@ function MessageBubbleInner({
                 const textBlock = (b: Block, key: string) =>
                   b.kind === "text" && b.text.trim().length > 0 ? (
                     <Markdown key={key} content={b.text} onPreviewArtifact={onPreviewArtifact} cache={mdCache} sources={sources} chatSessionId={chatSessionId} />
+                  ) : b.kind === "viz" ? (
+                    <VizCard
+                      key={key}
+                      viz={b.step.data?.viz}
+                      payload={b.step.data?.payload}
+                      onPreviewArtifact={onPreviewArtifact}
+                      sources={sources}
+                      chatSessionId={chatSessionId}
+                    />
                   ) : null;
                 return (
                   <>
@@ -459,6 +490,10 @@ function MessageBubbleInner({
                       live={live === true}
                       label={processLabel}
                       keepExpandedOnEnd={endedByStop}
+                      cards={inside
+                        .filter((b): b is Extract<Block, { kind: "viz" }> => b.kind === "viz")
+                        .map((b) => b.step.data?.detail ?? b.step.data?.title ?? "")
+                        .filter((t) => t.length > 0)}
                     >
                       {/* Only the NEWEST call is "live" (shining title): the
                           last block, with nothing streamed after it. Anything
@@ -472,11 +507,21 @@ function MessageBubbleInner({
                 );
               })()
             ) : (
-              /* Pure-text turn: flat markdown, nothing to expand. */
+              /* Pure-text turn (no tool/think activity): flat markdown plus
+                 any visualization cards, nothing to expand. */
               blocks!.map((b, i) =>
-                b.kind === "text" && b.text.trim().length > 0
-                  ? <Markdown key={`flat:${i}`} content={b.text} onPreviewArtifact={onPreviewArtifact} cache={!live} sources={sources} chatSessionId={chatSessionId} />
-                  : null,
+                b.kind === "text" && b.text.trim().length > 0 ? (
+                  <Markdown key={`flat:${i}`} content={b.text} onPreviewArtifact={onPreviewArtifact} cache={!live} sources={sources} chatSessionId={chatSessionId} />
+                ) : b.kind === "viz" ? (
+                  <VizCard
+                    key={`flatviz:${i}`}
+                    viz={b.step.data?.viz}
+                    payload={b.step.data?.payload}
+                    onPreviewArtifact={onPreviewArtifact}
+                    sources={sources}
+                    chatSessionId={chatSessionId}
+                  />
+                ) : null,
               )
             )}
             </CitationFlagContext.Provider>
@@ -496,6 +541,7 @@ function MessageBubbleInner({
               checkpoints={msgCheckpoints}
               artifacts={artifacts}
               onPreviewArtifact={onPreviewArtifact}
+              chatSessionId={chatSessionId}
             />
           )}
         {/* Artifact chips for files the changes row already covers would be
@@ -719,6 +765,7 @@ import {
   type ActivityGroup,
   type Block,
 } from "./ActivitySteps";
+import { VizCard } from "./viz/VizCard";
 export const MessageBubble = memo(
   MessageBubbleInner,
   (a, b) =>

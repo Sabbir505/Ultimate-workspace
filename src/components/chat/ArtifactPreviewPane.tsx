@@ -8,19 +8,8 @@
 // its callers pass a stable `artifact` object (ToolPanel wraps it in a
 // memoized adapter), so the document — including the markdown parse — only
 // re-renders when the actual file content changes.
-import { useCallback, useEffect, useMemo, useRef, useState, memo, isValidElement } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, memo } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { LazyReactMarkdown, defaultUrlTransform } from "../common/LazyMarkdown";
-import remarkGfm from "remark-gfm";
-import remarkMath from "remark-math";
-import rehypeKatex from "rehype-katex";
-import "katex/dist/katex.min.css";
-// PERF rec #3 (2026-09-06): this chunk imports katex.min.css — math can
-// only render inside ArtifactPreviewPane, so the stylesheet (and the fonts it
-// references) arrives with this lazy chunk instead of eagerly at boot.
-// Vite dedupes the module across chunks (single emitted copy — C8 holds).
-import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
-import { useSyntaxTheme } from "../../hooks/useSyntaxTheme";
 import {
   downloadArtifact,
   getFileMtime,
@@ -33,21 +22,17 @@ import {
 import type { ChatArtifact } from "../../state/chat";
 import { useDocQaStore } from "../../state/docQa";
 import { ArtifactExportMenu } from "./ArtifactExportMenu";
-import { ChatCitation } from "./ChatCitation";
 import { DocxViewer } from "./DocxViewer";
 import { JsxPreview } from "./JsxPreview";
-import { MarkdownTable } from "./MarkdownTable";
 import { MermaidDiagram } from "./MermaidDiagram";
 import { PdfViewer } from "./PdfViewer";
 import { sanitizeOfficeDocumentHtml, sanitizeHtml } from "../../lib/sanitize";
 import { isInteractiveHtml } from "../../lib/interactiveHtml";
-import { linkCitations, parseChatSources } from "../../lib/chatCitations";
-import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { startPointerDrag } from "../../lib/pointerDrag";
 import { SpeakerIcon, StopIcon } from "../../lib/icons";
 import { toggleReadAloud } from "../../lib/tts";
 import { useTtsStore } from "../../state/tts";
-import { MdLink } from "./MdLink";
+import { MarkdownDocument, ArtifactCodeBlock } from "./MarkdownDoc";
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -55,106 +40,6 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-// react-markdown's default URL sanitizer strips unknown schemes — including
-// the internal `cite:` links the citation rewriter emits. Pass those through
-// untouched; everything else keeps the default sanitization.
-function citeUrlTransform(url: string): string {
-  return url.startsWith("cite:") ? url : defaultUrlTransform(url);
-}
-
-/** Markdown document renderer for file previews (PERF): the parse runs in a
- *  useMemo keyed on the document text, so a parent re-render (ToolPanel ticks
- *  on every chat token) can't re-parse a large .md — only an actual file
- *  change re-runs remark/rehype. Long documents additionally rely on the
- *  `content-visibility` CSS on .artifact-preview-md to keep scrolling cheap.
- *
- *  Shares the chat bubble's markdown UX: interactive `[1]` / `(1,2)` citation
- *  chips (research docs carry their own Sources section), tables with a
- *  Copy/CSV toolbar, links opening in the built-in browser pane, and single-`$`
- *  text left as-is so "$5 and $10" doesn't collapse into KaTeX math. */
-/** Copy affordance for fenced code blocks in the markdown preview — same
- *  behavior as the chat bubble's CopyButton (clipboard API, transient label). */
-function MdCopyButton({ code }: { code: string }) {
-  const [copied, copyToClipboard] = useCopyToClipboard(1800);
-  const handleCopy = useCallback(async () => {
-    await copyToClipboard(code);
-  }, [code, copyToClipboard]);
-  return (
-    <button type="button" className="ghost copy-code-btn" onClick={() => void handleCopy()}>
-      {copied ? "Copied" : "Copy"}
-    </button>
-  );
-}
-
-function MarkdownDocument({ text }: { text: string }) {
-  const rendered = useMemo(() => {
-    const sources = parseChatSources(text);
-    const body = sources.length > 0 ? linkCitations(text, sources) : text;
-    return (
-      <LazyReactMarkdown
-        remarkPlugins={[remarkGfm, [remarkMath, { singleDollarTextMath: false }]]}
-        rehypePlugins={[rehypeKatex]}
-        urlTransform={citeUrlTransform}
-        components={{
-          table: MarkdownTable,
-          // ```mermaid fences render as diagrams, not code blocks — the
-          // same pipeline chat messages use (MermaidDiagram).
-          code({ node: _node, className, children, ...props }) {
-            if (/language-mermaid\b/.test(className ?? "")) {
-              return <MermaidDiagram code={String(children).replace(/\n$/, "")} />;
-            }
-            return <code className={className} {...props}>{children}</code>;
-          },
-          // Fenced blocks get the chat-style chrome — a language label and a
-          // working Copy button. A generated doc whose content is meant to be
-          // copied ("give me a post I can copy") used to render as bare
-          // <pre> text with no affordance, and long unbroken lines pushed
-          // past the pane edge.
-          pre({ children }) {
-            // react-markdown v9 hands `pre` the UNRESOLVED code-component
-            // element (type = the component fn, not the "code" tag), so the
-            // language/text are read from its props.
-            const child = Array.isArray(children) ? children[0] : children;
-            if (!isValidElement(child)) return <>{children}</>;
-            const { className, children: rawChildren } = (child.props ??
-              {}) as { className?: string; children?: unknown };
-            const lang = /language-([\w-]+)/.exec(className ?? "")?.[1];
-            if (lang === "mermaid") {
-              // Diagrams flow through the code override above — no chrome.
-              return <>{children}</>;
-            }
-            const code = String(
-              Array.isArray(rawChildren) ? rawChildren.join("") : (rawChildren ?? ""),
-            ).replace(/\n$/, "");
-            return (
-              <div className="doc-code-block">
-                <div className="doc-code-header">
-                  <span className="doc-code-lang">{lang ?? "text"}</span>
-                  <MdCopyButton code={code} />
-                </div>
-                <ArtifactCodeBlock code={code} language={lang ?? "text"} />
-              </div>
-            );
-          },
-          a({ href, children }) {
-            if (sources.length > 0 && href?.startsWith("cite:")) {
-              const nums = href
-                .slice("cite:".length)
-                .split(",")
-                .map((x) => parseInt(x, 10))
-                .filter((n) => Number.isFinite(n));
-              return <ChatCitation nums={nums} sources={sources} />;
-            }
-            return <MdLink href={href}>{children}</MdLink>;
-          },
-        }}
-      >
-        {body}
-      </LazyReactMarkdown>
-    );
-  }, [text]);
-  return rendered;
-}
 
 /// Rows above this count render through the windowed virtualizer (4.6.5);
 /// small tables keep the plain table so copy/select and tests stay simple.
@@ -421,8 +306,9 @@ function PreviewBody({ preview }: { preview: ArtifactPreview }) {
   }
   // Plain HTML (non-diagram): live iframe preview by default, with a toggle to
   // view the raw source. Scripts/buttons/forms run inside the sandboxed frame
-  // (full fidelity, same model as the JSX live preview).
-  if (kind === "html" && text != null) {
+  // (full fidelity, same model as the JSX live preview). A widget ("Open in
+  // tab" from its chat card) previews the same way — plain HTML in the pane.
+  if ((kind === "html" || kind === "widget") && text != null) {
     return <HtmlPreview html={text} title={preview.filename} />;
   }
   // Diagram-authored HTML: static diagrams keep the content-measured
@@ -527,37 +413,6 @@ function CodeIcon() {
       <polyline points="16 18 22 12 16 6" />
       <polyline points="8 6 2 12 8 18" />
     </svg>
-  );
-}
-
-/** Code-block renderer for artifact previews — uses the current theme's
- *  syntax tokens (--syntax-*) so colors track data-theme. */
-function ArtifactCodeBlock({ code, language }: { code: string; language: string }) {
-  const theme = useSyntaxTheme();
-  return (
-    <SyntaxHighlighter
-      style={theme}
-      language={language}
-      PreTag="div"
-      customStyle={{
-        margin: 0,
-        background: "transparent",
-        padding: "12px 16px",
-        fontSize: "12px",
-        fontFamily: "var(--font-mono)",
-        lineHeight: 1.5,
-        // Wrap instead of scrolling sideways: a long line makes the code view
-        // taller, so the file is readable without dragging the pane's
-        // col-resize divider wider. Mirrors the chat code blocks.
-        whiteSpace: "pre-wrap",
-        overflowWrap: "anywhere",
-      }}
-      codeTagProps={{
-        style: { fontFamily: "var(--font-mono)", whiteSpace: "pre-wrap", overflowWrap: "anywhere" },
-      }}
-    >
-      {code}
-    </SyntaxHighlighter>
   );
 }
 
@@ -918,6 +773,7 @@ export function ArtifactPreviewPaneInner({
   const isJsxOrHtml =
     effectivePreview?.kind === "jsx" ||
     effectivePreview?.kind === "html" ||
+    effectivePreview?.kind === "widget" ||
     effectivePreview?.kind === "mermaid" ||
     (effectivePreview?.kind === "diagram" &&
       effectivePreview.text != null &&
@@ -974,6 +830,7 @@ export function ArtifactPreviewPaneInner({
             {effectivePreview &&
             (effectivePreview.kind === "diagram" ||
               effectivePreview.kind === "html" ||
+              effectivePreview.kind === "widget" ||
               effectivePreview.kind === "image") ? (
               <ArtifactExportMenu
                 preview={effectivePreview}

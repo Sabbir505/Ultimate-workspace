@@ -24,7 +24,7 @@ use crate::chat::tools::{self, ToolCaps};
 /// no permission-mode gate, since this path intentionally runs the same
 /// ungated dispatcher the built-in chat uses (where the caller enforces the
 /// gate BEFORE reaching execute_tool).
-pub const ALLOWED_RELAY_TOOLS: [&str; 34] = [
+pub const ALLOWED_RELAY_TOOLS: [&str; 36] = [
     // Project wiki (§6.15): the wiki tools search Relay's generated
     // project knowledge — read-only, DB-only, no model calls.
     tools::SEARCH_WIKI,
@@ -34,6 +34,13 @@ pub const ALLOWED_RELAY_TOOLS: [&str; 34] = [
     tools::PLAN_DOCUMENT,
     tools::REVISE_DOCUMENT,
     tools::GENERATE_DIAGRAM,
+    // Interactive-widget authoring (in-app visualization): same surface as
+    // generate_diagram — writes into the artifacts dir, UI payoff in the
+    // built-in chat (and the harness transcript renders the artifact too).
+    tools::RENDER_WIDGET,
+    // Structured visualization (renderer-registry layer): read-only, no side
+    // effects — the validated payload rides the tool marker into the chat.
+    tools::VISUALIZE,
     tools::GENERATE_FILE,
     tools::GET_SKILL,
     tools::LIST_SKILLS,

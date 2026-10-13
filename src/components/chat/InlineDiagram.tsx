@@ -12,14 +12,20 @@
 // no parent/Tauri access) whose height auto-fits the content via a postMessage
 // handshake, clamped to the same bound. A compact toolbar carries Download +
 // "Open in tab" (full-size preview) for both paths.
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { readArtifactPreview, type ArtifactPreview } from "../../lib/ipc";
+import { useCallback, useEffect, useMemo, useRef, useState, lazy, Suspense, type CSSProperties } from "react";
+import { getFileMtime, readArtifactPreview, type ArtifactPreview } from "../../lib/ipc";
 import type { ChatArtifact } from "../../state/chat";
 import { useUiStore } from "../../state/ui";
 import { sanitizeHtml } from "../../lib/sanitize";
 import { isInteractiveHtml } from "../../lib/interactiveHtml";
 import { DiagramLightbox } from "./DiagramLightbox";
 import { ArtifactExportMenu } from "./ArtifactExportMenu";
+
+/** The in-app visualization surface: a `render_widget` artifact renders as a
+ *  themed widget card with the MCP Apps bridge instead of the plain
+ *  interactive-visual frame. Lazy: the widget chunk (bridge + bootstrap)
+ *  loads only when one actually arrives. */
+const WidgetFrame = lazy(() => import("./WidgetFrame").then((m) => ({ default: m.WidgetFrame })));
 
 /** Injected into the iframe document (display only) so the diagram scales down
  *  to the chat width — and down to the frame height when the artifact is too
@@ -121,9 +127,18 @@ function svgDims(html: string): { w: number; h: number } | null {
 
 export function InlineDiagram({
   artifact,
+  covered = false,
   onFallback,
 }: {
   artifact: ChatArtifact;
+  /** True when the turn's per-turn changes row already lists this file (it
+   *  was written/edited inside the chat's working folder). Such a file is
+   *  tracked by git and shown there with Review / Open, so it must not ALSO
+   *  render inline here — a plain HTML webapp or an .svg is source/output
+   *  the user opens on purpose. A `generate_diagram` deliverable is exempt:
+   *  it never lands in a project checkout, it IS the turn's visual result,
+   *  and it keeps its inline frame either way. */
+  covered?: boolean;
   /** Rendered when the artifact turns out not to be a diagram/html file. */
   onFallback: () => JSX.Element;
 }) {
@@ -233,15 +248,44 @@ export function InlineDiagram({
     setPreview(null);
     setError(null);
     setMeasured(null);
-    void readArtifactPreview(artifact.path)
-      .then((p) => {
-        if (!stale) setPreview(p);
-      })
-      .catch((e: unknown) => {
-        if (!stale) setError(String(e));
-      });
+    const read = () =>
+      readArtifactPreview(artifact.path)
+        .then((p) => {
+          if (!stale) setPreview(p);
+        })
+        .catch((e: unknown) => {
+          if (!stale) setError(String(e));
+        });
+    void read();
+    // The artifact event can fire while the producing CLI is STILL writing
+    // the file (harness write/claim race) — the first read then captures a
+    // half-written document (inline HTML rendered without its stylesheet was
+    // exactly this). Poll the file's mtime for a while and re-read on every
+    // change, so the frame heals itself to the complete file. Same pattern as
+    // ArtifactPreviewPane's hot reload.
+    let lastMtime: number | null = null;
+    let ticks = 0;
+    const tick = () => {
+      ticks += 1;
+      void getFileMtime(artifact.path)
+        .then((t) => {
+          if (stale || t == null) return;
+          if (lastMtime == null) {
+            lastMtime = t;
+            return;
+          }
+          if (t !== lastMtime) {
+            lastMtime = t;
+            void read();
+          }
+        })
+        .catch(() => {});
+      if (ticks >= 30 || stale) window.clearInterval(iv);
+    };
+    const iv = window.setInterval(tick, 2_000);
     return () => {
       stale = true;
+      window.clearInterval(iv);
     };
   }, [artifact.path]);
 
@@ -377,6 +421,22 @@ export function InlineDiagram({
   }
   if (!preview) {
     return <div className="chat-diagram-loading">Loading diagram…</div>;
+  }
+  // Already surfaced by the turn's changes row (a file written/edited inside
+  // the working folder): render nothing here rather than a second copy of the
+  // same file — no live frame, no chip. The row's Open/Review opens it. Only a
+  // genuine diagram deliverable — never a checkout file — still gets its
+  // inline frame.
+  if (covered && preview.kind !== "diagram" && preview.kind !== "widget") return null;
+  // A widget artifact takes the widget-card path: its own themed frame,
+  // bridge, header, and display modes. Exempt from `covered` like diagrams —
+  // it IS the turn's visual deliverable, not a checkout file.
+  if (preview.kind === "widget") {
+    return (
+      <Suspense fallback={null}>
+        <WidgetFrame artifact={artifact} html={preview.text ?? ""} />
+      </Suspense>
+    );
   }
   // Render diagrams AND HTML files inline. The "diagram" kind (from
   // generate_diagram, carrying the relay:diagram marker) is the primary

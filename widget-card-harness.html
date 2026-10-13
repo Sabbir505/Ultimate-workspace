@@ -1,0 +1,954 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Relay — render_widget card demo</title>
+<style>
+  /* ---- Relay-ish theme tokens (plausible stand-ins, not the app's exact palette) ---- */
+  :root[data-theme="dark"]{
+    --bg-tint:#181818; --surface:#1f1f1f; --surface-2:#262626;
+    --text:#e8e8e8; --text-dim:#9a9a9a; --border:#333;
+    --accent:#88c0d0; --accent-contrast:#10222a;
+    --success:#10b981; --danger:#e5484d;
+    --user-bubble:#243138;
+    --shadow:0 1px 2px rgb(0 0 0/.4), 0 6px 18px rgb(0 0 0/.25);
+  }
+  :root[data-theme="light"]{
+    --bg-tint:#f6f6f5; --surface:#ffffff; --surface-2:#ececeb;
+    --text:#1c1c1c; --text-dim:#6f6f6e; --border:#dcdcdb;
+    --accent:#2e7d9e; --accent-contrast:#ffffff;
+    --success:#0d9668; --danger:#d33d42;
+    --user-bubble:#e3eef3;
+    --shadow:0 1px 2px rgb(0 0 0/.08), 0 6px 18px rgb(0 0 0/.06);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    background:var(--bg-tint); color:var(--text);
+    font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased; overflow:hidden;
+    transition:background .25s ease, color .25s ease;
+  }
+
+  /* ---- window chrome ---- */
+  .titlebar{
+    height:38px; display:flex; align-items:center; gap:10px; padding:0 12px;
+    border-bottom:1px solid var(--border); user-select:none;
+  }
+  .dots{display:flex; gap:6px}
+  .dots i{width:11px;height:11px;border-radius:50%;background:var(--border)}
+  .titlebar .name{font-weight:600; font-size:12.5px; color:var(--text-dim)}
+  .titlebar .spacer{flex:1}
+  .tb-btn{
+    display:inline-flex; align-items:center; gap:6px;
+    font:inherit; font-size:12px; color:var(--text-dim);
+    background:none; border:1px solid var(--border); border-radius:8px;
+    padding:4px 10px; cursor:pointer;
+  }
+  .tb-btn:hover{color:var(--text); border-color:var(--accent)}
+  .layout{display:flex; height:calc(100% - 38px)}
+  .rail{
+    width:46px; border-right:1px solid var(--border);
+    display:flex; flex-direction:column; align-items:center; gap:14px; padding-top:14px;
+  }
+  .rail i{width:18px;height:18px;border-radius:5px;background:var(--border);opacity:.55}
+  .rail i.on{background:var(--accent);opacity:.9}
+
+  /* ---- chat column ---- */
+  .chatcol{flex:1; overflow-y:auto; scrollbar-width:thin}
+  .chat{max-width:790px; margin:0 auto; padding:18px 26px 30px}
+  .note{
+    display:flex; gap:8px; align-items:flex-start;
+    border:1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+    background:color-mix(in srgb, var(--accent) 8%, transparent);
+    border-radius:10px; padding:9px 12px; font-size:12.5px; color:var(--text-dim);
+    margin:4px 0 18px;
+  }
+  .note b{color:var(--text); font-weight:600}
+  .note button{margin-left:auto; background:none;border:none;color:var(--text-dim);cursor:pointer;font-size:14px;line-height:1}
+
+  .msg-user{display:flex; justify-content:flex-end; margin:14px 0}
+  .bubble{
+    max-width:72%; background:var(--user-bubble);
+    border:1px solid color-mix(in srgb, var(--accent) 25%, var(--border));
+    border-radius:14px 14px 4px 14px; padding:9px 13px;
+  }
+
+  .steps{
+    border:1px solid var(--border); border-radius:10px; background:var(--surface);
+    margin:14px 0 10px; overflow:hidden; box-shadow:var(--shadow);
+  }
+  .steps summary{
+    list-style:none; display:flex; align-items:center; gap:8px;
+    padding:8px 12px; cursor:pointer; font-size:12.5px; color:var(--text-dim); user-select:none;
+  }
+  .steps summary::-webkit-details-marker{display:none}
+  .steps summary .chev{transition:transform .15s ease}
+  .steps[open] summary .chev{transform:rotate(90deg)}
+  .steprow{display:flex; align-items:center; gap:9px; padding:7px 12px 7px 20px; font-size:12.5px; color:var(--text-dim)}
+  .steprow .ic{color:var(--accent); display:inline-flex}
+  .steprow .ok{color:var(--success); display:inline-flex}
+  .steprow code{
+    font:11.5px/1.45 "SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
+    color:var(--text); background:var(--surface-2); padding:1px 6px; border-radius:5px;
+  }
+  .stepdetail{
+    margin:4px 12px 10px 34px; border-left:2px solid var(--border); padding:6px 10px;
+    font:11px/1.5 "SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
+    color:var(--text-dim); white-space:pre-wrap; word-break:break-all; max-height:180px; overflow:auto;
+    background:color-mix(in srgb, var(--surface-2) 50%, transparent); border-radius:0 6px 6px 0;
+  }
+  .answer{margin:2px 0 0}
+  .answer p{margin:8px 0}
+
+  /* ---- THE WIDGET CARD — mirrors .chat-widget-* in src/styles/chat.css ---- */
+  .chat-widget-block{
+    position:relative; margin:12px 0; max-width:100%;
+    border:1px solid color-mix(in srgb, var(--border) 82%, transparent);
+    border-radius:10px; background:var(--bg-tint); overflow:hidden;
+    transition:border-color .15s ease, box-shadow .15s ease;
+  }
+  .chat-widget-block:hover{border-color:color-mix(in srgb, var(--accent) 40%, var(--border))}
+  .chat-widget-header{
+    display:flex; align-items:center; gap:8px; padding:5px 8px 5px 12px;
+    border-bottom:1px solid color-mix(in srgb, var(--border) 60%, transparent);
+    font-size:12px; color:var(--text-dim);
+  }
+  .chat-widget-title{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:500}
+  .chat-widget-actions{display:flex; align-items:center; gap:2px; opacity:0; transition:opacity .12s ease}
+  .chat-widget-block:hover .chat-widget-actions,
+  .chat-widget-block:focus-within .chat-widget-actions,
+  .chat-widget-fullscreen .chat-widget-actions{opacity:1}
+  .chat-widget-btn{
+    display:inline-flex; align-items:center; justify-content:center; padding:4px;
+    background:transparent; border:none; border-radius:8px; color:var(--text-dim); cursor:pointer;
+  }
+  .chat-widget-btn:hover{color:var(--text); background:var(--surface-2)}
+  .chat-widget-frame{display:block; width:100%; border:none; background:transparent}
+  .chat-widget-fullscreen{
+    position:fixed; inset:0; z-index:50; margin:0; border:none; border-radius:0;
+    display:flex; flex-direction:column; box-shadow:none;
+  }
+  .chat-widget-fullscreen .chat-widget-frame{flex:1; min-height:0}
+  .fs-hint{font-size:11px; color:var(--text-dim); border:1px solid var(--border); border-radius:6px; padding:1px 7px}
+  .chat-widget-closed{
+    display:flex; align-items:center; justify-content:space-between; gap:8px;
+    padding:9px 12px; font-size:12px; color:var(--text-dim);
+  }
+  .chat-widget-reopen{
+    padding:3px 12px; border:1px solid var(--border); border-radius:8px; background:transparent;
+    color:var(--text); font:inherit; font-size:12px; cursor:pointer;
+  }
+  .chat-widget-reopen:hover{border-color:var(--accent)}
+
+  /* ---- demo layer divider ---- */
+  .demo-layer{
+    display:flex; align-items:center; gap:10px;
+    margin:26px 0 10px; font-size:11px; color:var(--text-dim);
+    text-transform:uppercase; letter-spacing:.08em;
+  }
+  .demo-layer::before,.demo-layer::after{content:""; flex:1; height:1px; background:var(--border)}
+  .demo-layer b{color:var(--text); font-weight:600}
+
+  /* ---- chat-viz-* — mirrors src/components/chat/viz/VizCard.tsx + chat.css ----
+     The structured-renderer layer: Relay's OWN components styled straight
+     from the app tokens. No iframe, no bridge, no theme bootstrap. */
+  .chat-viz-card{
+    margin:12px 0; max-width:100%;
+    border:1px solid color-mix(in srgb, var(--border) 82%, transparent);
+    border-radius:10px; background:var(--surface);
+    padding:12px 14px; overflow:hidden;
+    box-shadow:var(--shadow);
+  }
+  .chat-viz-title{
+    display:flex; align-items:center; justify-content:space-between; gap:8px;
+    font-size:12px; font-weight:600; color:var(--text-dim);
+    text-transform:uppercase; letter-spacing:.06em; margin-bottom:10px;
+  }
+  .chat-viz-title-text{overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+  .chat-viz-actions{display:flex; align-items:center; gap:3px; opacity:0; transition:opacity .12s ease; flex-shrink:0}
+  .chat-viz-card:hover .chat-viz-actions,
+  .chat-viz-card:focus-within .chat-viz-actions{opacity:1}
+  button.chat-viz-action,
+  button.chat-viz-action:hover,
+  button.chat-viz-action:focus-visible{
+    font:inherit; font-size:10px; font-weight:600; letter-spacing:.04em; text-transform:uppercase;
+    color:var(--text-dim); background:transparent;
+    border:1px solid color-mix(in srgb, var(--border) 70%, transparent);
+    border-radius:6px; padding:2px 7px; cursor:pointer;
+  }
+  button.chat-viz-action:hover,
+  button.chat-viz-action:focus-visible{
+    color:var(--accent); border-color:color-mix(in srgb, var(--accent) 45%, var(--border));
+  }
+  .chat-viz-kind{
+    font-size:10px; font-weight:600; color:var(--accent);
+    background:color-mix(in srgb, var(--accent) 14%, transparent);
+    border-radius:999px; padding:2px 8px; letter-spacing:.04em; text-transform:lowercase;
+  }
+  .chat-viz-fallback{font-size:12.5px; color:var(--text-dim)}
+
+  /* Chart: CSS bars on a zero baseline. */
+  .chat-viz-chart{--viz-h:180px}
+  .chat-viz-chart-plot{
+    position:relative; display:flex; align-items:stretch; gap:6px;
+    height:var(--viz-h); padding-top:18px; padding-bottom:6px;
+  }
+  .chat-viz-chart-zero{
+    position:absolute; left:0; right:0; height:1px;
+    background:color-mix(in srgb, var(--text-dim) 45%, transparent);
+  }
+  .chat-viz-chart-slot{
+    flex:1 1 0; min-width:0; display:flex; flex-direction:column; height:100%;
+  }
+  .chat-viz-chart-barwrap{position:relative; flex:1; min-height:0}
+  .chat-viz-chart-bar{
+    position:absolute; left:0; right:0; min-height:2px; border-radius:3px;
+    background:var(--accent); opacity:.9; transition:opacity .12s ease;
+  }
+  .chat-viz-chart-slot:hover .chat-viz-chart-bar{opacity:1}
+  .chat-viz-chart-bar.neg{background:color-mix(in srgb, var(--danger) 75%, var(--accent))}
+  .chat-viz-chart-val{
+    position:absolute; left:50%; transform:translateX(-50%);
+    font-size:10.5px; line-height:1.2; color:var(--text-dim);
+    white-space:nowrap; font-variant-numeric:tabular-nums;
+  }
+  .chat-viz-chart-label{
+    display:block; margin-top:5px; font-size:10.5px; color:var(--text-dim);
+    text-align:center; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  }
+
+  /* Table. */
+  .chat-viz-tablewrap{
+    overflow:auto; max-height:340px;
+    border:1px solid color-mix(in srgb, var(--border) 60%, transparent);
+    border-radius:8px;
+  }
+  .chat-viz-table{width:100%; border-collapse:collapse; font-size:12.5px}
+  .chat-viz-table th{
+    position:sticky; top:0; background:var(--surface-2); color:var(--text-dim);
+    font-weight:600; text-align:left; padding:6px 10px; white-space:nowrap;
+  }
+  .chat-viz-table td{
+    padding:5px 10px;
+    border-top:1px solid color-mix(in srgb, var(--border) 45%, transparent);
+    font-variant-numeric:tabular-nums; overflow-wrap:anywhere;
+  }
+  .chat-viz-table tbody tr:hover{background:color-mix(in srgb, var(--accent) 7%, transparent)}
+
+  /* Task board. */
+  .chat-viz-board{display:flex; gap:10px; align-items:flex-start; overflow-x:auto; padding-bottom:2px}
+  .chat-viz-board-col{
+    flex:1 1 0; min-width:140px;
+    background:color-mix(in srgb, var(--surface-2) 55%, transparent);
+    border:1px solid color-mix(in srgb, var(--border) 60%, transparent);
+    border-radius:8px; padding:8px;
+  }
+  .chat-viz-board-colhead{
+    display:flex; align-items:center; justify-content:space-between; gap:6px; margin-bottom:7px;
+  }
+  .chat-viz-board-coltitle{
+    font-size:11.5px; font-weight:600; color:var(--text);
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  }
+  .chat-viz-board-count{
+    flex-shrink:0; font-size:10.5px; color:var(--text-dim); background:var(--surface-2);
+    border-radius:999px; padding:1px 7px; font-variant-numeric:tabular-nums;
+  }
+  .chat-viz-task{
+    background:var(--surface);
+    border:1px solid color-mix(in srgb, var(--border) 60%, transparent);
+    border-radius:7px; padding:6px 8px; margin-bottom:6px;
+  }
+  .chat-viz-task:last-child{margin-bottom:0}
+  .chat-viz-task-title{display:block; font-size:12.5px; color:var(--text); overflow-wrap:anywhere}
+  .chat-viz-task-meta{display:block; margin-top:2px; font-size:11px; color:var(--text-dim)}
+  .chat-viz-board-empty{font-size:11.5px; color:var(--text-dim); padding:4px 2px 2px}
+
+  /* Timeline. */
+  .chat-viz-timeline{position:relative; padding-left:4px}
+  .chat-viz-event{position:relative; display:flex; gap:10px; padding:0 0 12px 14px}
+  .chat-viz-event:last-child{padding-bottom:0}
+  .chat-viz-event::before{
+    content:""; position:absolute; left:3.5px; top:12px; bottom:-2px; width:1px;
+    background:color-mix(in srgb, var(--border) 80%, transparent);
+  }
+  .chat-viz-event:last-child::before{display:none}
+  .chat-viz-event-dot{
+    position:absolute; left:0; top:5px; width:8px; height:8px; border-radius:50%;
+    background:var(--accent);
+    box-shadow:0 0 0 2.5px color-mix(in srgb, var(--accent) 25%, transparent);
+  }
+  .chat-viz-event-body{flex:1; min-width:0}
+  .chat-viz-event-row{
+    display:flex; align-items:baseline; justify-content:space-between; gap:8px;
+  }
+  .chat-viz-event-label{font-size:12.5px; font-weight:500; color:var(--text)}
+  .chat-viz-event-at{
+    flex-shrink:0; font-size:11px; color:var(--text-dim); font-variant-numeric:tabular-nums;
+  }
+  .chat-viz-event-detail{margin-top:1px; font-size:11.5px; color:var(--text-dim); overflow-wrap:anywhere}
+
+  /* ---- composer ---- */
+  .composer{
+    position:sticky; bottom:0; padding:10px 0 4px;
+    background:linear-gradient(transparent, var(--bg-tint) 40%);
+  }
+  .composer .box{
+    display:flex; align-items:center; gap:8px;
+    border:1px solid var(--border); border-radius:12px; background:var(--surface); padding:8px 10px;
+  }
+  .composer input{flex:1; background:none; border:none; outline:none; color:var(--text); font:inherit}
+  .composer input::placeholder{color:var(--text-dim)}
+  .composer input.has-draft{color:var(--accent)}
+  .composer .send{
+    background:var(--accent); color:var(--accent-contrast); border:none; border-radius:8px;
+    padding:5px 12px; font:inherit; font-size:12.5px; font-weight:600; cursor:pointer;
+  }
+
+  /* ---- bridge log ---- */
+  .bridge-chip{
+    position:fixed; left:12px; bottom:12px; z-index:60;
+    display:flex; align-items:center; gap:7px;
+    font:11.5px/1 "SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
+    color:var(--text-dim); background:var(--surface); border:1px solid var(--border);
+    border-radius:999px; padding:7px 12px; cursor:pointer; user-select:none;
+    box-shadow:var(--shadow);
+  }
+  .bridge-chip:hover{color:var(--text); border-color:var(--accent)}
+  .bridge-chip .n{
+    background:color-mix(in srgb, var(--accent) 22%, transparent); color:var(--accent);
+    border-radius:999px; padding:2px 7px; font-weight:600;
+  }
+  .bridge-panel{
+    position:fixed; left:12px; bottom:44px; z-index:60; width:430px; max-height:46vh;
+    display:none; flex-direction:column;
+    background:var(--surface); border:1px solid var(--border); border-radius:12px;
+    box-shadow:var(--shadow); overflow:hidden;
+  }
+  .bridge-panel.open{display:flex}
+  .bridge-panel .hd{
+    display:flex; align-items:center; gap:8px; padding:8px 12px;
+    border-bottom:1px solid var(--border); font-size:12px; color:var(--text-dim);
+  }
+  .bridge-panel .hd b{color:var(--text); font-weight:600}
+  .bridge-panel .list{overflow-y:auto; padding:6px 0}
+  .bridge-msg{
+    display:flex; gap:8px; padding:4px 12px;
+    font:11px/1.5 "SF Mono",SFMono-Regular,Menlo,Consolas,monospace; color:var(--text-dim);
+  }
+  .bridge-msg .dir{flex:0 0 74px; font-weight:700}
+  .bridge-msg.to-app .dir{color:var(--accent)}
+  .bridge-msg.to-host .dir{color:var(--success)}
+  .bridge-msg .m{color:var(--text)}
+  .bridge-msg .p{color:var(--text-dim); word-break:break-all}
+
+  /* ---- toasts ---- */
+  .toasts{position:fixed; right:14px; bottom:14px; z-index:70; display:flex; flex-direction:column; gap:8px}
+  .toast{
+    background:var(--surface); border:1px solid var(--border); border-left:3px solid var(--accent);
+    border-radius:10px; padding:9px 13px; box-shadow:var(--shadow); max-width:320px;
+    animation:tin .18s ease;
+  }
+  .toast b{display:block; font-size:12.5px}
+  .toast span{font-size:12px; color:var(--text-dim)}
+  @keyframes tin{from{transform:translateY(6px);opacity:0}}
+  @media (max-width:900px){ .rail{display:none} }
+</style>
+</head>
+<body>
+
+<div class="titlebar">
+  <div class="dots"><i></i><i></i><i></i></div>
+  <span class="name">Relay</span>
+  <div class="spacer"></div>
+  <button class="tb-btn" id="themeBtn" title="Flip Relay's theme — the widget follows live over the bridge">
+    <span id="themeIc">◐</span><span id="themeLbl">Dark</span>
+  </button>
+</div>
+
+<div class="layout">
+  <div class="rail"><i class="on"></i><i></i><i></i><i></i><i></i></div>
+  <div class="chatcol">
+    <div class="chat">
+
+      <div class="note" id="note">
+        <div>
+          <b>Interactive demo of Relay's in-app visualization — both layers.</b>
+          <b>Turn 1 · <code>render_widget</code>:</b> the model authors an HTML mini-app; it renders in a
+          sandboxed iframe speaking the real MCP Apps bridge (sliders, theme flip, full view, bridge traffic
+          bottom-left). <b>Turn 2 · <code>visualize</code>:</b> the model returns typed data and Relay's OWN
+          components render it — no model code, no sandbox, natively themed.
+        </div>
+        <button onclick="document.getElementById('note').remove()">✕</button>
+      </div>
+
+      <!-- ================= Layer 1: render_widget (model-authored widget) ================= -->
+      <div class="demo-layer"><b>Turn 1 · render_widget</b><span>model-authored HTML · sandboxed iframe · MCP Apps bridge</span></div>
+
+      <div class="msg-user">
+        <div class="bubble">Build me an interactive compound interest explorer I can play with — sliders for the inputs.</div>
+      </div>
+
+      <details class="steps" open>
+        <summary>
+          <span class="chev">▸</span><b style="color:var(--text)">Worked for 6.4s</b>
+        </summary>
+        <div class="steprow">
+          <span class="ic">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="6" y1="20" x2="6" y2="12"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="18" y1="20" x2="18" y2="9"/></svg>
+          </span>
+          Building interactive widget <code>"Compound interest explorer"</code>
+          <span class="ok" title="done">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+          </span>
+        </div>
+        <div class="stepdetail" id="argsDetail"></div>
+      </details>
+
+      <div class="answer">
+        <p>Here's an interactive compound interest explorer — drag the sliders and it recomputes live:</p>
+      </div>
+
+      <!-- ============ THE WIDGET CARD ============ -->
+      <div class="chat-widget-block" id="widgetBlock">
+        <div class="chat-widget-header">
+          <span class="chat-widget-title">compound interest explorer</span>
+          <span class="fs-hint" id="fsHint" style="display:none">Esc to exit</span>
+          <div class="chat-widget-actions">
+            <button class="chat-widget-btn" id="btnFs" title="Full view">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
+            </button>
+            <button class="chat-widget-btn" id="btnTab" title="Open in tab">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+            </button>
+            <button class="chat-widget-btn" id="btnClose" title="Close widget">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+          </div>
+        </div>
+        <iframe id="widgetFrame" class="chat-widget-frame" title="compound interest explorer"
+                sandbox="allow-scripts allow-forms allow-modals allow-popups" style="height:360px"></iframe>
+      </div>
+
+      <div class="answer">
+        <p>The card sits on the chat's own background and follows Relay's theme live — flip the toggle in the title bar and watch it re-theme over the bridge without reloading (the sliders keep their values). <b>Full view</b> restyles the same iframe, so state survives the round trip; <b>Open in tab</b> shows the raw HTML in the artifact pane.</p>
+      </div>
+
+      <!-- ================= Layer 2: visualize (structured renderers) ================= -->
+      <div class="demo-layer"><b>Turn 2 · visualize</b><span>typed data → Relay's own renderers</span></div>
+
+      <div class="msg-user">
+        <div class="bubble">How did sprint 42 go? Show me the board, deploys per week, and what happened with the API incident.</div>
+      </div>
+
+      <details class="steps">
+        <summary>
+          <span class="chev">▸</span><b style="color:var(--text)">Worked for 8.1s</b>
+        </summary>
+        <div class="steprow">
+          <span class="ic">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+          </span>
+          Reading sprint data <code>sprint-42.md</code>
+          <span class="ok" title="done">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+          </span>
+        </div>
+        <div class="steprow">
+          <span class="ic">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="6" y1="20" x2="6" y2="12"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="18" y1="20" x2="18" y2="9"/></svg>
+          </span>
+          Visualizing <code>"Sprint 42"</code> — validated, no UI authored by the model
+          <span class="ok" title="done">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+          </span>
+        </div>
+      </details>
+
+      <div class="answer">
+        <p>Here's sprint 42 at a glance — the board, the deploy cadence, and the incident timeline:</p>
+      </div>
+
+      <!-- task-board card -->
+      <div class="chat-viz-card">
+        <div class="chat-viz-title"><span class="chat-viz-title-text">Sprint 42</span>
+          <div class="chat-viz-actions"><button class="chat-viz-action" type="button" title="Copy as CSV">CSV</button><button class="chat-viz-action" type="button" title="Copy as JSON">JSON</button></div>
+        </div>
+        <div class="chat-viz-board">
+          <div class="chat-viz-board-col">
+            <div class="chat-viz-board-colhead"><span class="chat-viz-board-coltitle">Todo</span><span class="chat-viz-board-count">2</span></div>
+            <div class="chat-viz-task"><span class="chat-viz-task-title">Harden widget sandbox CSP</span><span class="chat-viz-task-meta">security · 2d</span></div>
+            <div class="chat-viz-task"><span class="chat-viz-task-title">Timeline renderer polish</span><span class="chat-viz-task-meta">ui · 1d</span></div>
+          </div>
+          <div class="chat-viz-board-col">
+            <div class="chat-viz-board-colhead"><span class="chat-viz-board-coltitle">In progress</span><span class="chat-viz-board-count">2</span></div>
+            <div class="chat-viz-task"><span class="chat-viz-task-title">Renderer registry routing</span><span class="chat-viz-task-meta">@mara · 60%</span></div>
+            <div class="chat-viz-task"><span class="chat-viz-task-title">Payload validation errors</span><span class="chat-viz-task-meta">@sab · 30%</span></div>
+          </div>
+          <div class="chat-viz-board-col">
+            <div class="chat-viz-board-colhead"><span class="chat-viz-board-coltitle">Done</span><span class="chat-viz-board-count">3</span></div>
+            <div class="chat-viz-task"><span class="chat-viz-task-title">Chart renderer (CSS bars)</span></div>
+            <div class="chat-viz-task"><span class="chat-viz-task-title">Marker sanitization</span><span class="chat-viz-task-meta">round-trip tested</span></div>
+            <div class="chat-viz-task"><span class="chat-viz-task-title">Bridge allowlist entry</span></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- chart card -->
+      <div class="chat-viz-card">
+        <div class="chat-viz-title"><span class="chat-viz-title-text">Deploys by week</span>
+          <div class="chat-viz-actions"><button class="chat-viz-action" type="button" title="Copy as CSV">CSV</button><button class="chat-viz-action" type="button" title="Copy as JSON">JSON</button></div>
+        </div>
+        <div class="chat-viz-chart">
+          <div class="chat-viz-chart-plot">
+            <div class="chat-viz-chart-zero" style="top:100%"></div>
+            <div class="chat-viz-chart-slot"><div class="chat-viz-chart-barwrap"><span class="chat-viz-chart-val" style="top:calc(71.4% - 15px)">4 deploys</span><div class="chat-viz-chart-bar" style="top:71.4%;height:28.6%" title="W1: 4 deploys"></div></div><span class="chat-viz-chart-label">W1</span></div>
+            <div class="chat-viz-chart-slot"><div class="chat-viz-chart-barwrap"><span class="chat-viz-chart-val" style="top:calc(35.7% - 15px)">9 deploys</span><div class="chat-viz-chart-bar" style="top:35.7%;height:64.3%" title="W2: 9 deploys"></div></div><span class="chat-viz-chart-label">W2</span></div>
+            <div class="chat-viz-chart-slot"><div class="chat-viz-chart-barwrap"><span class="chat-viz-chart-val" style="top:calc(50% - 15px)">7 deploys</span><div class="chat-viz-chart-bar" style="top:50%;height:50%" title="W3: 7 deploys"></div></div><span class="chat-viz-chart-label">W3</span></div>
+            <div class="chat-viz-chart-slot"><div class="chat-viz-chart-barwrap"><span class="chat-viz-chart-val" style="top:calc(14.3% - 15px)">12 deploys</span><div class="chat-viz-chart-bar" style="top:14.3%;height:85.7%" title="W4: 12 deploys"></div></div><span class="chat-viz-chart-label">W4</span></div>
+            <div class="chat-viz-chart-slot"><div class="chat-viz-chart-barwrap"><span class="chat-viz-chart-val" style="top:calc(64.3% - 15px)">5 deploys</span><div class="chat-viz-chart-bar" style="top:64.3%;height:35.7%" title="W5: 5 deploys"></div></div><span class="chat-viz-chart-label">W5</span></div>
+            <div class="chat-viz-chart-slot"><div class="chat-viz-chart-barwrap"><span class="chat-viz-chart-val" style="top:calc(0% - 15px)">14 deploys</span><div class="chat-viz-chart-bar" style="top:0%;height:100%" title="W6: 14 deploys"></div></div><span class="chat-viz-chart-label">W6</span></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- table card -->
+      <div class="chat-viz-card">
+        <div class="chat-viz-title"><span class="chat-viz-title-text">API latency p95 this week</span>
+          <div class="chat-viz-actions"><button class="chat-viz-action" type="button" title="Copy as CSV">CSV</button><button class="chat-viz-action" type="button" title="Copy as JSON">JSON</button></div>
+        </div>
+        <div class="chat-viz-tablewrap">
+          <table class="chat-viz-table">
+            <thead><tr><th>Route</th><th style="text-align:right">p95</th><th style="text-align:right">Δ vs last week</th></tr></thead>
+            <tbody>
+              <tr><td>/api/sessions</td><td style="text-align:right">120 ms</td><td style="text-align:right">−8%</td></tr>
+              <tr><td>/api/viz/validate</td><td style="text-align:right">340 ms</td><td style="text-align:right">+3%</td></tr>
+              <tr><td>/api/artifacts</td><td style="text-align:right">86 ms</td><td style="text-align:right">−21%</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- timeline card -->
+      <div class="chat-viz-card">
+        <div class="chat-viz-title"><span class="chat-viz-title-text">API incident · Oct 9</span>
+          <div class="chat-viz-actions"><button class="chat-viz-action" type="button" title="Copy as CSV">CSV</button><button class="chat-viz-action" type="button" title="Copy as JSON">JSON</button></div>
+        </div>
+        <div class="chat-viz-timeline">
+          <div class="chat-viz-event">
+            <span class="chat-viz-event-dot"></span>
+            <div class="chat-viz-event-body">
+              <div class="chat-viz-event-row"><span class="chat-viz-event-label">Alert fired — p95 breached SLO</span><span class="chat-viz-event-at">14:02</span></div>
+              <div class="chat-viz-event-detail">Validator route saturation, 3 datacenters</div>
+            </div>
+          </div>
+          <div class="chat-viz-event">
+            <span class="chat-viz-event-dot"></span>
+            <div class="chat-viz-event-body">
+              <div class="chat-viz-event-row"><span class="chat-viz-event-label">Mitigated by shedding batch jobs</span><span class="chat-viz-event-at">14:11</span></div>
+            </div>
+          </div>
+          <div class="chat-viz-event">
+            <span class="chat-viz-event-dot"></span>
+            <div class="chat-viz-event-body">
+              <div class="chat-viz-event-row"><span class="chat-viz-event-label">Rolled back to previous engine pin</span><span class="chat-viz-event-at">14:19</span></div>
+              <div class="chat-viz-event-detail">p95 recovered to 96 ms within two minutes</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="answer">
+        <p>Every card above is a Relay component fed by validated data — the model can't draw a pixel here, and a malformed payload can't render: it returns a precise error for the model to fix, or an explicit "unavailable" fallback. Hover a card for the <b>CSV / JSON</b> export actions, and flip the theme toggle — native theming with zero effort (no bootstrap, no bridge needed). Because the payload rides the message marker, the cards persist across reloads for free.</p>
+      </div>
+
+      <!-- composer -->
+      <div class="composer">
+        <div class="box">
+          <input id="composerInput" placeholder="Message Relay…" readonly
+                 title="In the real app this is the composer; the widget's sendMessage drafts here for review">
+          <button class="send" id="sendBtn">Send</button>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<!-- bridge traffic -->
+<div class="bridge-chip" id="bridgeChip">⇄ MCP Apps bridge <span class="n" id="bridgeCount">0</span></div>
+<div class="bridge-panel" id="bridgePanel">
+  <div class="hd"><b>MCP Apps bridge</b><span>JSON-RPC over postMessage (SEP-1865)</span></div>
+  <div class="list" id="bridgeList"></div>
+</div>
+
+<div class="toasts" id="toasts"></div>
+
+<!-- =====================================================================
+     THE WIDGET DOCUMENT — exactly what render_widget writes to disk:
+     a self-contained page styled ONLY from injected CSS variables, plus
+     the injected app-side shim (simplified from src/lib/mcpApps.ts).
+     Served raw from this text/plain template; the inner script closer is
+     written <\/script> and un-escaped at mount time.
+     ===================================================================== -->
+<script type="text/plain" id="widgetSrc"><!doctype html>
+<html><head><meta charset="utf-8">
+<style>
+html{background:transparent;color:var(--foreground);font-family:var(--font-sans);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased;scrollbar-width:none}
+html::-webkit-scrollbar{display:none}body{margin:0}
+.wrap{display:grid;grid-template-columns:1.15fr 1fr;gap:16px 22px;padding:16px 20px 18px;align-items:start}
+.ctl{margin-bottom:13px}
+.ctl label{display:flex;justify-content:space-between;font-size:12px;color:var(--muted-foreground);margin:0 0 4px}
+.ctl output{color:var(--foreground);font-weight:600;font-variant-numeric:tabular-nums}
+input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:4px;border-radius:2px;background:var(--border);outline:none}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:15px;height:15px;border-radius:50%;background:var(--accent);border:2px solid var(--background);box-shadow:0 0 0 1px var(--border);cursor:grab}
+input[type=range]::-moz-range-thumb{width:13px;height:13px;border-radius:50%;background:var(--accent);border:2px solid var(--background);cursor:grab}
+.big{font-size:30px;font-weight:700;letter-spacing:-.5px;font-variant-numeric:tabular-nums;color:var(--foreground)}
+.cap{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted-foreground);margin-top:2px}
+.rows{margin-top:12px;display:grid;gap:5px;font-size:12.5px}
+.rows .r{display:flex;justify-content:space-between}
+.rows .r b{font-variant-numeric:tabular-nums;font-weight:600}
+.rows .sw{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:7px}
+.share{margin-top:14px;background:none;border:1px solid var(--border);color:var(--foreground);font:inherit;font-size:12px;border-radius:8px;padding:5px 10px;cursor:pointer}
+.share:hover{border-color:var(--accent);color:var(--accent)}
+.chartwrap{grid-column:1 / -1;border-top:1px solid var(--border);padding-top:12px}
+.chartwrap .cl{display:flex;justify-content:space-between;font-size:11px;color:var(--muted-foreground);margin-bottom:6px}
+svg{display:block;width:100%}
+@media (max-width:620px){.wrap{grid-template-columns:1fr}}
+</style></head><body>
+<div class="wrap">
+  <div>
+    <div class="ctl"><label>Initial amount <output id="oInit"></output></label><input type="range" id="initial" min="0" max="100000" step="500" value="10000"></div>
+    <div class="ctl"><label>Monthly contribution <output id="oMonth"></output></label><input type="range" id="monthly" min="0" max="2000" step="25" value="400"></div>
+    <div class="ctl"><label>Annual rate <output id="oRate"></output></label><input type="range" id="rate" min="0" max="12" step="0.25" value="6"></div>
+    <div class="ctl"><label>Years <output id="oYears"></output></label><input type="range" id="years" min="1" max="40" step="1" value="10"></div>
+  </div>
+  <div>
+    <div class="big" id="final"></div><div class="cap">final balance</div>
+    <div class="rows">
+      <div class="r"><span><span class="sw" style="background:var(--chart-2)"></span>You contributed</span><b id="contrib"></b></div>
+      <div class="r"><span><span class="sw" style="background:var(--chart-1)"></span>Interest earned</span><b id="interest"></b></div>
+      <div class="r"><span>Growth multiple</span><b id="multiple"></b></div>
+    </div>
+    <button class="share" id="shareBtn">Draft follow-up: "what if +$200/mo?"</button>
+  </div>
+  <div class="chartwrap"><div class="cl"><span>growth over time</span><span id="yrLbl"></span></div>
+    <svg id="chart" viewBox="0 0 560 132" preserveAspectRatio="none" style="height:132px"></svg>
+  </div>
+</div>
+<script>
+/* ---- the injected shim (simplified from src/lib/mcpApps.ts) ---- */
+var seq = 0, pending = {};
+function post(m) { try { parent.postMessage(m, "*"); } catch (e) {} }
+function send(method, params) {
+  return new Promise(function (res) {
+    var id = "rw-" + (++seq); pending[id] = res;
+    post({ jsonrpc: "2.0", id: id, method: method, params: params || {} });
+  });
+}
+function notify(method, params) { post({ jsonrpc: "2.0", method: method, params: params || {} }); }
+function ensureStyle() {
+  var s = document.getElementById("relay-widget-theme");
+  if (!s) { s = document.createElement("style"); s.id = "relay-widget-theme"; document.head.insertBefore(s, document.head.firstChild); }
+  return s;
+}
+function applyTheme(t) {
+  if (!t || !t.variables) return;
+  var c = ":root{color-scheme:" + (t.appearance === "light" ? "light" : "dark") + ";";
+  for (var k in t.variables) { if (/^--[a-z0-9-]+$/.test(k)) c += k + ":" + String(t.variables[k]).replace(/[;{}<>]/g, "") + ";"; }
+  ensureStyle().textContent = c + "}html{background:transparent}body{margin:0}";
+}
+window.addEventListener("message", function (e) {
+  var d = e.data; if (!d || d.jsonrpc !== "2.0") return;
+  if (d.method !== undefined) {
+    var p = d.params || {};
+    if (d.method === "ui/notifications/host-context-changed" && p.styles) applyTheme({ appearance: p.theme, variables: p.styles.variables });
+    else if (d.method === "ui/resource-teardown") post({ jsonrpc: "2.0", id: d.id, result: {} });
+    return;
+  }
+  if (d.id !== undefined && pending[d.id]) { var fn = pending[d.id]; delete pending[d.id]; fn(d); }
+});
+/* ---- size reporting → the host clamps and sets the iframe height ---- */
+var lastH = 0;
+function reportH() {
+  var h = Math.ceil(document.documentElement.scrollHeight);
+  if (h !== lastH) { lastH = h; notify("ui/notifications/size-changed", { height: h }); }
+}
+if (window.ResizeObserver) { try { new ResizeObserver(reportH).observe(document.documentElement); } catch (e) {} }
+window.addEventListener("load", reportH); reportH();
+/* ---- handshake ---- */
+send("ui/initialize", { appInfo: { name: "compound interest explorer", version: "1.0.0" }, appCapabilities: { availableDisplayModes: ["inline", "fullscreen"] } })
+  .then(function (r) {
+    var ctx = r.result && r.result.hostContext;
+    if (ctx) applyTheme({ appearance: ctx.theme, variables: ctx.styles.variables });
+    notify("ui/notifications/initialized");
+  });
+window.relayWidget = {
+  sendMessage: function (t) { return send("ui/message", { role: "user", content: { type: "text", text: String(t) } }); },
+  requestDisplayMode: function (m) { return send("ui/request-display-mode", { mode: m }); }
+};
+/* ---- the calculator itself (plain page code, no bridge needed) ---- */
+function fmt(n) { return "$" + Math.round(n).toLocaleString("en-US"); }
+function series(init, month, rate, years) {
+  var bal = init, pts = [], r = rate / 100 / 12;
+  for (var y = 0; y < years; y++) { for (var m = 0; m < 12; m++) { bal = bal * (1 + r) + month; } pts.push(bal); }
+  return pts;
+}
+function render() {
+  var init = +document.getElementById("initial").value,
+      month = +document.getElementById("monthly").value,
+      rate = +document.getElementById("rate").value,
+      years = +document.getElementById("years").value;
+  document.getElementById("oInit").textContent = fmt(init);
+  document.getElementById("oMonth").textContent = fmt(month) + "/mo";
+  document.getElementById("oRate").textContent = rate.toFixed(2).replace(/\.00$/, "") + "%";
+  document.getElementById("oYears").textContent = years + (years === 1 ? " yr" : " yrs");
+  var pts = series(init, month, rate, years),
+      finalBal = pts[pts.length - 1],
+      contrib = init + month * 12 * years,
+      interest = finalBal - contrib;
+  document.getElementById("final").textContent = fmt(finalBal);
+  document.getElementById("contrib").textContent = fmt(contrib);
+  document.getElementById("interest").textContent = fmt(interest);
+  document.getElementById("multiple").textContent = contrib > 0 ? (finalBal / contrib).toFixed(2) + "×" : "—";
+  document.getElementById("yrLbl").textContent = "year 1 – " + years;
+  var svg = document.getElementById("chart"), W = 560, H = 132, max = finalBal || 1, bar = W / years, html = "";
+  for (var i = 0; i < years; i++) {
+    var total = pts[i],
+        grow = contrib > 0 ? Math.min(1, (init + month * 12 * (i + 1)) / total) : 0,
+        h = total / max * (H - 8), x = i * bar, bw = Math.max(bar - 2, 1);
+    var hGrow = h * grow, hInt = h - hGrow;
+    html += '<rect x="' + x.toFixed(1) + '" y="' + (H - h).toFixed(1) + '" width="' + bw.toFixed(1) + '" height="' + hGrow.toFixed(1) + '" fill="var(--chart-2)" rx="1.5"/>';
+    html += '<rect x="' + x.toFixed(1) + '" y="' + (H - hInt).toFixed(1) + '" width="' + bw.toFixed(1) + '" height="' + Math.max(hInt, 0).toFixed(1) + '" fill="var(--chart-1)" rx="1.5"/>';
+  }
+  svg.innerHTML = html;
+}
+["initial", "monthly", "rate", "years"].forEach(function (id) { document.getElementById(id).addEventListener("input", render); });
+document.getElementById("shareBtn").addEventListener("click", function () {
+  window.relayWidget.sendMessage("What if I contribute $200 more per month?").catch(function () {});
+  this.textContent = "Drafted ✓ — review in the composer";
+  var b = this; setTimeout(function () { b.textContent = 'Draft follow-up: "what if +$200/mo?"'; }, 2200);
+});
+render();
+<\/script></body></html>
+</script>
+
+<script>
+/* =====================================================================
+   THE HOST — what WidgetFrame does in the app (src/lib/mcpApps.ts +
+   src/components/chat/WidgetFrame.tsx), running live in this page.
+   ===================================================================== */
+var THEME_DARK = {
+  appearance: "dark",
+  variables: {
+    "--background": "#181818", "--foreground": "#e8e8e8", "--muted": "#262626",
+    "--muted-foreground": "#9a9a9a", "--card": "#1f1f1f", "--border": "#333333",
+    "--input": "#262626", "--primary": "#88c0d0", "--accent": "#88c0d0",
+    "--accent-foreground": "#10222a", "--destructive": "#e5484d", "--success": "#10b981",
+    "--warning": "#f59e0b", "--info": "#3b82f6",
+    "--chart-1": "#88c0d0", "--chart-2": "#81a1c1", "--chart-3": "#d97706",
+    "--radius": "0.625rem",
+    "--font-sans": "-apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif",
+    "--font-mono": "Menlo, Consolas, monospace"
+  }
+};
+var THEME_LIGHT = {
+  appearance: "light",
+  variables: {
+    "--background": "#f6f6f5", "--foreground": "#1c1c1c", "--muted": "#ececeb",
+    "--muted-foreground": "#6f6f6e", "--card": "#ffffff", "--border": "#dcdcdb",
+    "--input": "#ffffff", "--primary": "#2e7d9e", "--accent": "#2e7d9e",
+    "--accent-foreground": "#ffffff", "--destructive": "#d33d42", "--success": "#0d9668",
+    "--warning": "#d97706", "--info": "#3b82f6",
+    "--chart-1": "#2e7d9e", "--chart-2": "#7fa8c9", "--chart-3": "#d97706",
+    "--radius": "0.625rem",
+    "--font-sans": "-apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif",
+    "--font-mono": "Menlo, Consolas, monospace"
+  }
+};
+
+var frame = document.getElementById('widgetFrame');
+var block = document.getElementById('widgetBlock');
+var current = THEME_DARK;
+var displayMode = 'inline';
+var initialized = false;
+var WIDGET_MIN_H = 120, WIDGET_MAX_H = 640;
+
+// The raw template becomes the srcDoc; the escaped inner closer is restored.
+var widgetSrc = document.getElementById('widgetSrc').textContent
+  .replace(/<\\\/script>/g, '</scr' + 'ipt>');
+
+// ---- bridge traffic log ----
+var listEl = document.getElementById('bridgeList');
+var countEl = document.getElementById('bridgeCount');
+var logN = 0;
+function logMsg(dir, data) {
+  logN += 1;
+  countEl.textContent = String(logN);
+  var div = document.createElement('div');
+  div.className = 'bridge-msg ' + (dir === 'host → app' ? 'to-app' : 'to-host');
+  var method = data && data.method ? data.method : (data && data.id !== undefined && data.result !== undefined ? '(response)' : '?');
+  var params = data && data.params ? JSON.stringify(data.params) : (data && data.result ? JSON.stringify(data.result).slice(0, 140) : '');
+  div.innerHTML = '<span class="dir"></span><span class="m"></span><span class="p"></span>';
+  div.children[0].textContent = dir;
+  div.children[1].textContent = method;
+  div.children[2].textContent = (params || '').slice(0, 160);
+  listEl.insertBefore(div, listEl.firstChild);
+  while (listEl.children.length > 60) listEl.removeChild(listEl.lastChild);
+}
+document.getElementById('bridgeChip').addEventListener('click', function () {
+  document.getElementById('bridgePanel').classList.toggle('open');
+});
+
+// ---- the host bridge ----
+function hostContext() {
+  return {
+    theme: current.appearance,
+    styles: { variables: current.variables },
+    displayMode: displayMode,
+    availableDisplayModes: ['inline', 'fullscreen'],
+    containerDimensions: { width: block.clientWidth, maxHeight: WIDGET_MAX_H },
+    platform: 'desktop',
+    locale: navigator.language,
+    timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    userAgent: 'relay-widget-host/demo',
+    deviceCapabilities: { touch: false, hover: true },
+    safeAreaInsets: { top: 0, right: 0, bottom: 0, left: 0 },
+  };
+}
+function postToWidget(message) {
+  logMsg('host → app', message);
+  frame.contentWindow.postMessage(message, '*');
+}
+function respond(id, result) { postToWidget({ jsonrpc: '2.0', id: id, result: result }); }
+function fail(id, message) { postToWidget({ jsonrpc: '2.0', id: id, error: { code: -32000, message: message } }); }
+
+window.addEventListener('message', function (e) {
+  // Source scoping: only THIS frame's window reaches this host.
+  if (e.source !== frame.contentWindow) return;
+  var d = e.data;
+  if (!d || d.jsonrpc !== '2.0') return;
+  logMsg('app → host', d);
+  if (d.method === undefined) return; // a response to a host request
+  var p = d.params || {};
+  switch (d.method) {
+    case 'ui/initialize':
+      initialized = true;
+      respond(d.id, {
+        protocolVersion: '2026-01-26',
+        hostInfo: { name: 'relay', version: 'demo' },
+        hostCapabilities: { openLinks: {}, message: { text: {} }, downloadFile: {}, sandbox: {} },
+        hostContext: hostContext(),
+      });
+      return;
+    case 'ping': respond(d.id, {}); return;
+    case 'ui/notifications/initialized': initialized = true; return;
+    case 'ui/notifications/size-changed':
+      if (displayMode === 'inline' && typeof p.height === 'number') {
+        var h = Math.min(WIDGET_MAX_H, Math.max(WIDGET_MIN_H, Math.round(p.height)));
+        frame.style.height = h + 'px';
+      }
+      return;
+    case 'ui/request-display-mode':
+      setDisplayMode(p.mode === 'fullscreen' ? 'fullscreen' : 'inline');
+      respond(d.id, { mode: displayMode });
+      return;
+    case 'ui/open-link':
+      if (!/^https?:\/\//i.test(p.url || '')) { fail(d.id, 'Only http(s) links can be opened.'); return; }
+      toast("Would open Relay's browser pane", p.url);
+      respond(d.id, {});
+      return;
+    case 'ui/message': {
+      // Draft, never auto-send: the user reviews in the composer.
+      var text = '';
+      var blocks = Array.isArray(p.content) ? p.content : [p.content];
+      blocks.forEach(function (b) { if (b && b.type === 'text') text += b.text; });
+      var input = document.getElementById('composerInput');
+      input.value = input.value ? input.value + '\n' + text : text;
+      input.classList.add('has-draft');
+      toast('Widget message drafted', 'Review it in the composer and press send.');
+      respond(d.id, {});
+      return;
+    }
+    case 'tools/call':
+      fail(d.id, 'Widgets cannot call tools in this version of Relay.');
+      return;
+    default:
+      fail(d.id, 'Method not found: ' + d.method);
+  }
+});
+
+// ---- theme push (host-context-changed), like updateHostContext() ----
+document.getElementById('themeBtn').addEventListener('click', function () {
+  var root = document.documentElement;
+  var next = root.getAttribute('data-theme') === 'dark' ? THEME_LIGHT : THEME_DARK;
+  root.setAttribute('data-theme', next.appearance);
+  document.getElementById('themeLbl').textContent = next.appearance === 'dark' ? 'Dark' : 'Light';
+  current = next;
+  if (!initialized) return;
+  postToWidget({
+    jsonrpc: '2.0',
+    method: 'ui/notifications/host-context-changed',
+    params: { theme: current.appearance, styles: { variables: current.variables } },
+  });
+});
+
+// ---- fullscreen: same iframe, restyled — state survives ----
+function setDisplayMode(mode) {
+  displayMode = mode;
+  var fs = mode === 'fullscreen';
+  block.classList.toggle('chat-widget-fullscreen', fs);
+  document.getElementById('fsHint').style.display = fs ? '' : 'none';
+  document.getElementById('btnFs').title = fs ? 'Exit full view' : 'Full view';
+  if (!fs) frame.style.height = ''; // let the next size-changed re-fit
+}
+document.getElementById('btnFs').addEventListener('click', function () {
+  setDisplayMode(displayMode === 'fullscreen' ? 'inline' : 'fullscreen');
+});
+window.addEventListener('keydown', function (e) {
+  if (e.key === 'Escape' && displayMode === 'fullscreen') setDisplayMode('inline');
+});
+
+// ---- close / reopen (teardown posture) ----
+var closedRow = null;
+document.getElementById('btnClose').addEventListener('click', function () {
+  block.style.display = 'none';
+  closedRow = document.createElement('div');
+  closedRow.className = 'chat-widget-block chat-widget-closed';
+  closedRow.innerHTML = '<span>Widget closed</span>';
+  var btn = document.createElement('button');
+  btn.className = 'chat-widget-reopen'; btn.textContent = 'Show';
+  btn.addEventListener('click', function () {
+    block.style.display = ''; closedRow.remove(); closedRow = null;
+  });
+  closedRow.appendChild(btn);
+  block.parentNode.insertBefore(closedRow, block);
+});
+document.getElementById('btnTab').addEventListener('click', function () {
+  toast('Opens the artifact tab', "The raw HTML view, in the app's tool panel.");
+});
+document.getElementById('sendBtn').addEventListener('click', function () {
+  toast('This is a demo', 'In the real app this sends the turn.');
+});
+
+// ---- toasts ----
+function toast(title, detail) {
+  var el = document.createElement('div');
+  el.className = 'toast';
+  el.innerHTML = '<b></b><span></span>';
+  el.children[0].textContent = title;
+  el.children[1].textContent = detail || '';
+  document.getElementById('toasts').appendChild(el);
+  setTimeout(function () { el.style.opacity = '0'; el.style.transition = 'opacity .3s'; }, 3600);
+  setTimeout(function () { el.remove(); }, 4000);
+}
+
+// ---- mount the widget (the srcDoc moment) + narration args excerpt ----
+frame.srcdoc = widgetSrc;
+var argsExcerpt = JSON.stringify({ title: 'Compound interest explorer', html: widgetSrc.slice(0, 300) + ' …' }, null, 1);
+document.getElementById('argsDetail').textContent = 'render_widget args:\n' + argsExcerpt;
+</script>
+</body>
+</html>

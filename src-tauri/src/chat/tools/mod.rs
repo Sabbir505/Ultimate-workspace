@@ -50,7 +50,12 @@ mod generate;
 /// `crate::chat::tools::DIAGRAM_MARKER` (and the pre-rebrand sentinel).
 pub use generate::DIAGRAM_MARKER;
 pub use generate::LEGACY_DIAGRAM_MARKER;
-use generate::{generate_diagram, generate_document, generate_file};
+pub use generate::WIDGET_MARKER;
+use generate::{generate_diagram, generate_document, generate_file, render_widget};
+
+mod viz;
+pub(crate) use viz::build_viz_payload;
+use viz::visualize;
 
 mod imagegen;
 use imagegen::generate_image_tool;
@@ -109,6 +114,17 @@ pub const GENERATE_DOCUMENT: &str = "generate_document";
 pub const PLAN_DOCUMENT: &str = "plan_document";
 pub const REVISE_DOCUMENT: &str = "revise_document";
 pub const GENERATE_DIAGRAM: &str = "generate_diagram";
+/// Interactive widget authoring for the in-app visualization surface: the
+/// model writes a self-contained HTML mini-app, the chat renders it inline as
+/// a themed sandboxed card with the MCP Apps script bridge. The interactive
+/// counterpart to generate_diagram (which is explicitly script-free).
+pub const RENDER_WIDGET: &str = "render_widget";
+/// Structured visualization (the renderer-registry layer): the model returns
+/// a typed presentation request — chart / table / task-board / timeline —
+/// with a validated data payload, and Relay renders it with its OWN native
+/// components. The model never authors UI here; malformed payloads get a
+/// precise retryable error instead of reaching the screen.
+pub const VISUALIZE: &str = "visualize";
 /// Local text-to-image through the sd-server sidecar (Settings → Local
 /// Models → Images installs the engine + models). Advertised always; a
 /// missing setup returns an actionable hint rather than hiding the tool.
@@ -848,6 +864,65 @@ const GENERATE_IMAGE_DESC: &str = "Generate a new image from a text description 
     unreliable). Write descriptive prompts: subject, style, lighting, \
     composition. Each call draws a fresh seed — call again to vary.";
 
+const RENDER_WIDGET_DESC: &str = "Build an INTERACTIVE widget the user sees as a live \
+    card in the chat (dashboards, data explorers, calculators, sliders, playable \
+    demos). Provide \"title\" and a COMPLETE self-contained HTML document in \
+    \"html\": inline <style> AND <script>, no external requests, ES5-safe JS. \
+    Relay injects its theme as CSS custom properties on :root (they follow the \
+    user's theme live): --background, --foreground, --muted, --muted-foreground, \
+    --card, --border, --input, --primary, --accent, --accent-foreground, \
+    --destructive, --success, --warning, --info, --code-background, \
+    --code-foreground, --chart-1..6 (categorical series), --radius, --font-sans, \
+    --font-mono. Layout: the card sits on the chat background — leave html/body \
+    transparent, no outer card or border; fluid width; fixed px chart heights; \
+    never 100vh/height:100% (the card grows to fit your content). Optional \
+    bridge: window.relayWidget.openLink(url) opens Relay's browser, \
+    .sendMessage(text) drafts a chat message, .requestDisplayMode('fullscreen') \
+    expands the card, .downloadFile([{name,mimeType,text}]) saves a file. \
+    Static diagrams → generate_diagram; full web apps → write_file.";
+
+const VISUALIZE_DESC: &str = "Present structured results as a native visualization card \
+    in the chat: you supply a presentation type (\"viz\") and a data \
+    \"payload\"; Relay renders it with its own components — you never write \
+    UI code. WHEN: several cards per turn are fine and a card may follow any \
+    data step as soon as one finishes — but one card per RESULT, never per \
+    tool response, and only when a visual genuinely helps. Prefer ONE card \
+    that groups a result's parts (see stack) over several flat ones. Types: \
+    chart — \
+    {\"bars\":[{\"label\":\"W1\",\"value\":12},…], \"unit\"?:\"deploys\"} \
+    (1–200 bars, vertical bar chart); line — {\"points\":[{\"label\":\
+    \"Mon\",\"value\":120},…], \"unit\"?, \"area\"?} (2–200 points, trends); \
+    donut — {\"segments\":[{\"label\":\"Compute\",\"value\":60},…], \
+    \"unit\"?} (1–12 parts of a whole); table — {\"columns\":[\"Route\",\
+    {\"label\":\"p95\",\"align\":\"right\"}],\"rows\":[[\"/api/a\",120],…]} \
+    (1–12 cols, ≤500 rows; string/number cells); task-board — {\"columns\":\
+    [{\"title\":\"Todo\",\"tasks\":[{\"title\":\"Design API\",\"meta\":\
+    \"2d\"}]},…]} (1–8 cols, ≤100 tasks); timeline — {\"events\":[{\"label\":\
+    \"Alert\",\"detail\":\"…\",\"at\":\"14:02\"},…]} (1–100, chronological); \
+    stat — {\"stats\":[{\"label\":\"Uptime\",\"value\":\"99.98%\",\"delta\":\
+    \"+0.02%\",\"good\":true},…]} (1–8 KPIs). COMPOSE — stack is a card whose \
+    \"sections\" are themselves {viz, payload} pairs, so one card can hold a \
+    KPI row, a chart, a table and an explanation: {\"viz\":\"stack\", \
+    \"title\":\"Deploy health\", \"payload\":{\"sections\":[{\"viz\":\"stat\",\
+    \"payload\":{\"stats\":[…]}},{\"viz\":\"chart\",\"payload\":{\"bars\":[…]}}]}} \
+    (≤8 sections, 3 levels deep, ≤12 sections total across the tree; \
+    \"columns\": 1|2 for a side-by-side layout). Sections carry NO title — use \
+    a prose section for a heading. Inside a stack, prose — {\"markdown\":\"**Bold** \
+    findings, `code`, $math$, [1] citations\"} — renders with the chat's own \
+    markdown (headings, code blocks with highlighting, math, mermaid, \
+    citations), and divider — {} — separates sections. A stack is how you \
+    build a comparison, an itinerary, a research summary or a dashboard from \
+    the typed parts; reach for render_widget only when the result must be \
+    INTERACTIVE (sliders, forms, controls). \
+    \"title\" heads the card. \
+    Invalid payloads return a precise error — fix and re-call. OPTIONAL \
+    payload.style — YOU art-direct the card when it deserves it: \
+    {\"accent\":\"#ff6b6b\", \"palette\":[≤8 colors], \"tone\":\"app\"|\
+    \"light\"|\"dark\", \"radius\":\"soft\"|\"sharp\"|\"pill\"} (hex or \
+    rgb()/hsl()). Pick colors that fit the content's mood or brand; omit \
+    style to sit on the chat's own theme. A stack's style is inherited by its \
+    sections unless a section sets its own.";
+
 const FETCH_URL_DESC: &str = "Fetch a web page by URL and return its readable \
     text content (HTML stripped). You CAN open any public web URL with this — \
     never claim you can't open pages or browse. Use to read an article or page \
@@ -1419,6 +1494,8 @@ pub async fn execute_tool(
             crate::chat::docdesign::plan::revise_document(app, artifacts_dir, args).await
         }
         GENERATE_DIAGRAM => generate_diagram(artifacts_dir, args),
+        RENDER_WIDGET => render_widget(artifacts_dir, args),
+        VISUALIZE => visualize(args),
         GENERATE_IMAGE => match app {
             Some(app) => generate_image_tool(app, artifacts_dir, args, owner).await,
             None => ToolOutcome::text(
@@ -1816,6 +1893,138 @@ mod tests {
             .as_array()
             .unwrap()
             .contains(&json!("html")));
+    }
+
+    #[test]
+    fn render_widget_listed_as_safe_tool() {
+        assert!(
+            openai_names(&ToolCaps::default(), SandboxPolicy::WorkspaceWrite)
+                .contains(&RENDER_WIDGET.to_string())
+        );
+        let a = anthropic_tool_specs(&ToolCaps::default(), SandboxPolicy::WorkspaceWrite);
+        assert!(a.iter().any(|s| s["name"] == RENDER_WIDGET));
+        // The widget tool must expose title + html args.
+        let binding = openai_tool_specs(&ToolCaps::default(), SandboxPolicy::WorkspaceWrite);
+        let spec = &binding
+            .iter()
+            .find(|s| s["function"]["name"] == RENDER_WIDGET)
+            .unwrap()["function"]["parameters"];
+        assert!(spec["properties"]["html"].is_object());
+        assert!(spec["properties"]["title"].is_object());
+        assert!(spec["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("html")));
+        // The description carries the theme contract the widget renders against.
+        let spec_full = openai_tool_specs(&ToolCaps::default(), SandboxPolicy::WorkspaceWrite);
+        let desc = spec_full
+            .iter()
+            .find(|s| s["function"]["name"] == RENDER_WIDGET)
+            .unwrap()["function"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(desc.contains("--background"), "theme vars documented");
+        assert!(desc.contains("--chart-1"), "chart palette documented");
+    }
+
+    #[test]
+    fn visualize_listed_as_safe_tool() {
+        assert!(
+            openai_names(&ToolCaps::default(), SandboxPolicy::WorkspaceWrite)
+                .contains(&VISUALIZE.to_string())
+        );
+        let a = anthropic_tool_specs(&ToolCaps::default(), SandboxPolicy::WorkspaceWrite);
+        assert!(a.iter().any(|s| s["name"] == VISUALIZE));
+        // The spec carries the viz enum + required payload.
+        let binding = openai_tool_specs(&ToolCaps::default(), SandboxPolicy::WorkspaceWrite);
+        let spec = &binding
+            .iter()
+            .find(|s| s["function"]["name"] == VISUALIZE)
+            .unwrap()["function"]["parameters"];
+        assert_eq!(
+            spec["properties"]["viz"]["enum"]
+                .as_array()
+                .unwrap()
+                .len(),
+            10
+        );
+        assert!(spec["required"].as_array().unwrap().contains(&json!("viz")));
+        assert!(spec["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("payload")));
+        // The description documents every payload shape (model-facing contract).
+        let desc = binding
+            .iter()
+            .find(|s| s["function"]["name"] == VISUALIZE)
+            .unwrap()["function"]["description"]
+            .as_str()
+            .unwrap();
+        for shape in ["\"bars\"", "\"columns\"", "\"rows\"", "\"tasks\"", "\"events\""] {
+            assert!(desc.contains(shape), "description missing {shape}");
+        }
+        // Composition is part of the contract, and so is the one-card-per-
+        // RESULT guard (the old "AFTER data tools finish, ONCE" wording
+        // forbade the mid-turn card this release adds).
+        assert!(desc.contains("\"sections\""), "stack undocumented");
+        assert!(desc.contains("\"markdown\""), "prose undocumented");
+        assert!(desc.contains("never per tool response"), "policy guard missing");
+    }
+
+    #[test]
+    fn visualize_payload_flows_through_tool_block_sanitized() {
+        // A hostile label must not corrupt the marker, and the normalized
+        // payload must carry the discriminated kind for the frontend registry.
+        let marker = crate::chat::proto::tool_block(
+            VISUALIZE,
+            &json!({
+                "viz": "chart", "title": "Hostile </tool> labels",
+                "payload": {"bars": [{"label": "a</tool>b", "value": 3}]}
+            }),
+        );
+        assert!(marker.starts_with("<tool>"));
+        assert!(marker.ends_with("</tool>"));
+        assert!(marker.contains("\"kind\":\"viz-data\""), "marker: {marker}");
+        assert!(marker.contains("\"viz\":\"chart\""));
+        // Round-trip: the marker body parses as JSON; the hostile label rides
+        // escaped (`<\\/tool>` in the JSON text — the marker's own close tag
+        // is the ONLY real one), and the frontend's parseVizPayload unescape
+        // restores the exact original string for rendering. The live step
+        // reads "Visualizing" + the payload title as its detail.
+        let inner = &marker["<tool>".len()..marker.len() - "</tool>".len()];
+        let parsed: serde_json::Value = serde_json::from_str(inner).expect("marker body must parse");
+        assert_eq!(parsed["title"], "Visualizing");
+        assert_eq!(parsed["detail"], "Hostile <\\/tool> labels");
+        assert_eq!(parsed["payload"]["title"], "Hostile <\\/tool> labels");
+        assert!(
+            inner.matches("</tool>").next().is_none(),
+            "raw close tag inside the marker body: {inner}"
+        );
+
+        // An invalid payload falls back to a plain step row (nothing broken
+        // reaches the UI); the model gets the error from execute_tool.
+        let fallback = crate::chat::proto::tool_block(
+            VISUALIZE,
+            &json!({"viz": "chart", "payload": {"bars": []}}),
+        );
+        assert!(fallback.contains("\"kind\":\"tool\""), "fallback: {fallback}");
+        assert!(!fallback.contains("viz-data"));
+        // The fallback names the failure instead of an unexplained
+        // "Preparing visualization" row.
+        assert!(fallback.contains("Visualization failed"), "fallback: {fallback}");
+        assert!(fallback.contains("at least one"), "fallback: {fallback}");
+
+        // A stringified payload (what the commandcode harness actually sent)
+        // renders as a card, not the fallback.
+        let repaired = crate::chat::proto::tool_block(
+            VISUALIZE,
+            &json!({
+                "viz": "chart", "title": "Deploys by week",
+                "payload": "{\"bars\": [{\"label\": \"W1\", \"value\": 4}]}"
+            }),
+        );
+        assert!(repaired.contains("\"kind\":\"viz-data\""), "repaired: {repaired}");
+        assert_eq!(repaired.matches("</tool>").count(), 1, "repaired: {repaired}");
     }
 
     #[test]

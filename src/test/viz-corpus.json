@@ -1,0 +1,163 @@
+{
+  "//": "Shared visualization corpus — the anti-drift contract between the Rust validator (build_viz_payload, src-tauri/src/chat/tools/viz.rs) and the frontend rendering gate (parseVizPayload, src/lib/viz.ts). Both MUST accept every marker in `accept` and reject every marker in `reject`. The bugs this pins: (1) the tool and the marker emitter disagreed on a JSON-STRINGIFIED payload, so every card rendered while its step row read 'Preparing visualization'; (2) the gate rejected the normalizer's own outputs (table align:'left', timeline detail:'') and showed 'Visualization unavailable' for cards the backend had accepted. A new viz kind adds rows here from BOTH languages' tests, rather than either side growing a second hand-written opinion.",
+  "accept": [
+    {
+      "why": "chart — the canonical bars payload, integer values stay integers",
+      "viz": "chart",
+      "title": "Deploys by week",
+      "payload": { "unit": "deploys", "bars": [{ "label": "W1", "value": 4 }, { "label": "W2", "value": 9 }] }
+    },
+    {
+      "why": "chart — a hostile label is neutralized for the marker and unescaped on parse",
+      "viz": "chart",
+      "title": "Hostile </tool> labels",
+      "payload": { "bars": [{ "label": "a</tool>b", "value": 3 }] }
+    },
+    {
+      "why": "line — trend points plus an explicit area flag",
+      "viz": "line",
+      "title": "p95 trend",
+      "payload": { "unit": "ms", "area": true, "points": [{ "label": "Mon", "value": 120 }, { "label": "Tue", "value": 96 }] }
+    },
+    {
+      "why": "donut — parts of a whole with an agent palette",
+      "viz": "donut",
+      "title": "Spend by team",
+      "payload": { "unit": "$k", "style": { "palette": ["#e07a5f", "#3d5a80"] }, "segments": [{ "label": "Compute", "value": 45 }, { "label": "Storage", "value": 30 }] }
+    },
+    {
+      "why": "table — the normalizer's own shape: every column carries an EXPLICIT align, and a plain string column becomes align:'left'",
+      "viz": "table",
+      "title": "API latency",
+      "payload": {
+        "columns": [{ "align": "left", "label": "Route" }, { "align": "right", "label": "p95" }, { "align": "right", "label": "Δ" }],
+        "rows": [["/api/sessions", "120 ms", "-8%"], ["/api/artifacts", "86 ms", "-21%"]],
+        "style": null
+      }
+    },
+    {
+      "why": "task-board — columns with tasks, meta optional",
+      "viz": "task-board",
+      "title": "Sprint 42",
+      "payload": { "columns": [{ "title": "Todo", "tasks": [{ "title": "Harden sandbox CSP", "meta": "security" }, { "title": "Polish timeline" }] }] }
+    },
+    {
+      "why": "timeline — the normalizer writes '' for an absent detail/at (the gate used to refuse exactly that)",
+      "viz": "timeline",
+      "title": "API incident Oct 9",
+      "payload": {
+        "events": [
+          { "at": "14:02", "detail": "p95 breached SLO", "label": "Alert fired" },
+          { "at": "14:11", "detail": "", "label": "Mitigated" },
+          { "at": "14:19", "detail": "p95 recovered", "label": "Rolled back" }
+        ],
+        "style": null
+      }
+    },
+    {
+      "why": "stat — KPI row with directional deltas, nulls for absent optional fields",
+      "viz": "stat",
+      "title": "This week",
+      "payload": { "style": { "accent": "#3d5a80", "tone": "light" }, "stats": [{ "label": "Deploys", "value": "14", "delta": "+3", "good": true }, { "label": "Uptime", "value": "99.98%", "delta": null, "good": null }] }
+    },
+    {
+      "why": "stack — composition: KPI row + chart + prose + divider + a nested stack with a table, two columns",
+      "viz": "stack",
+      "title": "Deploy health — sprint 42",
+      "payload": {
+        "columns": 2,
+        "style": { "palette": ["#e07a5f", "#3d5a80"], "tone": "dark" },
+        "sections": [
+          { "viz": "stat", "payload": { "stats": [{ "label": "Uptime", "value": "99.9%" }] } },
+          { "viz": "chart", "payload": { "unit": "deploys", "bars": [{ "label": "W1", "value": 4 }] } },
+          { "viz": "divider", "payload": {} },
+          { "viz": "prose", "payload": { "markdown": "The **W1** spike is the release train — p95 held under 150 ms [1]." } },
+          { "viz": "stack", "payload": { "sections": [{ "viz": "table", "payload": { "columns": ["route"], "rows": [["/api/a"]] } }] } }
+        ]
+      }
+    },
+    {
+      "why": "stack — a section's own style overrides the container's, and may sit on the section rather than its payload",
+      "viz": "stack",
+      "title": "Two views",
+      "payload": {
+        "sections": [
+          { "viz": "chart", "payload": { "bars": [{ "label": "a", "value": 1 }] } },
+          { "viz": "chart", "style": { "accent": "#123456" }, "payload": { "bars": [{ "label": "a", "value": 1 }] } }
+        ]
+      }
+    },
+    {
+      "why": "prose — the rich-content leaf: markdown with code, math and a citation marker",
+      "viz": "prose",
+      "title": null,
+      "payload": { "markdown": "### Findings\n\n`rows[0]` drifted by $\\pm 2$ ms." }
+    }
+  ],
+  "reject": [
+    {
+      "why": "unknown kind",
+      "viz": "map",
+      "payload": {}
+    },
+    {
+      "why": "missing viz",
+      "payload": { "bars": [{ "label": "a", "value": 1 }] }
+    },
+    {
+      "why": "chart with no bars",
+      "viz": "chart",
+      "payload": { "bars": [] }
+    },
+    {
+      "why": "table row width mismatch",
+      "viz": "table",
+      "payload": { "columns": ["a", "b"], "rows": [["only"]] }
+    },
+    {
+      "why": "an align that is neither left nor right",
+      "viz": "table",
+      "payload": { "columns": [{ "label": "a", "align": "center" }], "rows": [["x"]] }
+    },
+    {
+      "why": "a task-board task with no title",
+      "viz": "task-board",
+      "payload": { "columns": [{ "title": "c", "tasks": [{ "label": "x" }] }] }
+    },
+    {
+      "why": "a timeline event with no label",
+      "viz": "timeline",
+      "payload": { "events": [{ "detail": "no label here" }] }
+    },
+    {
+      "why": "stack nested four levels deep",
+      "viz": "stack",
+      "payload": { "sections": [{ "viz": "stack", "payload": { "sections": [{ "viz": "stack", "payload": { "sections": [{ "viz": "stack", "payload": { "sections": [{ "viz": "divider", "payload": {} }] } }] } }] } } }] }
+    },
+    {
+      "why": "a stack section that is not a (viz, payload) pair",
+      "viz": "stack",
+      "payload": { "sections": [{ "bars": [] }] }
+    },
+    {
+      "why": "a stack section with an invalid child (precise path: sections[0])",
+      "viz": "stack",
+      "payload": { "sections": [{ "viz": "chart", "payload": { "bars": [] } }] }
+    },
+    {
+      "why": "a stack with three columns",
+      "viz": "stack",
+      "payload": { "columns": 3, "sections": [{ "viz": "divider", "payload": {} }] }
+    },
+    {
+      "why": "prose with no markdown",
+      "viz": "prose",
+      "payload": {}
+    },
+    {
+      "why": "a color that could smuggle CSS",
+      "viz": "chart",
+      "payload": { "style": { "accent": "url(x)" }, "bars": [{ "label": "a", "value": 1 }] }
+    }
+  ]
+}

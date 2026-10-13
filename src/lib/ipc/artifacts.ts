@@ -390,6 +390,7 @@ export interface ArtifactPreview {
     | "json"
     | "html"
     | "diagram"
+    | "widget"
     | "mermaid"
     | "code"
     | "jsx"

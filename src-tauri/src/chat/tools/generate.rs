@@ -1,9 +1,11 @@
-//! File/document/diagram generation tools: `generate_file` (plain text),
-//! `generate_document` (docx/pptx/xlsx/pdf via the bundled Python runtime),
-//! and `generate_diagram` (inline-SVG HTML). Each produces a file surfaced to
-//! the UI as a downloadable artifact. Diagram HTML is structurally validated
-//! before write ([`validate_diagram_html`]) and prefixed with the
-//! [`DIAGRAM_MARKER`] sentinel so the preview pane can detect it.
+//! File/document/diagram/widget generation tools: `generate_file` (plain
+//! text), `generate_document` (docx/pptx/xlsx/pdf via the bundled Python
+//! runtime), `generate_diagram` (inline-SVG HTML), and `render_widget`
+//! (interactive HTML mini-apps for the in-app visualization surface). Each
+//! produces a file surfaced to the UI as a downloadable artifact. Diagram and
+//! widget HTML are prefixed with their sentinel markers ([`DIAGRAM_MARKER`] /
+//! [`WIDGET_MARKER`]) so the preview pane can route them; diagrams are also
+//! structurally validated ([`validate_diagram_html`]).
 
 use std::path::Path;
 
@@ -453,6 +455,75 @@ fn prepend_diagram_marker(html: &str) -> String {
     format!("{DIAGRAM_MARKER}\n{}", html.trim_start())
 }
 
+/// Sentinel HTML comment prepended to every interactive-widget file. The
+/// preview classifier (`read_artifact_preview`) looks for it to route the
+/// file as `kind: "widget"` — the chat renders it through `WidgetFrame`
+/// (themed sandboxed iframe + MCP Apps bridge) instead of the plain
+/// interactive-visual path. Harmless when the file is opened in a browser.
+pub const WIDGET_MARKER: &str = "<!-- relay:widget -->";
+
+/// Build an interactive widget: a self-contained HTML "mini-app" the chat
+/// renders inline as a themed, sandboxed card with a script bridge (the
+/// in-app-visualization surface, ChatGPT-Apps-style). Unlike
+/// `generate_diagram`, scripts are the point — dashboards, data explorers,
+/// calculators, playable demos. The widget contract (theme variables, sizing,
+/// bridge API) lives in the tool description (`RENDER_WIDGET_DESC`); the
+/// result note only confirms the write and nudges misrouted statics.
+pub(super) fn render_widget(artifacts_dir: &Path, args: &Value) -> ToolOutcome {
+    let title = args.get("title").and_then(|v| v.as_str()).unwrap_or("");
+    let html = args.get("html").and_then(|v| v.as_str()).unwrap_or("");
+
+    if title.trim().is_empty() {
+        return ToolOutcome::text("Error: render_widget requires a \"title\".");
+    }
+    if html.trim().is_empty() {
+        return ToolOutcome::text("Error: render_widget requires non-empty \"html\".");
+    }
+
+    let body = format!("{WIDGET_MARKER}\n{}", html.trim_start());
+
+    // Title drives the card header; `None` for the artifacts writer so the
+    // HTML document is written verbatim (a Some(title) would wrap it).
+    let file = match artifacts::generate(artifacts_dir, "html", title, None, &body) {
+        Ok(f) => f,
+        Err(e) => return ToolOutcome::text(format!("render_widget failed: {e}")),
+    };
+
+    // A widget with no scripts is usually a diagram that took the wrong tool:
+    // say so once, informationally, without failing the call.
+    let lowered = html.to_lowercase();
+    let interactive = lowered.contains("<script")
+        || ["onclick=", "onchange=", "oninput=", "onsubmit=", "onload="]
+            .iter()
+            .any(|h| lowered.contains(h));
+    let note = if interactive {
+        format!(
+            "Created interactive widget \"{}\" ({}). It is rendered to the user as a live card in \
+             the chat — do not also print its contents as text.",
+            file.filename,
+            file.path.display()
+        )
+    } else {
+        format!(
+            "Created widget \"{}\" ({}). Note: it contains no scripts — for a STATIC diagram or \
+             illustration, generate_diagram is the better tool; revise with render_widget again \
+             (with <script> logic) if interactivity was intended.",
+            file.filename,
+            file.path.display()
+        )
+    };
+
+    ToolOutcome {
+        text: note,
+        artifact: Some(ArtifactRef {
+            path: file.path.display().to_string(),
+            filename: file.filename,
+        }),
+        browse_url: None,
+        preview: None,
+    }
+}
+
 /// Lightweight, dependency-free structural check on diagram HTML. This is NOT
 /// a render — it catches the failure modes that would make the diagram render
 /// broken or empty: missing document skeleton, unclosed tags, <script>/<iframe>
@@ -624,5 +695,69 @@ mod tests {
             1,
             "marker written more than once:\n{written}"
         );
+    }
+
+    #[test]
+    fn render_widget_writes_marker_and_surfaces_artifact() {
+        let tmp = tempfile::tempdir().unwrap();
+        let args = serde_json::json!({
+            "title": "Sine explorer",
+            "html": "<!doctype html><html><body><script>1+1</script></body></html>",
+        });
+        let outcome = render_widget(tmp.path(), &args);
+        let art = outcome.artifact.expect("widget must surface an artifact");
+        assert!(art.filename.ends_with(".html"));
+        let written = std::fs::read_to_string(&art.path).unwrap();
+        assert!(
+            written.starts_with(WIDGET_MARKER),
+            "file must start with the widget marker"
+        );
+        // A scripted widget is confirmed as interactive, without a misroute nudge.
+        assert!(outcome.text.contains("interactive widget"));
+        assert!(!outcome.text.contains("no scripts"));
+        // The title names the file (it doubles as the card header label).
+        assert!(art.filename.to_lowercase().contains("sine"));
+        let _ = std::fs::remove_file(&art.path);
+    }
+
+    #[test]
+    fn render_widget_warns_on_scriptless_html() {
+        let tmp = tempfile::tempdir().unwrap();
+        let args = serde_json::json!({
+            "title": "static",
+            "html": "<!doctype html><html><body><div>just text</div></body></html>",
+        });
+        let outcome = render_widget(tmp.path(), &args);
+        assert!(outcome.artifact.is_some());
+        assert!(
+            outcome.text.contains("no scripts"),
+            "scriptless widget should nudge toward generate_diagram: {}",
+            outcome.text
+        );
+        let _ = std::fs::remove_file(outcome.artifact.unwrap().path);
+    }
+
+    #[test]
+    fn render_widget_rejects_empty_args() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = render_widget(tmp.path(), &serde_json::json!({"title": "", "html": "x"}));
+        assert!(out.artifact.is_none());
+        assert!(out.text.contains("requires a \"title\""));
+        let out = render_widget(tmp.path(), &serde_json::json!({"title": "x", "html": "  "}));
+        assert!(out.artifact.is_none());
+        assert!(out.text.contains("requires non-empty"));
+    }
+
+    #[test]
+    fn render_widget_writes_marker_exactly_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let args = serde_json::json!({
+            "title": "w",
+            "html": "<!doctype html><html><body><script>x</script></body></html>",
+        });
+        let outcome = render_widget(tmp.path(), &args);
+        let path = outcome.artifact.expect("artifact ref").path;
+        let written = std::fs::read_to_string(path).unwrap();
+        assert_eq!(written.matches(WIDGET_MARKER).count(), 1);
     }
 }

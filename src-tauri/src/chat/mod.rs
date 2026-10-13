@@ -2608,8 +2608,29 @@ mod tests {
         // If a future pass finds this too expensive, the right move is a
         // `ToolCaps` flag defaulting OFF with a Settings toggle — not deleting
         // the tools.
+        //
+        // Re-baselined 49.5k → 51.5k for `render_widget` (~1.7k spec): the
+        // in-app visualization surface — the model authors interactive HTML
+        // mini-apps the chat renders as themed live cards. Like the app_*
+        // family this is a real tax on every turn, and the same rationale
+        // holds: a model that cannot see the tool never reaches for it. The
+        // description IS the widget contract (theme variables, layout rules,
+        // bridge API) — see docs/architecture/IN_APP_VISUALIZATION.md.
+        //
+        // Re-baselined 51.5k → 53.5k for `visualize` (~1.7k spec): the
+        // structured renderer-registry layer — typed chart/table/task-board/
+        // timeline payloads rendered by Relay's own components, no model UI.
+        // The description documents all four payload shapes plus the
+        // render-after-gathering policy.
+        // CORRECTED 53.5k → 56k (measured 53_923 = system 9_207 + specs
+        // 44_716): the `~1.7k` figure above predates the spec's remaining six
+        // renderer kinds, the `stack` composition grammar and the style knobs
+        // — the shipped `visualize` spec is 3_522 chars, so the previous
+        // number never actually covered the tool it was raised for. Same
+        // "the description IS the contract" rationale as render_widget; the
+        // ~4% headroom keeps the date-anchor variance covered.
         assert!(
-            total < 49_500,
+            total < 56_000,
             "fresh-turn baseline over fixed-cost budget: {total} chars"
         );
     }

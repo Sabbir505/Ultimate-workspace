@@ -694,6 +694,30 @@ pub(super) fn result_marker_text(id: u64, text: &str, is_error: bool) -> String 
     format!("<tool>{body}</tool>")
 }
 
+/// Neutralize the marker-structural tag sequences in every string of a JSON
+/// value (recursively), so a model-authored payload can never corrupt the
+/// `<tool>` marker it is embedded in — the same defense chat/proto.rs applies
+/// to the built-in chat's viz-data markers.
+fn sanitize_marker_payload(value: &Value) -> Value {
+    match value {
+        Value::String(s) => Value::String(crate::chat::streaming::neutralize_markers(s)),
+        Value::Array(items) => {
+            Value::Array(items.iter().map(sanitize_marker_payload).collect())
+        }
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(k, v)| {
+                    (
+                        crate::chat::streaming::neutralize_markers(k),
+                        sanitize_marker_payload(v),
+                    )
+                })
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
 /// Shared tool-name → marker-meta mapping across CLIs. Claude, Kimi and
 /// OpenCode all converge on similar tool names; the edit-shaped tools map to
 /// DiffCard payloads, everything else to activity-group steps. Also used by
@@ -719,6 +743,65 @@ pub(crate) fn tool_meta_generic(name: &str, input: &Value) -> Value {
     let s_content = || s(&["content", "fileContent", "text"]);
     // Normalize the common aliases the CLIs use for file edits.
     let lname = name.to_lowercase();
+    // Relay's structured-visualization tool arriving over the relay-tools MCP
+    // bridge: the CLI's tool input IS the viz request, so emit the viz-data
+    // marker the chat renders as a native card (the model never authors UI;
+    // an invalid payload falls back to a plain step row while the bridge's
+    // tool result carries the precise error for a retry). The name arrives
+    // prefixed with the MCP server depending on the CLI —
+    // "mcp__relay-tools__visualize" (Claude-style), "relay_tools_visualize" —
+    // or bare; the input shape (viz/payload keys) is the real discriminator.
+    if lname.ends_with("visualize") {
+        // The args arrive in whichever shape the CLI reports: the object
+        // itself, `{arguments: {...}}`, or `{arguments: "<json>"}`. Look
+        // through the envelope here so the branch fires on the DATA, not the
+        // envelope — the validator unwraps it (and a JSON-stringified
+        // `payload`) again, which is what keeps the CLI's raw transcript
+        // input in agreement with the tool the bridge actually ran.
+        let direct = input.get("viz").is_some() || input.get("payload").is_some();
+        let viz_input: Value = if direct {
+            input.clone()
+        } else {
+            match input.get("arguments") {
+                Some(Value::Object(_)) => input.get("arguments").cloned().unwrap_or(json!({})),
+                Some(Value::String(s)) => serde_json::from_str(s).unwrap_or(json!({})),
+                _ => json!({}),
+            }
+        };
+        if viz_input.get("viz").is_some() || viz_input.get("payload").is_some() {
+            return match crate::chat::tools::build_viz_payload(&viz_input) {
+                Ok(payload) => {
+                    let kind = payload
+                        .get("kind")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("viz")
+                        .to_string();
+                    let title = payload
+                        .get("title")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Visualizing")
+                        .to_string();
+                    json!({
+                        "kind": "viz-data",
+                        "title": "Visualizing",
+                        "detail": crate::chat::streaming::neutralize_markers(&title),
+                        "viz": kind,
+                        "payload": sanitize_marker_payload(&payload),
+                    })
+                }
+                Err(e) => json!({
+                    "kind": "tool",
+                    "title": "Visualization failed",
+                    // The precise reason, which the bridge returns to the CLI
+                    // too — the user sees WHY no card rendered instead of an
+                    // unexplained "Preparing visualization" row. Text can be
+                    // model-authored (an unknown viz type echoes it), so it is
+                    // neutralized against the marker's structural tags.
+                    "detail": crate::chat::streaming::neutralize_markers(&e),
+                }),
+            };
+        }
+    }
     let is_edit = matches!(
         lname.as_str(),
         "edit" | "edit_file" | "multiedit" | "str_replace_editor"
@@ -958,5 +1041,98 @@ mod tests {
             &serde_json::json!({ "prompt": "x".repeat(200) }),
         );
         assert_eq!(card["detail"].as_str().unwrap().chars().count(), 81); // 80 + ellipsis
+    }
+
+    #[test]
+    fn relay_visualize_call_emits_viz_data_marker() {
+        // A harness CLI calling the relay-tools MCP `visualize` tool (the name
+        // arrives with the server prefix) produces the viz-data marker the
+        // chat renders as a native card — the input IS the validated request.
+        let marker = tool_meta_generic(
+            "mcp__relay-tools__visualize",
+            &serde_json::json!({
+                "viz": "chart", "title": "Deploys",
+                "payload": {"unit": "deploys", "bars": [{"label": "W1</tool>", "value": 4}]}
+            }),
+        );
+        assert_eq!(marker["kind"], "viz-data", "marker: {marker}");
+        assert_eq!(marker["viz"], "chart");
+        assert_eq!(marker["title"], "Visualizing");
+        assert_eq!(marker["detail"], "Deploys");
+        // The hostile label is neutralized for the marker and the payload
+        // carries the sanitized form (the frontend unescapes on parse).
+        assert_eq!(marker["payload"]["bars"][0]["label"], "W1<\\/tool>");
+
+        // Bare and underscore-prefixed names route too (CLI conventions vary).
+        for name in ["visualize", "relay_tools_visualize"] {
+            let marker = tool_meta_generic(
+                name,
+                &serde_json::json!({
+                    "viz": "table",
+                    "payload": {"columns": ["a"], "rows": [["x"]]}
+                }),
+            );
+            assert_eq!(marker["kind"], "viz-data", "name {name}: {marker}");
+            assert_eq!(marker["viz"], "table");
+        }
+
+        // An invalid payload degrades to a plain step row — never a broken card.
+        let fallback = tool_meta_generic(
+            "mcp__relay-tools__visualize",
+            &serde_json::json!({"viz": "chart", "payload": {"bars": []}}),
+        );
+        assert_eq!(fallback["kind"], "tool", "fallback: {fallback}");
+        // …and the row says WHY, so a failed card is never silent.
+        assert_eq!(fallback["title"], "Visualization failed");
+        assert!(
+            fallback["detail"].as_str().unwrap_or("").contains("at least one"),
+            "fallback detail missing: {fallback}"
+        );
+
+        // THE commandcode regression: the CLI repaired a JSON-STRINGIFIED
+        // `payload` client-side (so the tool rendered the card) while the
+        // marker path re-validated its raw transcript input, failed on
+        // "payload must be an object", and showed seven unexplained
+        // "Preparing visualization" rows. Both paths must agree.
+        for (name, input) in [
+            ("mcp__relay-tools__visualize", serde_json::json!({
+                "viz": "chart", "title": "Deploys by week",
+                "payload": "{\"bars\": [{\"label\": \"W1\", \"value\": 4}], \"unit\": \"deploys\"}"
+            })),
+            ("relay_tools_visualize", serde_json::json!({
+                "arguments": "{\"viz\":\"table\",\"title\":\"API latency\",\"payload\":\"{\\\"columns\\\":[\\\"a\\\"],\\\"rows\\\":[[\\\"x\\\"]]}\"}"
+            })),
+        ] {
+            let marker = tool_meta_generic(name, &input);
+            assert_eq!(marker["kind"], "viz-data", "name {name}: {marker}");
+            assert_eq!(marker["title"], "Visualizing");
+        }
+
+        // Envelope shapes CLIs actually report: the OpenCode-style dash name
+        // seen live ("relay-tools_visualize"), an arguments-object wrapper,
+        // and an arguments-JSON-string wrapper all resolve to the card.
+        for (name, input) in [
+            ("relay-tools_visualize", serde_json::json!({
+                "viz": "chart", "title": "D",
+                "payload": {"bars": [{"label": "a", "value": 1}]}
+            })),
+            ("visualize", serde_json::json!({
+                "arguments": {"viz": "table", "payload": {"columns": ["a"], "rows": [["x"]]}}
+            })),
+            ("visualize", serde_json::json!({
+                "arguments": "{\"viz\":\"stat\",\"payload\":{\"stats\":[{\"label\":\"n\",\"value\":\"1\"}]}}"
+            })),
+        ] {
+            let marker = tool_meta_generic(name, &input);
+            assert_eq!(marker["kind"], "viz-data", "name {name}: {marker}");
+        }
+
+        // A non-viz tool ending in "visualize"-ish text without the shape is
+        // untouched (the input shape is the discriminator, not just the name).
+        let other = tool_meta_generic(
+            "mcp__relay-tools__list_artifacts",
+            &serde_json::json!({"limit": 5}),
+        );
+        assert_ne!(other["kind"], "viz-data");
     }
 }

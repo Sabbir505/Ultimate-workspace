@@ -85,6 +85,16 @@ pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) ->
             generate_diagram_parameters(),
         ),
         openai_fn(
+            RENDER_WIDGET,
+            RENDER_WIDGET_DESC,
+            render_widget_parameters(),
+        ),
+        openai_fn(
+            VISUALIZE,
+            VISUALIZE_DESC,
+            visualize_parameters(),
+        ),
+        openai_fn(
             GENERATE_IMAGE,
             GENERATE_IMAGE_DESC,
             generate_image_parameters(),
@@ -566,6 +576,16 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy)
             generate_diagram_parameters(),
         ),
         anthropic_fn(
+            RENDER_WIDGET,
+            RENDER_WIDGET_DESC,
+            render_widget_parameters(),
+        ),
+        anthropic_fn(
+            VISUALIZE,
+            VISUALIZE_DESC,
+            visualize_parameters(),
+        ),
+        anthropic_fn(
             GENERATE_IMAGE,
             GENERATE_IMAGE_DESC,
             generate_image_parameters(),
@@ -1032,6 +1052,54 @@ fn generate_diagram_parameters() -> Value {
             }
         },
         "required": ["filename", "html"],
+    })
+}
+
+fn render_widget_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "title": {
+                "type": "string",
+                "description": "Widget name shown on the card header (e.g. \
+                    \"Portfolio allocation explorer\"). Also used as the file name.",
+            },
+            "html": {
+                "type": "string",
+                "description": "Complete self-contained HTML document (inline \
+                    <style> AND <script>, no external resources). Follow the \
+                    theme variables and layout rules from the tool description. \
+                    Written verbatim to the .html file and rendered live in the chat.",
+            }
+        },
+        "required": ["title", "html"],
+    })
+}
+
+fn visualize_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "viz": {
+                "type": "string",
+                "enum": ["chart", "table", "task-board", "timeline", "line", "donut", "stat",
+                         "stack", "prose", "divider"],
+                "description": "Which native card to render. Each type's payload \
+                    shape is documented in the tool description.",
+            },
+            "title": {
+                "type": "string",
+                "description": "Card heading (≤120 chars).",
+            },
+            "payload": {
+                "type": "object",
+                "description": "The data for the chosen type (bars / columns+rows / \
+                    columns+tasks / events / points / segments / stats / sections) plus an \
+                    optional \"style\" object — see the tool description. Validated \
+                    server-side; a malformed payload returns a precise error.",
+            }
+        },
+        "required": ["viz", "payload"],
     })
 }
 
@@ -3095,9 +3163,20 @@ mod tests {
         );
         // The worst offenders as of the token-efficiency pass were the
         // document tools (~2.5k each). Anything past this needs a reason.
+        // Raised 2_600 → 3_600 for `visualize` (3.5k): its description IS the
+        // payload contract — ten renderer kinds, the `stack` composition
+        // grammar and the style knobs — and the two validators (Rust + the TS
+        // mirror) are driven by it, so trimming prose here trades tokens for
+        // malformed payloads and retries. Per the doc's token accounting the
+        // card replaces prose the model would otherwise write, and the
+        // render-after-gathering policy is what keeps cards out of mid-run
+        // turns. Re-baselined deliberately (see IN_APP_VISUALIZATION.md /
+        // VIZ_COMPOSITION_AND_PLACEMENT.md), not by drift: nothing else is
+        // anywhere near this cap (next largest: `Task` at ~2.1k), so the
+        // per-spec guard keeps its teeth for every other tool.
         if let Some((worst, name)) = sizes.first() {
             assert!(
-                *worst < 2_600,
+                *worst < 3_600,
                 "tool spec `{name}` bloated to {worst} chars — trim the description/schema or raise the budget deliberately"
             );
         }
@@ -3167,9 +3246,25 @@ mod tests {
         // built-ins — the default fresh-turn surface dropped 48.8k → 35.1k
         // chars (57 → 44 tools). Locked families return via one
         // attach_connector call; the manifest line keeps them discoverable.
+        // Bumped 39_500→41_500 for `render_widget` (~1.7k): in-app
+        // visualization — the model authors interactive HTML mini-apps the
+        // chat renders as themed live cards. The description IS the widget
+        // contract (theme variables + layout rules + bridge API); trimming it
+        // further would cost output quality on every widget, so the budget
+        // takes the tax (see docs/architecture/IN_APP_VISUALIZATION.md).
+        // Bumped 41_500→43_500 for `visualize` (~1.7k): the structured
+        // renderer-registry layer — the model returns a typed presentation
+        // request (chart/table/task-board/timeline) rendered by Relay's own
+        // components. The description carries all four payload shapes plus
+        // the data-gathering-before-rendering policy, which IS the feature.
+        // CORRECTED 43_500→46_000 (measured 44_142): the `~1.7k` estimate
+        // above was taken before the spec grew its remaining six renderer
+        // kinds plus the `stack` composition grammar and style knobs — the
+        // shipped spec is 3_522 chars, so the previous budget never had room
+        // for the tool it was raised for. Same rationale, exact number now.
         assert!(
-            total < 39_500,
-            "default tool specs total {total} chars (budget 39_500) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
+            total < 46_000,
+            "default tool specs total {total} chars (budget 46_000) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
         );
         let all_on_caps = ToolCaps {
             browser: true,
@@ -3229,9 +3324,16 @@ mod tests {
         // ~2.8k): the same family that re-baselined the default budget above,
         // carrying its ~2.8k onto this aggregate too. Both bumps are one
         // decision — ungated self-control — recorded once in chat/mod.rs.
+        // Bumped 67_500→69_500 for `render_widget` (~1.7k): mirrors the
+        // default-surface bump above; the widget spec rides both surfaces.
+        // Bumped 69_500→71_500 for `visualize` (~1.7k): same rationale.
+        // CORRECTED 71_500→74_000 (measured 72_050): mirrors the default-
+        // surface correction above — the shipped `visualize` spec is 3_522
+        // chars, not the ~1.7k the bump assumed, and it rides this aggregate
+        // too (it is ungated, so every surface carries it).
         assert!(
-            all_on < 67_500,
-            "all-on tool specs total {all_on} chars (budget 64_000) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
+            all_on < 74_000,
+            "all-on tool specs total {all_on} chars (budget 74_000) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
         );
     }
 

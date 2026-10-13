@@ -159,12 +159,20 @@ pub async fn read_artifact_preview(path: String) -> CmdResult<ArtifactPreview> {
         // A .html file produced by the `generate_diagram` tool carries the
         // diagram sentinel marker at the top. Route it as `kind: "diagram"`
         // (same srcDoc-iframe rendering as html, but diagram-specific export
-        // chrome — PNG export enabled, SVG greyed out).
-        let final_kind = if kind == "html"
-            && (text.starts_with(crate::chat::tools::DIAGRAM_MARKER)
-                || text.starts_with(crate::chat::tools::LEGACY_DIAGRAM_MARKER))
-        {
-            "diagram"
+        // chrome — PNG export enabled, SVG greyed out). A `render_widget`
+        // file carries the widget sentinel and routes as `kind: "widget"` —
+        // the chat's themed in-app visualization card (WidgetFrame + the MCP
+        // Apps bridge) instead of the plain interactive-visual path.
+        let final_kind = if kind == "html" {
+            if text.starts_with(crate::chat::tools::DIAGRAM_MARKER)
+                || text.starts_with(crate::chat::tools::LEGACY_DIAGRAM_MARKER)
+            {
+                "diagram"
+            } else if text.starts_with(crate::chat::tools::WIDGET_MARKER) {
+                "widget"
+            } else {
+                kind
+            }
         } else {
             kind
         };
@@ -414,7 +422,7 @@ pub(crate) fn classify_text_ext(ext: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod preview_tests {
-    use super::{cap_speech_text, classify_text_ext, file_mtime_secs, find_by_basename_walk, speech_text_for};
+    use super::{cap_speech_text, classify_text_ext, file_mtime_secs, find_by_basename_walk, read_artifact_preview, speech_text_for};
 
     #[test]
     fn mermaid_sources_classify_as_mermaid_kind() {
@@ -432,6 +440,32 @@ mod preview_tests {
         assert_eq!(classify_text_ext("tsx"), Some("jsx"));
         assert_eq!(classify_text_ext("py"), Some("code"));
         assert_eq!(classify_text_ext("exe"), None);
+    }
+
+    #[tokio::test]
+    async fn widget_marker_classifies_as_widget_kind() {
+        let dir = std::env::temp_dir().join(format!("relay-wprev-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("widget.html");
+        std::fs::write(
+            &file,
+            format!("{}<!doctype html><html><body><b>x</b></body></html>", crate::chat::tools::WIDGET_MARKER),
+        )
+        .unwrap();
+        let preview = read_artifact_preview(file.to_string_lossy().to_string())
+            .await
+            .unwrap();
+        assert_eq!(preview.kind, "widget");
+        let _ = std::fs::remove_file(&file);
+
+        // A plain HTML file keeps the generic kind (the marker decides).
+        let plain = dir.join("plain.html");
+        std::fs::write(&plain, "<!doctype html><html><body>y</body></html>").unwrap();
+        let preview = read_artifact_preview(plain.to_string_lossy().to_string())
+            .await
+            .unwrap();
+        assert_eq!(preview.kind, "html");
+        let _ = std::fs::remove_file(&plain);
     }
 
     #[test]

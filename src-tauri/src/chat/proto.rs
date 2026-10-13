@@ -203,6 +203,30 @@ fn coerce_param_value(raw: &str) -> Value {
     Value::String(s.to_string())
 }
 
+/// Neutralize the marker-structural tag sequences in every string of a JSON
+/// value (recursively), so a payload can never corrupt the `<tool>` marker it
+/// is embedded in: a literal `</tool>` truncates the block and a literal
+/// `<tool>`/`<think>` opener prematurely starts a new segment in the
+/// frontend's parser. Used by the `visualize` narration, whose data payload
+/// is model-authored and embedded verbatim in the marker.
+fn sanitize_marker_value(value: &Value) -> Value {
+    let clean = |s: &str| {
+        s.replace("</tool>", "<\\/tool>")
+            .replace("<tool>", "<\\tool>")
+            .replace("<think>", "<\\think>")
+    };
+    match value {
+        Value::String(s) => Value::String(clean(s)),
+        Value::Array(items) => Value::Array(items.iter().map(sanitize_marker_value).collect()),
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(k, v)| (clean(k), sanitize_marker_value(v)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
 /// Structured narration of a tool call, emitted as a `<tool>{json}</tool>`
 /// marker so the UI can render each step as its own collapsible card (tool
 /// calling, writing a script, etc.). `json` carries a `kind` (drives the icon),
@@ -253,6 +277,44 @@ pub(crate) fn tool_block(name: &str, args: &Value) -> String {
             "lang": "html",
             "code": sanitize(s("html")),
         })
+    } else if name == tools::RENDER_WIDGET {
+        json!({
+            "kind": "viz",
+            "title": format!("Building interactive widget \"{}\"", s("title")),
+            "lang": "html",
+            "code": sanitize(s("html")),
+        })
+    } else if name == tools::VISUALIZE {
+        // The structured-visualization transport: the validated, normalized
+        // payload rides INSIDE the marker (kind "viz-data") and the frontend
+        // renders it with its own registry components. An invalid payload
+        // never reaches the screen — it falls back to a plain step row while
+        // execute_tool returns the precise error to the model for a retry.
+        match tools::build_viz_payload(args) {
+            Ok(payload) => {
+                let kind = payload.get("kind").and_then(|v| v.as_str()).unwrap_or("viz");
+                let title = payload
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .map(|t| t.to_string())
+                    .unwrap_or_else(|| "Visualizing".to_string());
+                json!({
+                    "kind": "viz-data",
+                    "title": "Visualizing",
+                    "detail": sanitize(title.clone()),
+                    "viz": kind,
+                    "payload": sanitize_marker_value(&payload),
+                })
+            }
+            Err(e) => json!({
+                "kind": "tool",
+                "title": "Visualization failed",
+                // The precise reason, which the model also gets from
+                // execute_tool — the user sees WHY no card rendered instead
+                // of an unexplained "Preparing visualization" row.
+                "detail": sanitize(e),
+            }),
+        }
     } else if name == tools::FETCH_URL || name == tools::OPEN_URL {
         let verb = if name == tools::OPEN_URL {
             "Opening"

@@ -676,9 +676,23 @@ export function ToolIcon({ kind }: { kind?: string }) {
       return <TerminalIcon />;
     case "memory":
       return <MemoryIcon />;
+    case "viz":
+    case "viz-data":
+      return <VizIcon />;
     default:
       return <WrenchIcon />;
   }
+}
+
+/** Bar-chart glyph for the interactive-widget narration step (render_widget). */
+export function VizIcon() {
+  return (
+    <svg {...iconProps} aria-hidden="true">
+      <line x1="6" y1="20" x2="6" y2="12" />
+      <line x1="12" y1="20" x2="12" y2="4" />
+      <line x1="18" y1="20" x2="18" y2="9" />
+    </svg>
+  );
 }
 
 /** Step status: spinner while the call runs, green check once it completes —
@@ -1063,6 +1077,7 @@ export function ProcessSummary({
   live,
   label,
   keepExpandedOnEnd,
+  cards,
   children,
 }: {
   live: boolean;
@@ -1072,6 +1087,12 @@ export function ProcessSummary({
    *  it had — its process steps are the only content it produced, and
    *  folding them into an empty-looking "Worked" row erases the turn. */
   keepExpandedOnEnd?: boolean;
+  /** Titles of the visualization cards that render INSIDE this region (the
+   *  mid-turn ones). Naming them in the collapsed row is what keeps an
+   *  in-place card discoverable — the region folds away, so the row says what
+   *  it is hiding ("Worked for 2m 5s · Deploy health · Sprint 42") instead of
+   *  a bare duration. */
+  cards?: string[];
   children: ReactNode;
 }) {
   // The toggle IS the assistant-message-header slot: plain "Working for Xs"
@@ -1107,6 +1128,16 @@ export function ProcessSummary({
         aria-expanded={open}
       >
         <span className="chat-process-label">{label}</span>
+        {/* Only while collapsed: open, the cards themselves are right there. */}
+        {!open && cards && cards.length > 0 && (
+          <span className="chat-process-cards">
+            {cards.map((title, i) => (
+              <span className="chat-process-card" key={`${title}:${i}`}>
+                {title}
+              </span>
+            ))}
+          </span>
+        )}
         <span className={`chat-thinking-chevron${open ? " open" : ""}`} aria-hidden="true">
           ›
         </span>
@@ -1172,6 +1203,22 @@ export function renderProcessBlock(
         <EditFileRow
           key={`editrow:${b.step.data?.path ?? i}`}
           step={b.step}
+          chatSessionId={chatSessionId}
+        />
+      );
+    case "viz":
+      // A mid-turn card (one the model emitted and then kept working after
+      // after) renders IN PLACE here, inside the process region — see the
+      // mixed-placement rule in MessageBubble. A card with nothing after it
+      // hoists to the answer area instead, so this branch is the in-place
+      // half only.
+      return (
+        <VizCard
+          key={`viz:${i}`}
+          viz={b.step.data?.viz}
+          payload={b.step.data?.payload}
+          onPreviewArtifact={onPreviewArtifact}
+          sources={sources}
           chatSessionId={chatSessionId}
         />
       );
@@ -1940,10 +1987,12 @@ export type Block =
   | { kind: "editrow"; step: ActivityStep };
 
 /** Titles used for the consecutive-same-tool folding. Subagent chips, edit
- *  cards and result rows keep their dedicated rendering. */
+ *  cards, result rows and visualization markers keep their dedicated
+ *  rendering. */
 export function foldableTitle(step: ActivityStep): string | null {
   const kind = step.data?.kind;
-  if (kind === "subagents" || kind === "edit" || kind === "result") return null;
+  if (kind === "subagents" || kind === "edit" || kind === "result" || kind === "viz-data")
+    return null;
   const title = step.data?.title?.trim();
   return title ? title : null;
 }
@@ -2050,7 +2099,13 @@ export function groupSegments(segments: Segment[]): Block[] {
         data: seg.data,
         done: seg.done,
       };
-      if (seg.data?.kind === "edit" && seg.data.path && seg.data.edit) {
+      if (seg.data?.kind === "viz-data" && seg.done) {
+        // A completed structured visualization flushes the run and becomes its
+        // own answer-area block (MessageBubble renders it via VizCard, outside
+        // the collapsible). While still streaming it stays a normal live step.
+        flushSteps();
+        blocks.push({ kind: "viz", step });
+      } else if (seg.data?.kind === "edit" && seg.data.path && seg.data.edit) {
         flushSteps();
         blocks.push({ kind: "editrow", step });
       } else if (seg.data?.kind === "result") {

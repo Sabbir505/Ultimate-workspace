@@ -418,6 +418,11 @@ fn tool_op(tool: &str) -> Result<String, &'static str> {
         | "generate_image"
         | "plan_document" | "revise_document"
         | "get_skill" | "list_skills" | "list_artifacts" | "search_docs" | "get_capabilities"
+        // In-app visualization: the custom-UI (render_widget) and
+        // structured-card (visualize) surfaces. Mapped here, not left to the
+        // forward-unknown fallback, so the static schemas and the op mapping
+        // can never disagree.
+        | "render_widget" | "visualize"
         // Project wiki: read-only DB-only knowledge-base tools. Mapped here
         // (not the forward-unknown fallback) so the static schemas and the op
         // mapping can never disagree — same contract as the vault family.
@@ -1313,6 +1318,56 @@ fn static_relay_schemas() -> Vec<Value> {
                 "required": ["agent_id"]
             }
         }),
+        // ---- In-app visualization: the custom-UI and structured-card tools ----
+        // Both are allowlisted app-side (ALLOWED_RELAY_TOOLS) and advertised
+        // on every surface, so the fallback copy must serve them too — the two
+        // were missing for a while, which meant a harness handed THIS
+        // tools/list (app unreachable, round-trip timeout, envelope mismatch)
+        // answered "I have no such tool" to a tool get_capabilities had just
+        // advertised. Pinned by `static_relay_schemas_cover_every_allowlisted_
+        // bridge_tool`; descriptions/schemas mirror the registry specs
+        // (chat/tools/specs.rs), which the live tools/list serves verbatim.
+        json!({
+            "name": "render_widget",
+            "description": "Build an INTERACTIVE widget the user sees as a live card in the chat (dashboards, data explorers, calculators, sliders, playable demos). Provide \"title\" and a COMPLETE self-contained HTML document in \"html\": inline <style> AND <script>, no external requests, ES5-safe JS. Relay injects its theme as CSS custom properties on :root (they follow the user's theme live): --background, --foreground, --muted, --muted-foreground, --card, --border, --input, --primary, --accent, --accent-foreground, --destructive, --success, --warning, --info, --code-background, --code-foreground, --chart-1..6 (categorical series), --radius, --font-sans, --font-mono. Layout: the card sits on the chat background \u{2014} leave html/body transparent, no outer card or border; fluid width; fixed px chart heights; never 100vh/height:100% (the card grows to fit your content). Optional bridge: window.relayWidget.openLink(url) opens Relay's browser, .sendMessage(text) drafts a chat message, .requestDisplayMode('fullscreen') expands the card, .downloadFile([{name,mimeType,text}]) saves a file. Static diagrams \u{2192} generate_diagram; full web apps \u{2192} write_file.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "Widget name shown on the card header (e.g. \"Portfolio allocation explorer\"). Also used as the file name."
+                    },
+                    "html": {
+                        "type": "string",
+                        "description": "Complete self-contained HTML document (inline <style> AND <script>, no external resources). Follow the theme variables and layout rules from the tool description. Written verbatim to the .html file and rendered live in the chat."
+                    }
+                },
+                "required": ["title", "html"]
+            }
+        }),
+        json!({
+            "name": "visualize",
+            "description": "Present structured results as a native visualization card in the chat: you supply a presentation type (\"viz\") and a data \"payload\"; Relay renders it with its own components \u{2014} you never write UI code. Use AFTER data-gathering tools finish, ONCE per result, only when a visual genuinely helps \u{2014} not for every reply. Types: chart \u{2014} {\"bars\":[{\"label\":\"W1\",\"value\":12},\u{2026}], \"unit\"?:\"deploys\"} (1\u{2013}200 bars, vertical bar chart); line \u{2014} {\"points\":[{\"label\":\"Mon\",\"value\":120},\u{2026}], \"unit\"?, \"area\"?} (2\u{2013}200 points, trends); donut \u{2014} {\"segments\":[{\"label\":\"Compute\",\"value\":60},\u{2026}], \"unit\"?} (1\u{2013}12 parts of a whole); table \u{2014} {\"columns\":[\"Route\",{\"label\":\"p95\",\"align\":\"right\"}],\"rows\":[[\"/api/a\",120],\u{2026}]} (1\u{2013}12 cols, \u{2264}500 rows; string/number cells); task-board \u{2014} {\"columns\":[{\"title\":\"Todo\",\"tasks\":[{\"title\":\"Design API\",\"meta\":\"2d\"}]},\u{2026}]} (1\u{2013}8 cols, \u{2264}100 tasks); timeline \u{2014} {\"events\":[{\"label\":\"Alert\",\"detail\":\"\u{2026}\",\"at\":\"14:02\"},\u{2026}]} (1\u{2013}100, chronological); stat \u{2014} {\"stats\":[{\"label\":\"Uptime\",\"value\":\"99.98%\",\"delta\":\"+0.02%\",\"good\":true},\u{2026}]} (1\u{2013}8 KPIs). \"title\" heads the card. Invalid payloads return a precise error \u{2014} fix and re-call. OPTIONAL payload.style \u{2014} YOU art-direct the card when it deserves it: {\"accent\":\"#ff6b6b\", \"palette\":[\u{2264}8 colors], \"tone\":\"app\"|\"light\"|\"dark\", \"radius\":\"soft\"|\"sharp\"|\"pill\"} (hex or rgb()/hsl()). Pick colors that fit the content's mood or brand; omit style to sit on the chat's own theme.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "viz": {
+                        "type": "string",
+                        "enum": ["chart", "table", "task-board", "timeline", "line", "donut", "stat"],
+                        "description": "Which native card to render. Each type's payload shape is documented in the tool description."
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Card heading (\u{2264}120 chars)."
+                    },
+                    "payload": {
+                        "type": "object",
+                        "description": "The data for the chosen type (bars / columns+rows / columns+tasks / events / points / segments / stats) plus an optional \"style\" object \u{2014} see the tool description. Validated server-side; a malformed payload returns a precise error."
+                    }
+                },
+                "required": ["viz", "payload"]
+            }
+        }),
         // ---- Vault CRUD ----
         // The app advertises these six on EVERY surface (get_capabilities'
         // relay_tools list, the live tools/list, the harness instructions'
@@ -1415,6 +1470,9 @@ mod tests {
                      "get_skill", "list_skills", "search_docs",
                      "search_wiki", "read_wiki_page",
                      "get_capabilities",
+                     // In-app visualization: both surfaces belong in the
+                     // fallback tools/list (see static_relay_schemas).
+                     "render_widget", "visualize",
                      "list_automations", "create_automation", "update_automation",
                      "delete_automation", "run_automation_now",
                      "list_sessions", "read_session", "search_sessions",

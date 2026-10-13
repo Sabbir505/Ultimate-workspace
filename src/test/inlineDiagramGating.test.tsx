@@ -4,6 +4,9 @@
 // webapps (with <script>, <form>, <button>) render LIVE inline — an
 // allow-scripts sandboxed iframe with the postMessage resize handshake
 // (Claude's custom-visuals model) — and the kebab offers the full-size tab.
+// A `covered` artifact — one the per-turn changes row already lists, i.e. a
+// file written/edited inside the working folder — renders NOTHING inline,
+// except a genuine `kind: "diagram"` deliverable which keeps its frame.
 // readArtifactPreview is mocked so no live artifact on disk is needed.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, waitFor } from "@testing-library/react";
@@ -148,5 +151,45 @@ describe("InlineDiagram gating (diagram vs plain html)", () => {
       expect(container.querySelector(".chip-fallback")).not.toBeNull();
     });
     expect(container.querySelector(".chat-diagram-frame")).toBeNull();
+  });
+
+  it("renders NOTHING for an artifact the turn's changes row already covers", async () => {
+    // A file written/edited inside the working folder is listed by the
+    // per-turn changes row (Review / Open) — the bubble must not render a
+    // second copy of it, neither as a live frame nor as a chip.
+    mockedRead.mockResolvedValue(
+      preview({ kind: "html", text: "<!doctype html><html><body><script>alert('hi')</script><button>Click</button></body></html>" }),
+    );
+    const onFallback = vi.fn(() => <div className="chip-fallback" />);
+    const { container } = render(
+      <InlineDiagram artifact={artifact("app.html")} covered onFallback={onFallback} />,
+    );
+    // "Loading diagram…" first, then the covered-gate drops the row entirely.
+    await waitFor(() => {
+      expect(container.firstChild).toBeNull();
+    });
+    expect(container.querySelector("iframe.chat-live-viz-frame")).toBeNull();
+    expect(container.querySelector("iframe.chat-diagram-frame")).toBeNull();
+    expect(container.querySelector(".chip-fallback")).toBeNull();
+    expect(onFallback).not.toHaveBeenCalled();
+  });
+
+  it("still renders a covered diagram deliverable inline", async () => {
+    // generate_diagram writes to the artifacts dir, never into a checkout —
+    // even if its path ever shows up in the changes row, the inline frame
+    // (the turn's visual result) stays.
+    mockedRead.mockResolvedValue(
+      preview({
+        kind: "diagram",
+        text: "<!doctype html><html><body><svg viewBox='0 0 100 50'></svg></body></html>",
+      }),
+    );
+    const { container } = render(
+      <InlineDiagram artifact={artifact()} covered onFallback={() => <div className="chip-fallback" />} />,
+    );
+    await waitFor(() => {
+      expect(container.querySelector(".chat-diagram-frame")).not.toBeNull();
+    });
+    expect(container.querySelector(".chip-fallback")).toBeNull();
   });
 });

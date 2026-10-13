@@ -36,6 +36,12 @@ export interface ToolData {
    *  regardless — `result` is reserved so a future backend field flows
    *  straight into the same disclosure. */
   result?: string;
+  /** Structured visualization (the `visualize` tool, renderer-registry
+   *  layer): `viz` names the presentation kind and `payload` carries the
+   *  validated data. Rendered by Relay's OWN components (VizCard) in the
+   *  answer area — the model never authors UI here. See src/lib/viz.ts. */
+  viz?: string;
+  payload?: Record<string, unknown>;
 }
 
 export type Segment =

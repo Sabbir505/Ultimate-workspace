@@ -2314,6 +2314,604 @@ div[data-index]:has(.chat-session-row.menu-open) {
 .chat-live-viz .chat-live-viz-frame {
   height: 300px; /* replaced by the inline postMessage-driven height */
 }
+
+/* ---- In-app visualization widget card (render_widget artifacts) ----
+   A themed mini-app card: slim header (title + display actions), the
+   sandboxed widget frame below, height driven by the MCP Apps bridge.
+   Unlike the diagram card it sits on the CHAT background (transparent page
+   inside the frame), full column width. */
+.chat-widget-block {
+  position: relative;
+  margin: 12px 0;
+  max-width: 100%;
+  border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+  border-radius: var(--radius-sm);
+  background: var(--bg-tint);
+  overflow: hidden;
+  transition:
+    box-shadow 0.16s var(--ease),
+    border-color 0.16s var(--ease);
+}
+.chat-widget-block:hover {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+}
+.chat-widget-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px 5px 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.chat-widget-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+.chat-widget-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.chat-widget-block:hover .chat-widget-actions,
+.chat-widget-block:focus-within .chat-widget-actions,
+.chat-widget-fullscreen .chat-widget-actions {
+  opacity: 1;
+}
+button.chat-widget-btn,
+button.chat-widget-btn:hover,
+button.chat-widget-btn:active,
+button.chat-widget-btn:focus-visible {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  cursor: pointer;
+}
+button.chat-widget-btn:hover,
+button.chat-widget-btn:focus-visible {
+  color: var(--text);
+  background: var(--surface-glass-2);
+}
+.chat-widget-frame {
+  display: block;
+  width: 100%;
+  border: none;
+  background: transparent;
+}
+/* Fullscreen keeps the same iframe node (only the box is restyled), so the
+   widget's state survives both directions of the round trip. */
+.chat-widget-fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  display: flex;
+  flex-direction: column;
+}
+.chat-widget-fullscreen .chat-widget-frame {
+  flex: 1;
+  min-height: 0;
+}
+/* Collapsed after the widget asked for teardown: keeps a box, offers reopen. */
+.chat-widget-closed {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+button.chat-widget-reopen,
+button.chat-widget-reopen:hover,
+button.chat-widget-reopen:focus-visible {
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+button.chat-widget-reopen:hover {
+  border-color: var(--accent);
+}
+
+/* ---- Structured visualization cards (visualize tool, renderer registry) ----
+   The model supplies validated data; these are Relay's OWN components, so
+   they style straight from the app tokens — no sandbox, no theme bootstrap. */
+.chat-viz-card {
+  /* The agent's style lands as scoped --viz-* custom properties on this
+     element (styleVars in VizCard); every rule reads the scoped var with a
+     theme fallback, so unset fields simply stay on the app's own theme. */
+  margin: 12px 0;
+  max-width: 100%;
+  border: 1px solid color-mix(in srgb, var(--viz-border, var(--border)) 82%, transparent);
+  border-radius: var(--viz-radius, var(--radius-sm));
+  background: var(--viz-bg, var(--surface));
+  color: var(--viz-fg, var(--text));
+  padding: 12px 14px;
+  overflow: hidden;
+}
+.chat-viz-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--viz-dim, var(--text-dim));
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 10px;
+}
+.chat-viz-title-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Hover-revealed data-export actions (copy CSV / copy JSON). */
+.chat-viz-actions {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+  flex-shrink: 0;
+}
+.chat-viz-card:hover .chat-viz-actions,
+.chat-viz-card:focus-within .chat-viz-actions {
+  opacity: 1;
+}
+button.chat-viz-action,
+button.chat-viz-action:hover,
+button.chat-viz-action:focus-visible {
+  font: inherit;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  border-radius: 6px;
+  padding: 2px 7px;
+  cursor: pointer;
+}
+button.chat-viz-action:hover,
+button.chat-viz-action:focus-visible {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+.chat-viz-fallback {
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+
+/* Composition (`stack`): sections inside one card. A section is a full
+   renderer, so it carries no card chrome of its own — the section wrapper is
+   what lets a section's own style override locally while the container's
+   style (set as --viz-* on the card root) is inherited. */
+.chat-viz-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+/* Two columns for a comparison or a two-up itinerary. Deliberately not `n`
+   columns: two is what reads at chat width, and an arbitrary grid is
+   render_widget's job. */
+.chat-viz-stack-2 {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px 16px;
+}
+.chat-viz-section {
+  min-width: 0;
+}
+/* A section's own style has to win, so it needs its own custom-property
+   scope; an unstyled section keeps inheriting the container's. */
+.chat-viz-section:has(> .chat-viz-card) > .chat-viz-card {
+  margin: 0;
+  background: none;
+  border: none;
+  padding: 0;
+  color: inherit;
+}
+.chat-viz-divider {
+  height: 1px;
+  border: 0;
+  background: color-mix(in srgb, var(--viz-border, var(--border)) 65%, transparent);
+}
+.chat-viz-prose {
+  font-size: 13.5px;
+  line-height: 1.55;
+}
+.chat-viz-prose > :first-child {
+  margin-top: 0;
+}
+.chat-viz-prose > :last-child {
+  margin-bottom: 0;
+}
+
+/* In-place cards named in the COLLAPSED process row: a mid-turn card folds
+   away with the region, so the row lists what it is hiding rather than a bare
+   duration. Rendered only while collapsed (the open region shows the cards). */
+.chat-process-cards {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 8px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.chat-process-card {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  text-transform: none;
+  color: var(--text-dim);
+  opacity: 0.85;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 18ch;
+}
+.chat-process-card + .chat-process-card::before {
+  content: "·";
+  margin-right: 6px;
+  opacity: 0.6;
+}
+
+/* Chart: CSS bars on a TRUE zero baseline — bars are absolutely positioned
+   against the plot top (top = outer edge, height = |value|), so positives
+   grow up from the zero line and negatives hang below it. */
+.chat-viz-chart {
+  --viz-h: 180px;
+}
+.chat-viz-chart-plot {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  height: var(--viz-h);
+  padding-top: 18px; /* room for value labels above the tallest bar */
+  padding-bottom: 6px;
+}
+.chat-viz-chart-zero {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: color-mix(in srgb, var(--text-dim) 45%, transparent);
+}
+.chat-viz-chart-slot {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+.chat-viz-chart-barwrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+.chat-viz-chart-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  min-height: 2px;
+  border-radius: 3px;
+  /* Per-bar color comes inline from the agent's palette when provided. */
+  background: var(--viz-accent, var(--accent));
+  opacity: 0.9;
+  transition: opacity 0.12s ease;
+}
+.chat-viz-chart-slot:hover .chat-viz-chart-bar {
+  opacity: 1;
+}
+.chat-viz-chart-bar.neg {
+  background: color-mix(in srgb, var(--danger) 75%, var(--accent));
+}
+.chat-viz-chart-val {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 10.5px;
+  line-height: 1.2;
+  color: var(--text-dim);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.chat-viz-chart-label {
+  display: block;
+  margin-top: 5px;
+  font-size: 10.5px;
+  color: var(--text-dim);
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Table. */
+.chat-viz-tablewrap {
+  overflow: auto;
+  max-height: 340px;
+  border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  border-radius: calc(var(--radius-sm) - 2px);
+}
+.chat-viz-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+.chat-viz-table th {
+  position: sticky;
+  top: 0;
+  background: var(--surface-2);
+  color: var(--text-dim);
+  font-weight: 600;
+  text-align: left;
+  padding: 6px 10px;
+  white-space: nowrap;
+}
+.chat-viz-table td {
+  padding: 5px 10px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 45%, transparent);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.chat-viz-table tbody tr:hover {
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+}
+
+/* Task board. */
+.chat-viz-board {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+.chat-viz-board-col {
+  flex: 1 1 0;
+  min-width: 140px;
+  background: color-mix(in srgb, var(--surface-2) 55%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  border-radius: calc(var(--radius-sm) - 2px);
+  padding: 8px;
+}
+.chat-viz-board-colhead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-bottom: 7px;
+}
+.chat-viz-board-coltitle {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-viz-board-count {
+  flex-shrink: 0;
+  font-size: 10.5px;
+  color: var(--text-dim);
+  background: var(--surface-2);
+  border-radius: 999px;
+  padding: 1px 7px;
+  font-variant-numeric: tabular-nums;
+}
+.chat-viz-task {
+  background: var(--surface);
+  border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  border-radius: calc(var(--radius-sm) - 3px);
+  padding: 6px 8px;
+  margin-bottom: 6px;
+}
+.chat-viz-task:last-child {
+  margin-bottom: 0;
+}
+.chat-viz-task-title {
+  display: block;
+  font-size: 12.5px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.chat-viz-task-meta {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.chat-viz-board-empty {
+  font-size: 11.5px;
+  color: var(--text-dim);
+  padding: 4px 2px 2px;
+}
+
+/* Timeline. */
+.chat-viz-timeline {
+  position: relative;
+  padding-left: 4px;
+}
+.chat-viz-event {
+  position: relative;
+  display: flex;
+  gap: 10px;
+  padding: 0 0 12px 14px;
+}
+.chat-viz-event:last-child {
+  padding-bottom: 0;
+}
+.chat-viz-event::before {
+  content: "";
+  position: absolute;
+  left: 3.5px;
+  top: 12px;
+  bottom: -2px;
+  width: 1px;
+  background: color-mix(in srgb, var(--border) 80%, transparent);
+}
+.chat-viz-event:last-child::before {
+  display: none;
+}
+.chat-viz-event-dot {
+  position: absolute;
+  left: 0;
+  top: 5px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 2.5px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+.chat-viz-event-body {
+  flex: 1;
+  min-width: 0;
+}
+.chat-viz-event-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.chat-viz-event-label {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text);
+}
+.chat-viz-event-at {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.chat-viz-event-detail {
+  margin-top: 1px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+/* Line chart (SVG trend). */
+.chat-viz-line-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  color: var(--viz-dim, var(--text-dim));
+}
+.chat-viz-line-labels {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 2px;
+  font-size: 10.5px;
+  color: var(--viz-dim, var(--text-dim));
+}
+.chat-viz-line-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Donut (SVG arcs + legend). */
+.chat-viz-donut {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+.chat-viz-donut-svg {
+  width: 132px;
+  height: 132px;
+  flex-shrink: 0;
+}
+.chat-viz-donut-legend {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+  font-size: 12.5px;
+}
+.chat-viz-legend-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.chat-viz-legend-swatch {
+  width: 9px;
+  height: 9px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+.chat-viz-legend-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-viz-legend-value {
+  color: var(--viz-dim, var(--text-dim));
+  font-variant-numeric: tabular-nums;
+}
+
+/* Stat KPI row. */
+.chat-viz-stats {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.chat-viz-stat {
+  flex: 1 1 120px;
+  min-width: 120px;
+  background: color-mix(in srgb, var(--viz-dim, var(--text-dim)) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--viz-border, var(--border)) 60%, transparent);
+  border-radius: var(--viz-radius, calc(var(--radius-sm) - 2px));
+  padding: 9px 12px;
+  display: grid;
+  gap: 2px;
+}
+.chat-viz-stat-label {
+  font-size: 11px;
+  color: var(--viz-dim, var(--text-dim));
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.chat-viz-stat-value {
+  font-size: 21px;
+  font-weight: 700;
+  letter-spacing: -0.3px;
+  font-variant-numeric: tabular-nums;
+  color: var(--viz-fg, var(--text));
+}
+.chat-viz-stat-delta {
+  font-size: 11.5px;
+  color: var(--viz-dim, var(--text-dim));
+  font-variant-numeric: tabular-nums;
+}
+.chat-viz-stat-delta.good {
+  color: var(--success);
+}
+.chat-viz-stat-delta.bad {
+  color: var(--danger);
+}
+
 /* Click-catcher over a static inline diagram: same-origin frames swallow
    clicks; the diagram is non-interactive, so this opens the lightbox.
 

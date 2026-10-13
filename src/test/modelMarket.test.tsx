@@ -2,11 +2,12 @@
 // slimmed card tags, collapsed download-settings disclosure, and the detail
 // modal's stat strip + per-quant fit rows.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { ModelMarket } from "../components/settings/ModelMarket";
 import type { CatalogEntry, FetchCatalogResult } from "../lib/ipc";
 
 const fetchCatalogMock = vi.fn();
+const onProgressMock = vi.fn().mockResolvedValue(() => {});
 
 vi.mock("../lib/ipc", () => ({
   getMarketSettings: vi.fn().mockResolvedValue({
@@ -16,7 +17,7 @@ vi.mock("../lib/ipc", () => ({
   }),
   fetchModelCatalog: (...a: unknown[]) => fetchCatalogMock(...a),
   getGpuVram: vi.fn().mockResolvedValue(null),
-  onModelDownloadProgress: vi.fn().mockResolvedValue(() => {}),
+  onModelDownloadProgress: (...a: unknown[]) => onProgressMock(...a),
   startModelDownload: vi.fn().mockResolvedValue(undefined),
   cancelModelDownload: vi.fn().mockResolvedValue(undefined),
   pickModelsDirectory: vi.fn(),
@@ -137,7 +138,7 @@ describe("ModelMarket redesign", () => {
     await waitFor(() => expect(screen.getByText("whale")).toBeTruthy());
     const input = screen.getByPlaceholderText(/search/i) as HTMLInputElement;
     fireEvent.change(input, { target: { value: "qwen" } });
-    fireEvent.click(screen.getByText("Search"));
+    // Auto-search: no Search button to click — the debounced query fires.
     await waitFor(() =>
       expect(fetchCatalogMock).toHaveBeenCalledWith(
         expect.objectContaining({ query: "qwen", sort: "trending" }),
@@ -179,5 +180,100 @@ describe("ModelMarket redesign", () => {
       expect(document.body.querySelectorAll(".model-detail-pair").length).toBeGreaterThan(2),
     );
     expect(document.body.querySelectorAll(".model-detail-quant-row").length).toBe(0); // single quant → no selector
+  });
+
+  // The market used to render a dedicated progress row (bar + bytes + rate)
+  // under each downloading card. That row is gone: the CTA button now carries
+  // the percentage, the byte counts and the rate itself.
+  it("shows download progress on the CTA button instead of a separate row", async () => {
+    fetchCatalogMock.mockResolvedValue(CATALOG);
+    let progressHandler: ((p: unknown) => void) | null = null;
+    onProgressMock.mockImplementation((h: (p: unknown) => void) => {
+      progressHandler = h;
+      return Promise.resolve(() => {});
+    });
+    const { container } = render(<ModelMarket onDownloadComplete={() => {}} />);
+    await waitFor(() => expect(screen.getByText("tiny")).toBeTruthy());
+
+    const cta = () => container.querySelector(".model-card-actions button") as HTMLButtonElement;
+
+    // Half-way through a 4 GB transfer (id matches the first catalog entry).
+    const total = 4 * 1024 * 1024 * 1024;
+    act(() => {
+      progressHandler!({
+        id: "small/tiny::tiny-q4.gguf",
+        state: "downloading",
+        downloadedBytes: total / 2,
+        totalBytes: total,
+        bytesPerSecond: 2 * 1024 * 1024,
+        finalPath: null,
+        error: null,
+      });
+    });
+
+    // The standalone progress row is gone…
+    expect(container.querySelector(".model-card-progress")).toBeNull();
+    // …its bar moved onto the button…
+    const fill = cta().querySelector(".cta-fill") as HTMLElement;
+    expect(fill.style.width).toBe("50%");
+    // …and the percentage, bytes and rate all sit on the button.
+    expect(cta().textContent).toContain("Cancel · 50%");
+    expect(cta().textContent).toContain("2.0 GB / 4.0 GB");
+    expect(cta().textContent).toContain("2.0 MB/s");
+    expect(cta().title).toBe("Cancel download");
+    // The fill grows with the next tick.
+    act(() => {
+      progressHandler!({
+        id: "small/tiny::tiny-q4.gguf",
+        state: "downloading",
+        downloadedBytes: total,
+        totalBytes: total,
+        bytesPerSecond: 0,
+        finalPath: null,
+        error: null,
+      });
+    });
+    expect((cta().querySelector(".cta-fill") as HTMLElement).style.width).toBe("100%");
+    expect(cta().textContent).toContain("100%");
+    // Non-downloading states keep their plain labels (no percentage).
+    act(() => {
+      progressHandler!({
+        id: "small/tiny::tiny-q4.gguf",
+        state: "verifying",
+        downloadedBytes: total,
+        totalBytes: total,
+        bytesPerSecond: 0,
+        finalPath: null,
+        error: null,
+      });
+    });
+    expect(cta().textContent).toBe("Verifying…");
+    expect(cta().querySelector(".cta-fill")).toBeNull();
+    expect(cta().disabled).toBe(true);
+  });
+
+  // The market search used to need a Search click (or Enter). It now queries
+  // the catalog on a debounce as the user types — same as the MCP registry.
+  it("auto-queries the catalog while typing — no Search button", async () => {
+    fetchCatalogMock.mockResolvedValue(CATALOG);
+    render(<ModelMarket onDownloadComplete={() => {}} />);
+    await waitFor(() => expect(screen.getByText("whale")).toBeTruthy());
+    expect(screen.queryByRole("button", { name: "Search" })).toBeNull();
+
+    fetchCatalogMock.mockClear();
+    fireEvent.change(screen.getByPlaceholderText(/search/i), { target: { value: "qwen" } });
+    await waitFor(() =>
+      expect(fetchCatalogMock).toHaveBeenCalledWith(
+        expect.objectContaining({ query: "qwen" }),
+      ),
+    );
+    // Clearing the box queries the default (trending) catalog again.
+    fetchCatalogMock.mockClear();
+    fireEvent.change(screen.getByPlaceholderText(/search/i), { target: { value: "" } });
+    await waitFor(() =>
+      expect(fetchCatalogMock).toHaveBeenCalledWith(
+        expect.objectContaining({ query: "" }),
+      ),
+    );
   });
 });

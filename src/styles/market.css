@@ -76,19 +76,32 @@ button.primary.cta-strong:hover {
   align-items: center;
   flex-wrap: wrap;
 }
+/* Auto-searching input: no Search button — the query fires while typing and
+   a spinner sits inline while the request is in flight. */
 .model-market-search {
-  display: flex;
-  gap: 6px;
+  position: relative;
   flex: 1 1 280px;
 }
 .model-market-search input {
-  flex: 1;
-  padding: 6px 10px;
+  width: 100%;
+  padding: 6px 30px 6px 10px;
   border-radius: 8px;
   border: 1px solid var(--border);
   background: var(--bg-2);
   color: var(--text);
   font-size: 13px;
+}
+.model-market-search .local-spinner {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.model-market-search.searching .local-spinner {
+  opacity: 1;
 }
 .model-market-sort label {
   display: inline-flex;
@@ -623,6 +636,35 @@ button.primary.cta-strong:hover {
   border-radius: 8px;
   font-size: 12px;
   font-weight: 600;
+}
+/* Download progress on the CTA (replaces the old progress row under the
+   card): a fill grows from the left behind the label, with bytes/total and
+   rate on a smaller second line. */
+.model-market-grid .model-card-actions button.cta-progress {
+  position: relative;
+  overflow: hidden;
+  padding: 6px 0;
+}
+.model-market-grid .model-card-actions .cta-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  background: color-mix(in srgb, var(--accent) 40%, transparent);
+  transition: width 150ms linear;
+}
+.model-market-grid .model-card-actions .cta-stack {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  line-height: 1.25;
+}
+.model-market-grid .model-card-actions .cta-meta {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 500;
+  opacity: 0.8;
 }
 .model-market-stale {
   padding: 6px 10px;

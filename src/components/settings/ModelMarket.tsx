@@ -56,6 +56,11 @@ const SORT_LABELS: Record<SortKey, string> = {
   modified: "Recently updated",
 };
 
+// Idle delay before a typed market query is sent to Hugging Face — the search
+// auto-queries as the user types (no Search button / Enter press). Same
+// trailing-debounce pattern as the MCP registry panel's auto-search.
+const SEARCH_DEBOUNCE_MS = 400;
+
 interface PerDownload {
   state: DownloadProgress["state"];
   downloaded: number;
@@ -246,10 +251,30 @@ export function ModelMarket({ onDownloadComplete, localModels }: ModelMarketProp
     }
   };
 
-  const onSearchSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    void doFetch(query, sort);
-  };
+  // Auto-search: the catalog is re-queried a beat after typing stops, so
+  // there is no Search button to press or Enter to hit (same pattern as the
+  // MCP registry panel). `sort` and `doFetch` are read through refs so a sort
+  // change — which already fetches in onSortChange — can't re-arm this effect
+  // and double-request the same page. doFetch's monotonic ticket discards
+  // stale responses, so a fast typist never sees an older query's entries
+  // land under a newer one.
+  const sortRef = useRef(sort);
+  sortRef.current = sort;
+  const doFetchRef = useRef(doFetch);
+  doFetchRef.current = doFetch;
+  // Skip the mount run: the mount effect already fetched the trending catalog,
+  // and an immediate second fetch would just race it.
+  const searchBootedRef = useRef(false);
+  useEffect(() => {
+    if (!searchBootedRef.current) {
+      searchBootedRef.current = true;
+      return;
+    }
+    const t = window.setTimeout(() => {
+      void doFetchRef.current(query.trim(), sortRef.current);
+    }, SEARCH_DEBOUNCE_MS);
+    return () => window.clearTimeout(t);
+  }, [query]);
 
   const onSortChange = (s: UiSortKey) => {
     setUiSort(s);
@@ -370,18 +395,17 @@ export function ModelMarket({ onDownloadComplete, localModels }: ModelMarketProp
   return (
     <div className="model-market">
       <div className="model-market-toolbar">
-        <form onSubmit={onSearchSubmit} className="model-market-search">
+        <div className={`model-market-search${loading ? " searching" : ""}`}>
           <input
             type="text"
             placeholder="Search Hugging Face GGUF models…"
+            aria-label="Search Hugging Face GGUF models"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             spellCheck={false}
           />
-          <button type="submit" disabled={loading}>
-            {loading ? "Searching…" : "Search"}
-          </button>
-        </form>
+          {loading && <span className="local-spinner" aria-label="Searching" />}
+        </div>
         <div className="model-market-sort">
           <label>
             <span>Sort</span>
@@ -697,6 +721,16 @@ export function ModelCard({ entry, downloads, checkDownloaded, totalRam, vramByt
   const isActive = state && state !== "done" && state !== "cancelled" && state !== "error";
   const isError = state === "error";
 
+  // Second line on the CTA while downloading: bytes (with total when known)
+  // and transfer rate — everything the old progress row used to carry.
+  const progressMeta = useMemo(() => {
+    if (state !== "downloading" || !download) return null;
+    const bytes = formatBytes(download.downloaded);
+    const total = download.total ? ` / ${formatBytes(download.total)}` : "";
+    const rate = download.bps > 0 ? ` · ${formatRate(download.bps)}` : "";
+    return `${bytes}${total}${rate}`;
+  }, [state, download]);
+
   // Extract structured info from tags
   const tags = entry.tags || [];
   const pipelineTag = tags.find((t) => ["text-generation", "feature-extraction", "text-to-image", "automatic-speech-recognition", "image-text-to-text", "text-classification", "token-classification", "question-answering", "translation", "summarization", "fill-mask", "sentence-similarity", "image-classification", "object-detection", "image-segmentation", "text-to-speech", "visual-question-answering", "document-question-answering"].includes(t));
@@ -776,17 +810,6 @@ export function ModelCard({ entry, downloads, checkDownloaded, totalRam, vramByt
         {/* Description */}
         {entry.description && <div className="model-card-desc">{entry.description}</div>}
 
-        {/* Progress */}
-        {isActive && (
-          <div className="model-card-progress">
-            <div className="model-card-progress-bar"><div className="model-card-progress-fill" style={{ width: `${pct ?? 0}%` }} /></div>
-            <div className="model-card-progress-info">
-              <span>{pct !== null ? `${pct}% · ` : ""}{formatBytes(download?.downloaded ?? 0)}{download?.total ? ` / ${formatBytes(download.total)}` : ""}</span>
-              <span>{formatRate(download?.bps ?? 0) || "—"}</span>
-            </div>
-          </div>
-        )}
-
         {/* Status */}
         {isDone && <div className="model-card-status done">✓ Downloaded · Ready to use</div>}
         {state === "cancelled" && <div className="model-card-status cancelled">Cancelled</div>}
@@ -799,9 +822,29 @@ export function ModelCard({ entry, downloads, checkDownloaded, totalRam, vramByt
               ✓ Already downloaded · Ready to use
             </div>
           ) : (
-            <button className="primary cta-strong" onClick={(e) => { e.stopPropagation(); onAction(activeEntry); }} disabled={state === "starting" || state === "verifying"}>
+            <button
+              className={`primary cta-strong${isActive ? " cta-progress" : ""}`}
+              onClick={(e) => { e.stopPropagation(); onAction(activeEntry); }}
+              disabled={state === "starting" || state === "verifying"}
+              title={state === "downloading" ? "Cancel download" : undefined}
+            >
               {ram === "too_large" && !isActive ? "⚠ " : ""}
-              {isActive ? `${pct ?? 0}%` : actionLabel}
+              {isActive ? (
+                <>
+                  {/* Progress used to be its own row under the card; it lives
+                      on the CTA now — a fill behind the label plus bytes and
+                      rate beside the percentage. */}
+                  {state === "downloading" && (
+                    <span className="cta-fill" style={{ width: `${pct ?? 0}%` }} aria-hidden />
+                  )}
+                  <span className="cta-stack">
+                    <span>{state === "downloading" ? `Cancel · ${pct ?? 0}%` : actionLabel}</span>
+                    {state === "downloading" && progressMeta && (
+                      <span className="cta-meta">{progressMeta}</span>
+                    )}
+                  </span>
+                </>
+              ) : actionLabel}
             </button>
           )}
         </div>

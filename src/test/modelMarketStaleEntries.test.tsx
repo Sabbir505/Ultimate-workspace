@@ -136,16 +136,15 @@ describe("ModelMarket search/sort out-of-order responses (audit 2026-09-14 #5)",
     render(<ModelMarket onDownloadComplete={vi.fn()} />);
     await act(async () => {}); // mount fetch pending → resolvers[0]
 
-    const form = document.querySelector(".model-market-search") as HTMLFormElement;
     const input = screen.getByPlaceholderText("Search Hugging Face GGUF models…");
 
-    // Search #1 — will resolve LAST (slow popular-term backend).
+    // Search #1 — auto-queried after the debounce, will resolve LAST (slow
+    // popular-term backend).
     fireEvent.change(input, { target: { value: "slow query" } });
-    fireEvent.submit(form);
+    await waitFor(() => expect(resolvers.length).toBe(2));
     // Search #2 — resolves FIRST.
     fireEvent.change(input, { target: { value: "fast query" } });
-    fireEvent.submit(form);
-    expect(resolvers.length).toBe(3);
+    await waitFor(() => expect(resolvers.length).toBe(3));
 
     await act(async () => {
       resolvers[2]({ stale: false, hasHuggingFaceToken: false, entries: [entryFor("fast query")] });

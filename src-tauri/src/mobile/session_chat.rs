@@ -523,6 +523,33 @@ fn handle_send_chat_message(
     let sandbox = crate::chat::permission::SandboxPolicy::from_db(&sandbox_policy);
     let approval = crate::chat::permission::ApprovalPolicy::from_db(&approval_policy);
 
+    // Deterministic first-prompt title, set before the turn starts. The desktop
+    // gets this from the frontend's `generateSessionTitle`; phone-started
+    // chats had no equivalent, so their title depended entirely on the LLM
+    // pass in the `chat:done` forwarder — which returns None for local_gguf
+    // (by design), for any provider without a key, and for harness sessions
+    // still on the unresolved "auto" placeholder. Those chats stayed
+    // "Untitled" forever, on both the phone and the desktop rail (same row).
+    //
+    // Only fires while the title is blank, so it never clobbers a manual
+    // rename, and the LLM turn-1/turn-3 refinement can still improve it.
+    {
+        let conn = db.lock();
+        let already_titled = db::get_chat_session(&conn, &chat_session_id)
+            .ok()
+            .flatten()
+            .and_then(|s| s.title)
+            .map(|t| !t.trim().is_empty())
+            .unwrap_or(false);
+        if !already_titled {
+            if let Some(title) = chat::commands::generators::derive_title_from_prompt(&text) {
+                if let Err(e) = db::update_chat_session_title(&conn, &chat_session_id, &title) {
+                    crate::relay_eprintln!("[mobile-relay] title seed failed: {e}");
+                }
+            }
+        }
+    }
+
     // 1z. HARNESS sessions (claude_code / kimi / opencode / commandcode / …)
     // run the CLI through agent_sessions — they are NOT provider turns. The
     // relay used to send EVERY phone message down the builtin provider path,

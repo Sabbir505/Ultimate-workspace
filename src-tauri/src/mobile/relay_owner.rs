@@ -64,6 +64,44 @@ pub fn watch_chat(chat_session_id: &str, owner_session_id: &str) {
     }
 }
 
+/// Whether `chat_session_id`'s current title is still machine-generated, i.e.
+/// the LLM is free to overwrite it.
+///
+/// The desktop decides this with an in-memory `hasManuallyRenamed` set
+/// (`src/state/chat/moduleState.ts`). The relay has no such store, and it
+/// can't just test for a blank title any more: the send path now seeds a
+/// deterministic first-prompt title, so "blank" would never match and the
+/// refinement would be permanently skipped.
+///
+/// Re-deriving the seed from the first user message is equivalent to that set
+/// while needing no state — it survives restarts, and it distinguishes
+/// "nobody has named this" from "somebody named this" without ambiguity:
+/// * NULL / empty / the wire-only "Untitled" placeholder → nothing was set.
+/// * title == seed(first user message) → it was set by `derive_title_from_prompt`
+///   and never edited since.
+/// * anything else → a real (manual or LLM) title. An LLM title still
+///   compares unequal to the seed, so it is protected too, which is what stops
+///   turn 3 from churning a title turn 1 already refined.
+fn title_is_auto_generated(conn: &rusqlite::Connection, chat_session_id: &str) -> bool {
+    let Ok(Some(cs)) = crate::db::get_chat_session(conn, chat_session_id) else {
+        // Missing row: nothing to refine.
+        return false;
+    };
+    let current = match cs.title.as_deref().map(str::trim) {
+        // Every new row is INSERTed with `title = NULL` (db/chat.rs), so the
+        // absent case is the *normal* one — it must not read as "titled".
+        None | Some("") | Some("Untitled") => return true,
+        Some(t) => t,
+    };
+    let seed = crate::db::list_chat_messages(conn, chat_session_id)
+        .ok()
+        .and_then(|msgs| msgs.into_iter().find(|m| m.role == "user"))
+        .and_then(|m| {
+            crate::chat::commands::generators::derive_title_from_prompt(&m.content)
+        });
+    seed.as_deref() == Some(current)
+}
+
 pub(crate) fn owners_for_chat(chat_session_id: &str) -> Vec<String> {
     CHAT_OWNERS
         .lock()
@@ -200,25 +238,17 @@ pub fn start_chat_stream_forwarder(app: &AppHandle, owner_map: OwnerMap) {
             }
 
             // Relay-run turns never hit the desktop frontend's
-            // after-first-turn title hook, so the chat stayed "Untitled"
-            // forever (desktop parity: name it with the same generator).
+            // after-first-turn title hook, so let the LLM refine the title the
+            // send path seeded from the first prompt.
             let app2 = app_owned.clone();
             let cid2 = cid.to_string();
             tauri::async_runtime::spawn(async move {
                 let state = app2.state::<crate::DbState>();
-                let untitled = {
+                let refineable = {
                     let conn = state.0.lock();
-                    crate::db::get_chat_session(&conn, &cid2)
-                        .ok()
-                        .flatten()
-                        .and_then(|s| s.title)
-                        .map(|t| {
-                            let t = t.trim();
-                            t.is_empty() || t == "Untitled"
-                        })
-                        .unwrap_or(false)
+                    title_is_auto_generated(&conn, &cid2)
                 };
-                if untitled {
+                if refineable {
                     let _ = crate::chat::commands::generators::generate_chat_title(cid2, state).await;
                 }
             });

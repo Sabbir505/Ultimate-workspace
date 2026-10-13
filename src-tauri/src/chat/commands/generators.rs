@@ -3,6 +3,55 @@
 
 use super::*;
 
+use once_cell::sync::Lazy;
+use regex::Regex;
+
+/// Longest deterministic title we derive from the first prompt. Mirrors
+/// `TITLE_MAX_LENGTH` in `src/lib/sessionTitle.ts`.
+const TITLE_MAX_CHARS: usize = 40;
+
+/// `\s*\[Connected:…\]\s*` — connector provenance the composer splices into the
+/// prompt. Stripped so it never lands in a title.
+static RE_CONNECTED_TAG: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)\s*\[Connected:[^\]]*\]\s*").expect("valid connected-tag regex"));
+
+/// Deterministic title derived from the user's first prompt — the server-side
+/// mirror of the frontend's `generateSessionTitle` (`src/lib/sessionTitle.ts`),
+/// kept behaviour-identical on purpose.
+///
+/// The desktop React layer calls that on the first `sendMessage`
+/// (`streamingSlice.ts`), so a desktop chat is titled the instant its first
+/// message goes out and *before* any LLM refinement. Phone-started chats never
+/// run that hook, so they depended entirely on the LLM pass — and that pass
+/// bails out (`Ok(None)`) for local_gguf by design, for any provider with no
+/// key, and for agent/harness sessions whose provider is still the unresolved
+/// `"auto"` placeholder. Every one of those phone chats stayed "Untitled"
+/// forever, on the phone and in the desktop rail alike, because both read the
+/// same `chat_sessions.title`.
+///
+/// Deriving it here instead gives both clients the same guarantee, and keeps
+/// the LLM turn-1/turn-3 refinement purely an *improvement* over a title that
+/// already exists rather than the only source of one.
+pub(crate) fn derive_title_from_prompt(prompt: &str) -> Option<String> {
+    let cleaned = RE_CONNECTED_TAG.replace_all(prompt, " ");
+    let cleaned = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    if cleaned.is_empty() {
+        return None;
+    }
+    if cleaned.chars().count() <= TITLE_MAX_CHARS {
+        return Some(cleaned);
+    }
+    let slice: String = cleaned.chars().take(TITLE_MAX_CHARS).collect();
+    // Prefer cutting on a word boundary, but only when that still leaves a
+    // useful amount of the budget — one long token (a URL, a path, an id)
+    // keeps the hard slice instead of collapsing to a single word.
+    let base = match slice.rfind(' ') {
+        Some(idx) if idx >= TITLE_MAX_CHARS / 2 => slice[..idx].to_string(),
+        _ => slice,
+    };
+    Some(format!("{}\u{2026}", base.trim_end()))
+}
+
 /// Ask the session's model for a short (3–6 word) title summarizing the
 /// conversation so far and persist it. Returns the new title, or `None` when
 /// one couldn't be produced (missing key/model, empty transcript, API error) —

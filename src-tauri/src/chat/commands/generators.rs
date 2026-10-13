@@ -367,7 +367,7 @@ pub async fn generate_diff_review(
         {
             (cs.provider, cs.model)
         } else {
-            const PROVIDERS: [&str; 5] = [
+            const PROVIDERS: [&str; 7] = [
                 "openai",
                 "openrouter",
                 "anthropic",
@@ -467,6 +467,92 @@ pub async fn generate_diff_review(
         Ok(None)
     } else {
         Ok(Some(review))
+    }
+}
+
+/// Suggest the user's next message for the composer ("composer predictions").
+/// Fired (fire-and-forget) by the renderer after the assistant finishes a
+/// reply in the session the user is viewing; the renderer discards stale
+/// results via its turn generation counter. Returns `None` whenever no useful
+/// suggestion can be produced — feature off, no reachable prediction model
+/// (no key, no live local sidecar, no harness CLI), or a failed/empty
+/// generation. Never an error: the composer simply shows nothing.
+/// Resolution and family dispatch live in `chat::suggestion`.
+#[tauri::command]
+pub async fn generate_chat_suggestion(
+    chat_session_id: String,
+    app: AppHandle,
+    db: State<'_, DbState>,
+) -> CmdResult<Option<String>> {
+    Ok(crate::chat::suggestion::generate(&app, &db, &chat_session_id).await)
+}
+
+#[cfg(test)]
+mod derive_title_tests {
+    use super::{derive_title_from_prompt, TITLE_MAX_CHARS};
+
+    /// Mirrors `src/test/sessionTitle.test.ts` — the Rust and TypeScript
+    /// generators are deliberately identical, and the desktop trusts one while
+    /// the phone trusts the other, so the two must not drift.
+    #[test]
+    fn uses_short_prompt_verbatim() {
+        assert_eq!(
+            derive_title_from_prompt("fix the auth middleware").as_deref(),
+            Some("fix the auth middleware")
+        );
+    }
+
+    #[test]
+    fn collapses_whitespace_and_trims() {
+        assert_eq!(
+            derive_title_from_prompt("fix the auth\nmiddleware   now").as_deref(),
+            Some("fix the auth middleware now")
+        );
+        assert_eq!(
+            derive_title_from_prompt("   hello world   ").as_deref(),
+            Some("hello world")
+        );
+    }
+
+    #[test]
+    fn strips_connected_tag() {
+        assert_eq!(
+            derive_title_from_prompt("[Connected:github] fix the flaky test").as_deref(),
+            Some("fix the flaky test")
+        );
+    }
+
+    #[test]
+    fn truncates_with_ellipsis() {
+        let long = "please refactor the entire authentication middleware layer to support token refresh";
+        let title = derive_title_from_prompt(long).unwrap();
+        assert!(title.ends_with('\u{2026}'), "expected ellipsis, got {title:?}");
+        // Ellipsis is the 41st char — one over the budget, matching the TS side.
+        assert!(title.chars().count() <= TITLE_MAX_CHARS + 1);
+    }
+
+    #[test]
+    fn prefers_a_word_boundary() {
+        let long = "aaaaaaaaaa bbbbbbbbbb cccccccccc dddddddddd eeeeeeeeee ffffff";
+        let title = derive_title_from_prompt(long).unwrap();
+        let body = title.strip_suffix('\u{2026}').unwrap();
+        assert!(long.starts_with(body), "cut mid-word: {body:?}");
+        assert_eq!(long.chars().nth(body.chars().count()), Some(' '));
+    }
+
+    #[test]
+    fn keeps_a_single_long_token_intact() {
+        // A path/URL has no usable boundary — it must not collapse to one word.
+        let long = "a".repeat(60);
+        let title = derive_title_from_prompt(&long).unwrap();
+        assert_eq!(title.chars().count(), TITLE_MAX_CHARS + 1);
+    }
+
+    #[test]
+    fn returns_none_for_blank_prompts() {
+        assert_eq!(derive_title_from_prompt(""), None);
+        assert_eq!(derive_title_from_prompt("   \n\t  "), None);
+        assert_eq!(derive_title_from_prompt("[Connected:github]"), None);
     }
 }
 

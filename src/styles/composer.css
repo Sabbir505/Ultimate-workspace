@@ -293,6 +293,43 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* Composer prediction ghost — the suggested next message rendered dimmed at
+   the exact spot the text would land. Mirrors the textarea's type metrics
+   (zoom-scaled font, line-height, padding) and rides inside the same
+   position:relative wrap; pointer-events:none so clicks and the keyboard go
+   straight to the textarea underneath. It only renders while the draft is
+   empty, so no scroll syncing with the textarea is needed. */
+.composer-ghost {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  padding: 2px 2px 4px;
+  font-family: var(--font-ui);
+  font-size: calc(13px * var(--chat-zoom, 1));
+  line-height: 1.5;
+  color: var(--text-dim);
+  opacity: 0.85;
+  pointer-events: none;
+  white-space: pre-wrap;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+}
+.composer-ghost-text {
+  overflow-wrap: anywhere;
+}
+.composer-ghost-hint {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 0 5px;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  font-size: 0.8em;
+  opacity: 0.7;
+  white-space: nowrap;
+}
 .chat-composer-footer {
   display: flex;
   align-items: center;

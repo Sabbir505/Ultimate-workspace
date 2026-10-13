@@ -534,6 +534,10 @@ export function clearSessionState(s: ChatState, chatSessionId: string): Partial<
   // whole app run after delete (audit L-17).
   const composerDrafts = { ...s.composerDrafts };
   delete composerDrafts[chatSessionId];
+  const promptHistory = { ...s.promptHistory };
+  delete promptHistory[chatSessionId];
+  const composerSuggestions = { ...s.composerSuggestions };
+  delete composerSuggestions[chatSessionId];
   const citationReports = { ...s.citationReports };
   delete citationReports[chatSessionId];
   const meshMailBySession = { ...s.meshMailBySession };
@@ -586,6 +590,8 @@ export function clearSessionState(s: ChatState, chatSessionId: string): Partial<
     staleTerminalFor,
     turnGeneration,
     composerDrafts,
+    promptHistory,
+    composerSuggestions,
     citationReports,
     meshMail,
     meshMailBySession,

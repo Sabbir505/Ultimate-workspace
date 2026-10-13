@@ -566,6 +566,8 @@ export function createSessionsSlice(set: ChatStoreSet, get: ChatStoreGet) {
         // Audit L-17: delete-all missed these two keyed maps (single-delete
         // clears them via clearSessionState).
         composerDrafts: {},
+        promptHistory: {},
+        composerSuggestions: {},
         supersededPartial: {},
         staleTerminalFor: {},
         turnGeneration: {},

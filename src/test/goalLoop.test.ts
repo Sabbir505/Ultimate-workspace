@@ -22,6 +22,8 @@ vi.mock("../lib/ipc", () => ({
   touchChatSession: vi.fn().mockResolvedValue(undefined),
   createChatSession: vi.fn(),
   generateChatTitle: vi.fn().mockResolvedValue(null),
+  // onDone's composer-prediction tail (feature runs per completed turn).
+  generateChatSuggestion: vi.fn().mockResolvedValue(null),
   getChatConfig: vi.fn(),
   getChatSessionMetrics: vi.fn(),
   setChatSessionUnread: vi.fn(),

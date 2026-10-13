@@ -6,6 +6,7 @@ import {
   cancelChatMessage,
   persistPartialChatMessage,
   generateChatTitle,
+  generateChatSuggestion,
   getChatMessages,
   listChatSessions,
   sendAgentChatMessage,
@@ -219,6 +220,9 @@ export function createStreamingSlice(set: ChatStoreSet, get: ChatStoreGet) {
           // Start a fresh artifact buffer for this turn.
           pendingArtifacts: { ...get().pendingArtifacts, [activeChatSessionId]: [] },
           stoppedPartial,
+          // A suggestion for the PREVIOUS turn is stale the moment the user
+          // sends; drop it (the new turn's completion may produce a fresh one).
+          composerSuggestions: omitKey(s.composerSuggestions, activeChatSessionId),
           // This turn is a NEW identity: bump the per-session counter and drop
           // any stale-terminal guard left over from a cancel, so the armed
           // record can never swallow THIS turn's chat:done / chat:error (a
@@ -525,7 +529,12 @@ cancelStream: async (sessionIdOverride?: string) => {
           } else {
             delete nextStopped[streamingChatSessionId];
           }
-          return { stoppedPartial: nextStopped };
+          return {
+            stoppedPartial: nextStopped,
+            // Stopping ends the turn's story — a pending suggestion from the
+            // previous reply no longer fits what the user is doing.
+            composerSuggestions: omitKey(s.composerSuggestions, streamingChatSessionId),
+          };
         });
         // A cancelled turn frees the queue too — send the next stacked message.
         get().drainQueue(streamingChatSessionId);
@@ -798,7 +807,7 @@ cancelStream: async (sessionIdOverride?: string) => {
       });
     },
 
-    onDone: async (chatSessionId: string, inputTokens: number | null, outputTokens: number | null, costUsd: number | null, llmTimeMs?: number | null, toolTimeMs?: number | null, ttftMs?: number | null, tokensPerSecond?: number | null, cacheHitRate?: number | null) => {
+    onDone: async (chatSessionId: string, inputTokens: number | null, outputTokens: number | null, costUsd: number | null, llmTimeMs?: number | null, toolTimeMs?: number | null, ttftMs?: number | null, tokensPerSecond?: number | null, cacheHitRate?: number | null, source?: string | null) => {
       // Stale terminal event from an already-cancelled turn whose replacement
       // turn owns the streaming entry now (audit H36) — consume it silently;
       // see the identical guard in onError. Bound to the KILLED turn's
@@ -839,6 +848,9 @@ cancelStream: async (sessionIdOverride?: string) => {
         ...clearStreamState(s, chatSessionId),
         livePerf: omitKey(s.livePerf, chatSessionId),
         pendingQuestions: omitKey(s.pendingQuestions, chatSessionId),
+        // The finished turn's suggestion (if any) is regenerated below — never
+        // leave the previous one up while the new one is being predicted.
+        composerSuggestions: omitKey(s.composerSuggestions, chatSessionId),
         lastTurnPerf: { ...s.lastTurnPerf, [chatSessionId]: lastTurn },
       }));
 
@@ -940,6 +952,7 @@ cancelStream: async (sessionIdOverride?: string) => {
       // the PREVIOUS turn's reply — advancing on it would feed a stale
       // (already-processed) sentinel back to the model, so skip the advance
       // until a turn whose reply we actually have (audit A4).
+      let goalAdvanced = false;
       if (
         messages !== null &&
         get().activeChatSessionId === chatSessionId && !(chatSessionId in get().streaming)
@@ -951,6 +964,7 @@ cancelStream: async (sessionIdOverride?: string) => {
             .find((m) => m.role === "assistant")?.content ?? "";
           const decision = get().advanceLoop(chatSessionId, lastReply);
           if (decision === "continue") {
+            goalAdvanced = true;
             const next = loop.iteration + 1; // advanceLoop already ticked it
             const body =
               `[loop iteration ${next}/${loop.max}] Continue working toward the goal ` +
@@ -961,6 +975,35 @@ cancelStream: async (sessionIdOverride?: string) => {
             void Promise.resolve().then(() => get().sendMessage(body));
           }
         }
+      }
+      // Composer predictions: after a clean turn in the session the user is
+      // VIEWING (background/automation turns skip), ask the backend for a
+      // suggested next message — the feature's model defaults to this chat's
+      // own. Fire-and-forget; the result becomes ghost text in an empty
+      // composer, and the generation + active-session guards drop it when
+      // anything happened meanwhile (send, cancel, switch, loop advance).
+      if (
+        !goalAdvanced &&
+        source !== "automation" &&
+        useSettingsStore.getState().composerPredictions &&
+        messages !== null &&
+        get().activeChatSessionId === chatSessionId &&
+        !(chatSessionId in get().streaming) &&
+        !(chatSessionId in get().messageQueue)
+      ) {
+        const generation = get().turnGeneration[chatSessionId] ?? 0;
+        void generateChatSuggestion(chatSessionId)
+          .then((text) => {
+            if (!text) return;
+            const s = get();
+            if (s.activeChatSessionId !== chatSessionId) return;
+            if (chatSessionId in s.streaming) return;
+            if ((s.turnGeneration[chatSessionId] ?? 0) !== generation) return;
+            s.setComposerSuggestion(chatSessionId, text);
+          })
+          .catch(() => {
+            /* best-effort: silence is the correct failure mode here */
+          });
       }
       // Refresh the session's aggregate metrics (turn added to the totals).
       void get().loadSessionMetrics(chatSessionId);
@@ -1005,6 +1048,9 @@ cancelStream: async (sessionIdOverride?: string) => {
         // An errored/cancelled turn must not leave a question card stuck
         // (the backend already dropped its pending).
         pendingQuestions: omitKey(s.pendingQuestions, chatSessionId),
+        // Same for a pending suggestion: the turn errored, so there is no
+        // "next message" story to continue.
+        composerSuggestions: omitKey(s.composerSuggestions, chatSessionId),
         // Remember what the errored turn had produced (matches the persisted
         // partial row) — same as the cancel path, so the partial bubble keeps
         // its process section expanded and reads "Stopped" instead of

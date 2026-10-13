@@ -522,6 +522,13 @@ export const updateChatSessionTitle = (chatSessionId: string, title: string) =>
  *  title, or null if one couldn't be produced (e.g. no API key/model). */
 export const generateChatTitle = (chatSessionId: string) =>
   safeInvoke<string | null>("generate_chat_title", { chatSessionId });
+/** Ask for a suggested next message in the session ("composer predictions").
+ *  Fired after a completed turn in the session the user is viewing; the
+ *  result renders as ghost text in an empty composer (Tab fills it, never
+ *  sends). Returns null whenever no suggestion could be produced — feature
+ *  off, no reachable model, or a failed generation. */
+export const generateChatSuggestion = (chatSessionId: string) =>
+  safeInvoke<string | null>("generate_chat_suggestion", { chatSessionId });
 export const setChatSessionStarred = (chatSessionId: string, starred: boolean) =>
   safeInvoke<void>("set_chat_session_starred", { chatSessionId, starred });
 export const setChatSessionUnread = (chatSessionId: string, unread: boolean) =>

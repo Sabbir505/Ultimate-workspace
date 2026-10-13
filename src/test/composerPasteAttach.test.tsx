@@ -242,3 +242,183 @@ describe("composer slash menu keyboard navigation", () => {
     expect(textarea.value).toBe("");
   });
 });
+
+describe("composer Escape stops the turn", () => {
+  it("calls onStop while a turn streams", () => {
+    const onStop = vi.fn();
+    useChatStore.setState({ activeChatSessionId: "esc-test-session" });
+    render(
+      <ChatComposer
+        onSend={vi.fn()}
+        onStop={onStop}
+        streaming
+        onAgentModelPick={vi.fn()}
+      />,
+    );
+    const textarea = screen.getByPlaceholderText(/keep typing/);
+    fireEvent.keyDown(textarea, { key: "Escape" });
+    expect(onStop).toHaveBeenCalledTimes(1);
+  });
+
+  it("does nothing when no turn is running", () => {
+    const onStop = vi.fn();
+    useChatStore.setState({ activeChatSessionId: "esc-test-session" });
+    render(
+      <ChatComposer
+        onSend={vi.fn()}
+        onStop={onStop}
+        streaming={false}
+        onAgentModelPick={vi.fn()}
+      />,
+    );
+    const textarea = screen.getByPlaceholderText(/Write a message/);
+    fireEvent.keyDown(textarea, { key: "Escape" });
+    expect(onStop).not.toHaveBeenCalled();
+  });
+
+  it("leaves the slash popup its own Escape dismissal", async () => {
+    const onStop = vi.fn();
+    useChatStore.setState({ activeChatSessionId: "esc-test-session" });
+    render(
+      <ChatComposer
+        onSend={vi.fn()}
+        onStop={onStop}
+        streaming
+        onAgentModelPick={vi.fn()}
+      />,
+    );
+    const textarea = screen.getByPlaceholderText(/keep typing/) as HTMLTextAreaElement;
+    fireEvent.change(textarea, {
+      target: { value: "/", selectionStart: 1, selectionEnd: 1 },
+    });
+    await screen.findByRole("listbox", { name: "Commands" });
+    fireEvent.keyDown(textarea, { key: "Escape" });
+    // The popup closes (its own Escape branch) and the turn is untouched —
+    // stopping the agent because the user dismissed a menu would lose work.
+    expect(screen.queryByRole("listbox", { name: "Commands" })).toBeNull();
+    expect(onStop).not.toHaveBeenCalled();
+  });
+});
+
+describe("composer ↑/↓ prompt recall", () => {
+  const typeAt = (textarea: HTMLElement, value: string, caret = value.length) => {
+    fireEvent.change(textarea, {
+      target: { value, selectionStart: caret, selectionEnd: caret },
+    });
+  };
+  const send = (textarea: HTMLElement, text: string) => {
+    typeAt(textarea, text);
+    fireEvent.keyDown(textarea, { key: "Enter" });
+  };
+
+  it("walks back and forth through this chat's prompts and restores the draft", async () => {
+    const onSend = vi.fn();
+    useChatStore.setState({ activeChatSessionId: "recall-session" });
+    render(
+      <ChatComposer onSend={onSend} streaming={false} onAgentModelPick={vi.fn()} />,
+    );
+    const textarea = screen.getByPlaceholderText(/Write a message/) as HTMLTextAreaElement;
+    send(textarea, "first prompt");
+    await vi.waitFor(() => expect(textarea.value).toBe(""));
+    send(textarea, "second prompt");
+    await vi.waitFor(() => expect(textarea.value).toBe(""));
+    send(textarea, "third prompt");
+    await vi.waitFor(() => expect(textarea.value).toBe(""));
+
+    // ↑ from an empty box recalls the newest prompt, and older ones behind it.
+    fireEvent.keyDown(textarea, { key: "ArrowUp" });
+    await vi.waitFor(() => expect(textarea.value).toBe("third prompt"));
+    fireEvent.keyDown(textarea, { key: "ArrowUp" });
+    await vi.waitFor(() => expect(textarea.value).toBe("second prompt"));
+    fireEvent.keyDown(textarea, { key: "ArrowUp" });
+    await vi.waitFor(() => expect(textarea.value).toBe("first prompt"));
+    // Past the oldest entry it holds still.
+    fireEvent.keyDown(textarea, { key: "ArrowUp" });
+    await vi.waitFor(() => expect(textarea.value).toBe("first prompt"));
+
+    // ↓ walks forward again…
+    fireEvent.keyDown(textarea, { key: "ArrowDown" });
+    await vi.waitFor(() => expect(textarea.value).toBe("second prompt"));
+    // …and off the newest end returns the draft the walk replaced.
+    fireEvent.keyDown(textarea, { key: "ArrowDown" });
+    await vi.waitFor(() => expect(textarea.value).toBe("third prompt"));
+    fireEvent.keyDown(textarea, { key: "ArrowDown" });
+    await vi.waitFor(() => expect(textarea.value).toBe(""));
+  });
+
+  it("restores a half-written draft when ↑ is pressed and then ↓", async () => {
+    const onSend = vi.fn();
+    useChatStore.setState({ activeChatSessionId: "recall-draft-session" });
+    render(
+      <ChatComposer onSend={onSend} streaming={false} onAgentModelPick={vi.fn()} />,
+    );
+    const textarea = screen.getByPlaceholderText(/Write a message/) as HTMLTextAreaElement;
+    send(textarea, "sent earlier");
+    await vi.waitFor(() => expect(textarea.value).toBe(""));
+    typeAt(textarea, "unsent thought");
+    fireEvent.keyDown(textarea, { key: "ArrowUp" });
+    await vi.waitFor(() => expect(textarea.value).toBe("sent earlier"));
+    fireEvent.keyDown(textarea, { key: "ArrowDown" });
+    await vi.waitFor(() => expect(textarea.value).toBe("unsent thought"));
+  });
+
+  it("keeps ↑ moving the caret through a multi-line draft instead of recalling", async () => {
+    const onSend = vi.fn();
+    useChatStore.setState({ activeChatSessionId: "recall-multiline-session" });
+    render(
+      <ChatComposer onSend={onSend} streaming={false} onAgentModelPick={vi.fn()} />,
+    );
+    const textarea = screen.getByPlaceholderText(/Write a message/) as HTMLTextAreaElement;
+    send(textarea, "an older prompt");
+    await vi.waitFor(() => expect(textarea.value).toBe(""));
+    // Caret on the SECOND line: ↑ belongs to the textarea. (A trailing space
+    // keeps each write a real change event — an identical value fires none, so
+    // the caret would stay where the previous write left it.)
+    typeAt(textarea, "line one\nline two", 14);
+    fireEvent.keyDown(textarea, { key: "ArrowUp" });
+    expect(textarea.value).toBe("line one\nline two");
+    // From the first line it recalls.
+    typeAt(textarea, "line one \nline two", 3);
+    fireEvent.keyDown(textarea, { key: "ArrowUp" });
+    await vi.waitFor(() => expect(textarea.value).toBe("an older prompt"));
+  });
+
+  it("does not offer another chat's prompts", async () => {
+    const onSend = vi.fn();
+    useChatStore.setState({ activeChatSessionId: "recall-chat-a" });
+    render(
+      <ChatComposer onSend={onSend} streaming={false} onAgentModelPick={vi.fn()} />,
+    );
+    const textarea = screen.getByPlaceholderText(/Write a message/) as HTMLTextAreaElement;
+    send(textarea, "chat A prompt");
+    await vi.waitFor(() => expect(textarea.value).toBe(""));
+    cleanup();
+
+    // A different chat: its own composer must not see chat A's history.
+    useChatStore.setState({ activeChatSessionId: "recall-chat-b" });
+    render(
+      <ChatComposer onSend={onSend} streaming={false} onAgentModelPick={vi.fn()} />,
+    );
+    const other = screen.getByPlaceholderText(/Write a message/) as HTMLTextAreaElement;
+    fireEvent.keyDown(other, { key: "ArrowUp" });
+    expect(other.value).toBe("");
+  });
+
+  it("leaves ↑/↓ to the slash popup while it is open", async () => {
+    const onSend = vi.fn();
+    useChatStore.setState({ activeChatSessionId: "recall-popup-session" });
+    render(
+      <ChatComposer onSend={onSend} streaming={false} onAgentModelPick={vi.fn()} />,
+    );
+    const textarea = screen.getByPlaceholderText(/Write a message/) as HTMLTextAreaElement;
+    send(textarea, "history entry");
+    await vi.waitFor(() => expect(textarea.value).toBe(""));
+    typeAt(textarea, "/");
+    const menu = await screen.findByRole("listbox", { name: "Commands" });
+    const items = within(menu).getAllByRole("option");
+    fireEvent.keyDown(textarea, { key: "ArrowDown" });
+    // The popup's own navigation ran; the draft is untouched.
+    expect(items[1].className).toContain("active");
+    expect(textarea.value).toBe("/");
+  });
+});

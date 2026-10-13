@@ -206,6 +206,10 @@ export function pathBasename(path: string): string {
  *  every store change re-render the composer). */
 export const NO_QUEUED_MESSAGES: import("../../state/chat").QueuedChatMessage[] = [];
 
+/** Stable empty list for the per-session prompt-history selector (same reason
+ *  as NO_QUEUED_MESSAGES). */
+export const NO_PROMPT_HISTORY: string[] = [];
+
 /** Compact attachment card shown in the composer before sending — a file
  *  icon, the (truncated) name, a type badge, and a remove button. */
 export function AttachmentCard({

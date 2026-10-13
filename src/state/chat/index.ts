@@ -126,6 +126,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   sessionProjects: {},
   messageQueue: {},
   composerDrafts: {},
+  promptHistory: {},
+  composerSuggestions: {},
 
   livePerf: {},
   lastTurnPerf: {},

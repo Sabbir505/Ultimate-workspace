@@ -351,6 +351,25 @@ export interface ChatState {
    *  React setState the composer used to own). Null session = no-op (nothing
    *  to key the draft on yet; the composer falls back to local state). */
   setComposerDraft: (sessionId: string | null, value: string | ((prev: string) => string)) => void;
+  /** Prompts already sent in each chat, oldest first — the composer's ↑/↓
+   *  recall history. Keyed PER SESSION: one chat's prompts must never surface
+   *  in another chat's composer. In-memory only, capped per session. */
+  promptHistory: Record<string, string[]>;
+  /** Append one sent prompt to a session's recall history. Blank text and a
+   *  verbatim repeat of the previous entry are ignored (resending the same
+   *  prompt shouldn't stack identical rows to arrow through). Null session =
+   *  no-op. */
+  pushPromptHistory: (sessionId: string | null, value: string) => void;
+  /** Suggested next message per chat session ("composer predictions"). The
+   *  backend generates it after a turn completes in the session the user is
+   *  viewing; the composer renders it as ghost text while the draft is empty
+   *  and Tab accepts it (fills the draft, never sends). Ephemeral: in-memory
+   *  only, cleared on send/cancel/error/delete. `null`/absent = no
+   *  suggestion to show. */
+  composerSuggestions: Record<string, string | null>;
+  /** Set or clear one session's suggested next message. Null session = no-op
+   *  (same contract as `setComposerDraft`). */
+  setComposerSuggestion: (sessionId: string | null, text: string | null) => void;
   /** Live per-turn perf snapshot for the composer metrics row, keyed by chat
    *  session id. Updated on throttled `chat:perf` events while a turn streams,
    *  cleared on `chat:done`. Mirrors the `ChatPerfPayload` from the backend. */
@@ -657,6 +676,10 @@ export interface ChatState {
     ttftMs?: number | null,
     tokensPerSecond?: number | null,
     cacheHitRate?: number | null,
+    /** `chat:done`'s payload source — `"automation"` for scheduler-run turns.
+     *  Composer predictions skip those: the run is machine-driven, not a
+     *  conversation the user is steering. Undefined/null = a normal turn. */
+    source?: string | null,
     // The implementation is async (it persists the final row and clears the
     // streaming state). Typed as a Promise so callers that must run AFTER the
     // turn is merged can chain off it — the `chat:done` listener uses this to

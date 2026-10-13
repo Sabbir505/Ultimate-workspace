@@ -127,6 +127,7 @@ export function useChatEvents(): void {
             payload.ttftMs ?? null,
             payload.tokensPerSecond ?? null,
             payload.cacheHitRate ?? null,
+            payload.source ?? null,
           )
           // Read the finalized answer aloud, when the user opted in. Chained
           // off `onDone` because the persisted row (and its id, which keys the

@@ -38,6 +38,7 @@ pub mod reconnect;
 pub mod stream_events;
 pub mod streaming;
 pub mod subagent_model;
+pub mod suggestion;
 pub mod tasks;
 pub mod tools;
 pub mod totp;

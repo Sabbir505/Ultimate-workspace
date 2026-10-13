@@ -59,6 +59,16 @@ const K_AUTO_BIAS = "chat.auto.bias";
 // "model" keeps each parent's provider, "provider::model" targets another
 // one, "" = subagents inherit their parent session's model.
 const K_SUBAGENT_MODEL = "chat.subagentModel";
+/** Composer predictions (chat/suggestion.rs): after a completed turn in the
+ *  session the user is viewing, suggest the next message as ghost text in the
+ *  composer; Tab fills it (never sends). Default ON — only the literal
+ *  "false" disables, the checkpoints/worktrees convention. */
+const K_COMPOSER_PREDICTIONS = "composer.predictions";
+/** Prediction model override: "" = follow the active chat's model, else
+ *  "provider::model" with the `chat.subagentModel` pick syntax (harness
+ *  engine id, API provider id, or local_gguf). Read backend-side by
+ *  chat/suggestion.rs. */
+const K_COMPOSER_PREDICTIONS_MODEL = "composer.predictionsModel";
 
 // Chat text zoom. A multiplier on the chat message/composer/code font sizes
 // via the --chat-zoom CSS var. (The Ctrl +/-/0 shortcuts now drive the
@@ -174,6 +184,14 @@ interface SettingsState {
    *  a bare model id, "provider::model", or "" = inherit the parent
    *  session's model. Overridable per call by the model itself. */
   subagentModel: string;
+  /** Composer predictions: after a completed turn, suggest the user's next
+   *  message as ghost text in the composer (Tab accepts; never auto-sends).
+   *  Default true; only the literal "false" disables. */
+  composerPredictions: boolean;
+  /** Composer predictions: the model that writes the suggestion —
+   *  "" = the active chat's own model, else "provider::model" naming a
+   *  harness engine, an API provider, or local_gguf. */
+  composerPredictionsModel: string;
   /** Per-provider curated model lists with per-model window pins. */
   providerModels: Record<string, ProviderModelEntry[]>;
   /** Chat text zoom multiplier (0.7–1.6). Scales chat message text, the
@@ -216,6 +234,11 @@ interface SettingsState {
   setAutoBias: (bias: "quality" | "balanced" | "economy") => void;
   /** Set the default subagent model (persisted as chat.subagentModel). */
   setSubagentModel: (pick: string) => void;
+  /** Enable/disable composer predictions (persisted as composer.predictions). */
+  setComposerPredictions: (on: boolean) => void;
+  /** Set the composer-predictions model override (persisted; "" = follow the
+   *  active chat's model). */
+  setComposerPredictionsModel: (pick: string) => void;
   setCloudCompactionThreshold: (threshold: number) => void;
   setCloudPinExchanges: (exchanges: number) => void;
   setCloudContextLimit: (limit: number) => void;
@@ -272,6 +295,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   cloudContextLimit: 0,
   autoBias: "balanced",
   subagentModel: "",
+  composerPredictions: true,
+  composerPredictionsModel: "",
   providerModels: {},
   localCompactionSummarizer: "sidecar",
   localCompactionRebuildFromRaw: true,
@@ -281,7 +306,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   monoFont: DEFAULT_MONO_FONT,
 
   load: async () => {
-    const [theme, dnd, notifySound, watchMode, kbJson, urlsJson, paneStateJson, threshold, pin, themesJson, customThemeId, worktreeDefault, checkpointsEnabled, cloudEnabled, cloudThreshold, cloudPin, summarizer, rebuildRaw, cloudContextLimit, autoBiasRaw, chatZoomRaw, appZoomRaw, uiFontRaw, monoFontRaw, subagentModelRaw] = await Promise.all([
+    const [theme, dnd, notifySound, watchMode, kbJson, urlsJson, paneStateJson, threshold, pin, themesJson, customThemeId, worktreeDefault, checkpointsEnabled, cloudEnabled, cloudThreshold, cloudPin, summarizer, rebuildRaw, cloudContextLimit, autoBiasRaw, chatZoomRaw, appZoomRaw, uiFontRaw, monoFontRaw, subagentModelRaw, composerPredictionsRaw, composerPredictionsModelRaw] = await Promise.all([
       getSetting(K_THEME),
       getSetting(K_DND),
       getSetting(K_NOTIFY_SOUND),
@@ -307,6 +332,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       getSetting(K_UI_FONT),
       getSetting(K_MONO_FONT),
       getSetting(K_SUBAGENT_MODEL),
+      getSetting(K_COMPOSER_PREDICTIONS),
+      getSetting(K_COMPOSER_PREDICTIONS_MODEL),
     ]);
     // Per-provider curated model lists: the index names the providers that
     // have one; each list is then read from its own key. A missing or
@@ -426,6 +453,12 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         next.autoBias = autoBiasRaw;
       }
       if (subagentModelRaw) next.subagentModel = subagentModelRaw.trim();
+      // Default ON: only the literal "false" disables (the backend gate in
+      // chat/suggestion.rs reads the same key with the same convention).
+      if (composerPredictionsRaw === "false") next.composerPredictions = false;
+      if (composerPredictionsModelRaw) {
+        next.composerPredictionsModel = composerPredictionsModelRaw.trim();
+      }
       if (chatZoomRaw) {
         const v = Number(chatZoomRaw);
         if (Number.isFinite(v) && v >= CHAT_ZOOM_MIN && v <= CHAT_ZOOM_MAX) next.chatZoom = v;
@@ -577,6 +610,17 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     const value = pick.trim();
     set({ subagentModel: value });
     persistSetting(K_SUBAGENT_MODEL, value);
+  },
+
+  setComposerPredictions: (on) => {
+    set({ composerPredictions: on });
+    persistSetting(K_COMPOSER_PREDICTIONS, String(on));
+  },
+
+  setComposerPredictionsModel: (pick) => {
+    const value = pick.trim();
+    set({ composerPredictionsModel: value });
+    persistSetting(K_COMPOSER_PREDICTIONS_MODEL, value);
   },
 
   setCloudCompactionThreshold: (threshold) => {

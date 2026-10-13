@@ -22,6 +22,7 @@ import { LlamaAdvancedFields } from "../chat/LlamaAdvancedFields";
 import { KnowledgePanel } from "./KnowledgePanel";
 import { WikiPanel } from "./WikiPanel";
 import { MemoryPanel } from "./MemoryPanel";
+import { ComposerPanel } from "./ComposerPanel";
 import { SubagentModelPanel } from "./SubagentModelPanel";
 import { MeshPanel } from "./MeshPanel";
 import { ImprovementsPanel } from "./ImprovementsPanel";
@@ -113,6 +114,7 @@ import {
   ShieldOff,
   Smartphone,
   Bell,
+  MessageSquareText,
   Sparkles,
   Users,
   Network,
@@ -123,6 +125,7 @@ type Category =
   | "appearance"
   | "notifications"
   | "assistant"
+  | "composer"
   | "improvements"
   | "subagents"
   | "harnesses"
@@ -146,6 +149,7 @@ const CATEGORY_KEYS: Category[] = [
   "appearance",
   "notifications",
   "assistant",
+  "composer",
   "improvements",
   "subagents",
   "harnesses",
@@ -178,6 +182,7 @@ function SettingsNavIcon({ category }: { category: Category }) {
     case "appearance": return <Palette {...props} />;
     case "notifications": return <Bell {...props} />;
     case "assistant": return <Bot {...props} />;
+    case "composer": return <MessageSquareText {...props} />;
     case "improvements": return <Sparkles {...props} />;
     case "subagents": return <GitFork {...props} />;
     case "apikeys": return <KeyRound {...props} />;
@@ -217,6 +222,7 @@ const NAV_SECTIONS: Array<{ title: string; items: CategoryDef[] }> = [
       { key: "appearance", label: "Appearance", sub: "Theme & colors" },
       { key: "notifications", label: "Notifications", sub: "DND & sound" },
       { key: "assistant", label: "Assistant", sub: "System prompt & skills" },
+      { key: "composer", label: "Composer", sub: "Predictions & suggestions" },
       { key: "improvements", label: "Improvements", sub: "Self-improving artifacts" },
     ],
   },
@@ -570,6 +576,7 @@ export function SettingsView() {
               {category === "notifications" && <NotificationsPanel />}
 
               {category === "assistant" && <AssistantPanel />}
+              {category === "composer" && <ComposerPanel />}
               {category === "websearch" && <WebSearchPanel />}
               {category === "git" && <GitPanel />}
 

@@ -3,6 +3,9 @@
 import type { ChatStoreGet, ChatStoreSet, QueuedChatMessage } from "../types";
 import { queueIdCounter } from "../moduleState";
 
+/** Max recalled prompts kept per chat session. */
+const PROMPT_HISTORY_LIMIT = 200;
+
 export function createComposerSlice(set: ChatStoreSet, get: ChatStoreGet) {
   return {
     setComposerDraft: (sessionId: string | null, value: string | ((prev: string) => string)) => {
@@ -12,6 +15,34 @@ export function createComposerSlice(set: ChatStoreSet, get: ChatStoreGet) {
         const next = typeof value === "function" ? value(prev) : value;
         if (next === prev) return s;
         return { composerDrafts: { ...s.composerDrafts, [sessionId]: next } };
+      });
+    },
+
+    pushPromptHistory: (sessionId: string | null, value: string) => {
+      if (!sessionId) return;
+      const text = value.trim();
+      if (!text) return;
+      set((s) => {
+        const prev = s.promptHistory[sessionId] ?? [];
+        // A verbatim repeat of the newest entry adds nothing to navigate.
+        if (prev[prev.length - 1] === text) return s;
+        return {
+          promptHistory: {
+            ...s.promptHistory,
+            // Capped: an unbounded per-session list is a memory leak on a
+            // long-running chat, and nobody arrows back past a few hundred.
+            [sessionId]: [...prev, text].slice(-PROMPT_HISTORY_LIMIT),
+          },
+        };
+      });
+    },
+
+    setComposerSuggestion: (sessionId: string | null, text: string | null) => {
+      if (!sessionId) return;
+      const next = text && text.trim() ? text : null;
+      set((s) => {
+        if ((s.composerSuggestions[sessionId] ?? null) === next) return s;
+        return { composerSuggestions: { ...s.composerSuggestions, [sessionId]: next } };
       });
     },
 

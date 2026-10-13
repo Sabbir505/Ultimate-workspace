@@ -3557,18 +3557,21 @@ button.chat-mermaid-open:focus-visible {
   padding: 0 max(14px, calc((100% - 780px) / 2)) 6px;
 }
 /* present_plan proposal docked NOTCH: mounted inside the composer dock —
-   .plan-preview (sidebar.css) supplies the centered 780px column and notch
-   container. Fused flush onto the composer card: flat bottom, no bottom
-   border, top-only radius; the -11px margin cancels the composer wrapper's
-   10px top padding plus the card's 1px top border. Dock height is measured,
-   so the transcript re-pins above it. */
+   .plan-preview (sidebar.css) supplies the composer card's own column and
+   notch container. Fused flush onto the composer card: flat bottom, no
+   bottom border, top-only radius, rim-only shadow; the -11px margin cancels
+   the composer wrapper's 10px top padding plus the card's 1px top border.
+   The 18px side margins drop the card in from the composer's rounded
+   corners exactly like the goal notch tab. Dock height is measured, so the
+   transcript re-pins above it. */
 .chat-composer-dock > .plan-preview {
   margin-bottom: -11px;
 }
 .chat-composer-dock .plan-proposal-card {
+  margin: 0 18px;
   border-radius: 12px 12px 0 0;
   border-bottom: none;
-  box-shadow: 0 -1px 0 var(--surface);
+  box-shadow: var(--glass-rim);
   max-height: min(52vh, 480px);
 }
 /* A tall plan scrolls INSIDE the card body — the title, hint and the
@@ -3874,14 +3877,16 @@ button.chat-mermaid-open:focus-visible {
  * Docked NOTCH on the composer: the .plan-preview container fuses its flat
  * bottom onto the composer card's top border (the same -11px overlap the
  * plan proposal uses), and the body is the composer card's liquid glass —
- * a true translucent gradient with heavy frost. Deliberately LEAN: badge +
- * title, one row per option, a free-text line, Skip/Answer. Option
- * descriptions ride the hover tooltip, not the layout. */
+ * a true translucent gradient with heavy frost. The 18px side margins and
+ * rim-only shadow are the goal notch's exact dock geometry. Deliberately
+ * LEAN: badge + title, one row per option, a free-text line, Skip/Answer.
+ * Option descriptions ride the hover tooltip, not the layout. */
 .question-card {
   --question-accent: #8b7cf6;
   display: flex;
   flex-direction: column;
   gap: 8px;
+  margin: 0 18px;
   padding: 10px 14px 12px;
   border: 1px solid var(--border);
   border-radius: 12px 12px 0 0;
@@ -3893,7 +3898,7 @@ button.chat-mermaid-open:focus-visible {
   );
   backdrop-filter: blur(24px) saturate(160%);
   -webkit-backdrop-filter: blur(24px) saturate(160%);
-  box-shadow: 0 -1px 0 var(--surface);
+  box-shadow: var(--glass-rim);
   max-height: min(52vh, 420px);
   overflow-y: auto;
   outline: none;
@@ -3907,7 +3912,7 @@ button.chat-mermaid-open:focus-visible {
 }
 .question-card:focus-within {
   border-color: color-mix(in srgb, var(--question-accent) 40%, var(--border));
-  box-shadow: 0 -1px 0 var(--surface), 0 0 24px -4px var(--accent-glow);
+  box-shadow: var(--glass-rim), 0 0 24px -4px var(--accent-glow);
 }
 .question-card-head {
   display: flex;
@@ -4032,7 +4037,9 @@ button.chat-mermaid-open:focus-visible {
  * paused), the live checklist (below the stream), and the sidebar lists.
  * The proposal card deliberately mirrors the classic plan-preview "notch"
  * card (sidebar.css): same surface, title row with clipboard icon, and
- * button row — with a Reject step added. */
+ * button row — with a Reject step added. The surface is the composer card's
+ * liquid glass (the exact recipe the goal notch and question card wear), so
+ * docked it reads as one material with the card it is fused to. */
 .plan-proposal-card {
   display: flex;
   flex-direction: column;
@@ -4040,12 +4047,26 @@ button.chat-mermaid-open:focus-visible {
   padding: 10px 14px 12px;
   border: 1px solid var(--border);
   border-radius: 12px;
-  background: var(--surface);
-  box-shadow: var(--glass-drop-soft);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 45%, transparent),
+    color-mix(in srgb, var(--surface-glass) 25%, transparent)
+  );
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  box-shadow: var(--glass-rim), var(--glass-drop-soft);
   outline: none;
 }
+/* Light theme: the same bump the composer card gets, so both stay matched. */
+:root[data-theme="light"] .plan-proposal-card {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 55%, transparent),
+    color-mix(in srgb, var(--surface-glass) 38%, transparent)
+  );
+}
 .plan-proposal-card:focus-visible {
-  box-shadow: var(--glass-drop-soft), 0 0 0 2px color-mix(in srgb, #5aa7f0 45%, transparent);
+  box-shadow: var(--glass-rim), var(--glass-drop-soft), 0 0 0 2px color-mix(in srgb, #5aa7f0 45%, transparent);
 }
 /* The shared plan-preview rows carry their own padding for the docked
    preview — neutralize it inside the floating proposal card. */
@@ -4084,7 +4105,7 @@ button.chat-mermaid-open:focus-visible {
   padding: 8px 10px;
   border: 1px solid var(--border);
   border-radius: 8px;
-  background: var(--surface-2, var(--surface-glass));
+  background: color-mix(in srgb, var(--surface-glass) 45%, transparent);
   font-size: 12px;
   line-height: 1.55;
   color: var(--text-dim);

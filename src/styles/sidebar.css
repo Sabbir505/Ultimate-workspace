@@ -527,9 +527,13 @@ button.sidebar-section-label:hover {
   color: #4caf7d;
 }
 
-/* Plan preview — notched card that blends into the composer below */
+/* Docked notch container for the cards fused onto the composer below (plan
+   proposal, harness question). It reproduces the composer card's OWN column
+   (the same 775px formula .chat-composer uses), so the cards inside — which
+   carry an 18px side inset of their own, the goal notch's exact geometry —
+   land concentric with the card and its notches. */
 .plan-preview {
-  padding: 2px max(14px, calc((100% - 780px) / 2)) 0;
+  padding: 2px max(14px, calc((100% - 775px) / 2)) 0;
   flex-shrink: 0;
   margin-bottom: -1px;
   position: relative;

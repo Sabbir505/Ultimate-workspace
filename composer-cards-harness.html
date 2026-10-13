@@ -1,0 +1,20 @@
+<!doctype html>
+<!-- Dev-only harness (not part of the app build): the docked composer cards
+     (present_plan proposal + harness question) re-skinned in the goal notch's
+     language — the composer card's liquid glass, 18px side inset, rim-only
+     shadow — with the goal notch and the in-card queue notch for comparison,
+     all over a real app wallpaper preset (public/sideart) so the frost has
+     something to refract. Serve `npx vite` and open
+     /composer-cards-harness.html — the floating switcher flips card,
+     wallpaper, goal notch, and theme. -->
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Composer cards harness</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/dev/composerCardsHarness.tsx"></script>
+  </body>
+</html>

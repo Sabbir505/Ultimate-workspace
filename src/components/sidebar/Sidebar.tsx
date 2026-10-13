@@ -1,10 +1,10 @@
 // Sidebar (Â§5): inbox-style layout â€” brand/search header, Artifacts,
-// Automations, then the Chat History inbox (every chat in one flat list,
+// Automations, then the Chat History inbox (unbound chats in one flat list,
 // two lines per row: title + working-spinner/relative time, then the
 // project Â· branch context and the provider/harness/local-model brand icon)
-// and footer links to Settings / Skills Library / Cost Dashboard. The old
-// Projects tree is retired: project + branch live on each chat's second
-// row instead of a nested tree.
+// and footer links to Settings / Skills Library / Cost Dashboard. Chats bound
+// to a project are nested under that project in the Projects panel, so they
+// are filtered out of this list.
 //
 // Visual style: white / frosted glass (light) with a matching dark variant.
 // The <aside> shell is bg-white/95 in light, bg-slate-900/60 in dark, both
@@ -321,9 +321,11 @@ export function Sidebar() {
     }
   }, [chatLoaded, loadSessions, loadConfig]);
 
-  // Inbox list: EVERY chat in one flat list — project-bound chats included
-  // (their project/branch now live on the row's second line instead of a
-  // nested tree). Starred chats float to the top, then most-recent.
+  // Inbox list: unbound chats only. A chat bound to a project lives nested
+  // under that project in the Projects panel — listing it here too showed
+  // every project chat in TWO places at once. A binding that points at a
+  // project which no longer exists has no other home, so it stays here.
+  // Starred chats float to the top, then most-recent.
   // nowTick: recomputes the precomputed timeLabels twice a minute so a row's
   // "2m ago" doesn't freeze when the app is idle (the store only pushes
   // session-list changes on real activity).
@@ -331,6 +333,10 @@ export function Sidebar() {
   const chatRowData: ChatSessionRowData[] = useMemo(
     () =>
       chatSessions
+        .filter((s) => {
+          const projectId = s.projectId ?? sessionProjects[s.id] ?? null;
+          return projectId == null || !projects.some((p) => p.id === projectId);
+        })
         .map((s) => {
           const projectId = s.projectId ?? sessionProjects[s.id] ?? null;
           const project = projectId

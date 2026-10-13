@@ -196,9 +196,16 @@ export function Sidebar() {
   // A wiki build runs in the BACKEND (leaving the view never cancels it), so
   // the sidebar keeps a visible pulse on the Wiki entry from any view — the
   // only build indicator outside the wiki surface itself.
-  const wikiBuilding =
-    useWikiStore((s) => s.progress?.state === "running") ||
-    useWikiStore((s) => s.status?.jobRunning === true);
+  //
+  // ONE selector, not two `useWikiStore` calls joined by `||`: a build
+  // starting flips the first to true, JS short-circuits the right operand,
+  // and the second HOOK never runs that render — the hook count changes
+  // mid-life, every later hook shifts a slot, and the crash surfaces far away
+  // (React's deps compare reading `.length` off a `useRef`'s object by way of
+  // `useViewNav`'s `useCallback`). A single selector also subscribes once.
+  const wikiBuilding = useWikiStore(
+    (s) => s.progress?.state === "running" || s.status?.jobRunning === true,
+  );
   // Projects panel (second sidebar) — open state + toggle, persisted.
   const projectsPanelOpen = useProjectsSidebarStore((s) => s.open);
   const toggleProjectsSidebar = useProjectsSidebarStore((s) => s.toggleOpen);

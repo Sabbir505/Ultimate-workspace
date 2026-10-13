@@ -194,6 +194,14 @@ export function WikiView() {
   const openProject = useWikiStore((s) => s.openProject);
   const loadAll = useWikiStore((s) => s.loadAll);
   const loadedPath = useWikiStore((s) => s.loadedPath);
+  // The reader is ONE element across page switches (a project switch unmounts
+  // it — `load` nulls loadedPath first), so without this reset it kept the
+  // previous page's offset and the page you just opened greeted you halfway
+  // down. The layout pass runs before the new body paints, so no flash.
+  const readerRef = useRef<HTMLElement | null>(null);
+  useLayoutEffect(() => {
+    if (readerRef.current) readerRef.current.scrollTop = 0;
+  }, [loadedPath, selectedSlug]);
   const steps = useWikiStore((s) => s.steps);
   const project = useMemo(
     () =>
@@ -717,7 +725,7 @@ export function WikiView() {
                 />
               </div>
             )}
-            <article className="wiki-reader" data-testid="wiki-reader">
+            <article className="wiki-reader" data-testid="wiki-reader" ref={readerRef}>
             {pageDetail ? (
               <>
                 {!bodyStartsWithH1 && <h1>{pageDetail.title}</h1>}

@@ -343,6 +343,25 @@ describe("WikiView overlay", () => {
 
   // ── regressions ──────────────────────────────────────────────────────────
 
+  it("opens a newly selected page at the top, not at the previous page's offset", async () => {
+    // The reader is ONE element across page switches (only a project switch
+    // remounts it), so scrolled-down page A handed its offset to page B.
+    render(<WikiView />);
+    await waitFor(() => {
+      expect(screen.getByTestId("wiki-reader")).toBeTruthy();
+    });
+    // Read the first page all the way down.
+    const reader = screen.getByTestId("wiki-reader");
+    reader.scrollTop = 640;
+    expect(reader.scrollTop).toBe(640);
+    // Select the other page — a project switch is not involved.
+    fireEvent.click(screen.getByTestId("wiki-page-mesh"));
+    await waitFor(() => {
+      expect(screen.getByText(/Stale — its cited sources changed/)).toBeTruthy();
+    });
+    expect(screen.getByTestId("wiki-reader").scrollTop).toBe(0);
+  });
+
   it("still reports the update note after a build has run", async () => {
     // The store deliberately keeps the terminal `progress` object (the title
     // pill fades out on it), and the view gated the note on `!progress` — so

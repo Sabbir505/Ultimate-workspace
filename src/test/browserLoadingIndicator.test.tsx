@@ -254,7 +254,7 @@ describe("browser loading indicator", () => {
 
     const back = (Array.from(
       container.querySelectorAll(".browser-urlbar button"),
-    ) as HTMLButtonElement[]).find((b) => b.textContent === "←")!;
+    ) as HTMLButtonElement[]).find((b) => b.title.startsWith("Back"))!;
     expect(back.disabled).toBe(false);
 
     await act(async () => {
@@ -280,7 +280,7 @@ describe("browser loading indicator", () => {
     });
 
     const reload = (Array.from(container.querySelectorAll(".browser-urlbar button")) as HTMLButtonElement[])
-      .find((b) => b.textContent === "↻")!;
+      .find((b) => b.title === "Refresh")!;
     await act(async () => {
       fireEvent.click(reload);
     });

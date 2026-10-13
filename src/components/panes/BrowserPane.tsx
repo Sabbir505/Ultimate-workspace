@@ -24,7 +24,25 @@
 // browser_set_bounds — the same path the tool-panel splitter drag uses.
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { Eraser, History, Maximize2, Minimize2, Pause, Play, Square } from "lucide-react";
+import {
+  ArrowLeft,
+  ArrowRight,
+  Bug,
+  Check,
+  Copy,
+  Eraser,
+  ExternalLink,
+  Globe,
+  History,
+  Home,
+  Maximize2,
+  Minimize2,
+  MoreHorizontal,
+  Pause,
+  Play,
+  RotateCw,
+  Square,
+} from "lucide-react";
 import {
   createHistory,
   currentUrl,
@@ -261,6 +279,9 @@ export function BrowserPane({ pane, visible = true }: Props) {
   const [addressDrafts, setAddressDrafts] = useState<Record<string, string>>({});
 
   const [copied, setCopied] = useState(false);
+  /** Overflow (home / devtools) menu in the URL bar. */
+  const [urlbarMenuOpen, setUrlbarMenuOpen] = useState(false);
+  const urlbarMenuRef = useRef<HTMLDivElement>(null);
   const iframeRefs = useRef<Map<string, HTMLIFrameElement>>(new Map());
   const bodyRef = useRef<HTMLDivElement>(null);
   const timeoutRefs = useRef<Map<string, number>>(new Map());
@@ -332,8 +353,21 @@ export function BrowserPane({ pane, visible = true }: Props) {
   // entry lands closes that race.
   useEffect(() => {
     if (!tauriRuntimeAvailable()) {
-      // Mark all tabs as iframe-fallback.
+      // Mark all tabs as iframe-fallback. Guard the Map identity: this effect
+      // re-runs on every tabStates change (see the dep list), and returning a
+      // fresh Map with identical contents re-triggered it forever — React
+      // killed the render with "Maximum update depth exceeded" the moment the
+      // app ran outside Tauri (iframe fallback). Same identity discipline as
+      // the external-URL sync below.
       setTabStates((prev) => {
+        let changed = false;
+        for (const st of prev.values()) {
+          if (st.nativeOk === null) {
+            changed = true;
+            break;
+          }
+        }
+        if (!changed) return prev;
         const next = new Map(prev);
         for (const [key, st] of next) {
           if (st.nativeOk === null) next.set(key, { ...st, nativeOk: false });
@@ -1027,6 +1061,27 @@ export function BrowserPane({ pane, visible = true }: Props) {
     switchBrowserTab(paneId, index);
   };
 
+  // The overflow menu's dismiss path — mirrors the notification bell: Escape
+  // closes it, and a pointerdown anywhere outside (including on the page's
+  // toolbar) closes it too.
+  useEffect(() => {
+    if (!urlbarMenuOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setUrlbarMenuOpen(false);
+    };
+    const onPointerDown = (e: PointerEvent) => {
+      if (urlbarMenuRef.current && !urlbarMenuRef.current.contains(e.target as Node)) {
+        setUrlbarMenuOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.removeEventListener("pointerdown", onPointerDown);
+    };
+  }, [urlbarMenuOpen]);
+
   return (
     <>
       {/* Tab bar */}
@@ -1068,77 +1123,155 @@ export function BrowserPane({ pane, visible = true }: Props) {
         </button>
       </div>
 
-      {/* URL bar */}
+      {/* URL bar: history cluster | omnibox | tools + actions. The omnibox is
+          the row's only flexible surface; the clusters around it are fixed
+          trays of icon-only buttons, so a narrow pane shrinks the address —
+          never the controls. */}
       <div className="browser-urlbar">
-        <button
-          className="ghost"
-          title="Back (uses the page's real history)"
-          onClick={back}
-          disabled={!canGoBack}
-        >
-          ←
-        </button>
-        <button
-          className="ghost"
-          title="Forward (uses the page's real history)"
-          onClick={forward}
-          disabled={!canGoForward}
-        >
-          →
-        </button>
-        <button className="ghost" title="Refresh" onClick={refresh}>
-          ↻
-        </button>
-        <button
-          className="ghost"
-          title="Open DevTools (console + network)"
-          onClick={() => void browserOpenDevtools(paneId, activeTabId).catch(() => {})}
-        >
-          ⚙
-        </button>
-        <button className="ghost" title="Home (project default URL)" onClick={goHome}>
-          ⌂
-        </button>
-        <input
-          value={addressDrafts[activeTabId] ?? activeTabState?.address ?? ""}
-          onChange={(e) => {
-            const value = e.target.value;
-            setAddressDrafts((prev) => ({ ...prev, [activeTabId]: value }));
-          }}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              const addr = addressDrafts[activeTabId] ?? tabStates.get(activeTabId)?.address ?? "";
-              if (addr) navigate(addr);
-            }
-          }}
-          // NO onBlur navigate: the native webview steals focus mid-typing
-          // (every navigation/bounds change), the input blurred after each
-          // character, and blur-navigate fired a search per KEYSTROKE
-          // ("g" → bing?q=g, "o" → bing?q=o…). Navigate on Enter only.
-          // Select the whole URL on focus/click so a single keystroke replaces it
-          // — matches a normal browser's address bar behavior.
-          onFocus={(e) => e.currentTarget.select()}
-          onClick={(e) => e.currentTarget.select()}
-          spellCheck={false}
-        />
-        {activeTabState?.loading && (
-          <span className="browser-spinner" role="status" aria-label="Page loading" />
-        )}
-        <button className="ghost" title="Copy URL" onClick={copyUrl}>
-          {copied ? "✓" : "⧉"}
-        </button>
-        <button className="ghost" title="Open in external browser" onClick={openExternal}>
-          ↗
-        </button>
-        <button
-          className={`ghost browser-fs-btn${fullscreen ? " active" : ""}`}
-          title={fullscreen ? "Exit full screen (Esc)" : "Full screen"}
-          aria-label={fullscreen ? "Exit full screen" : "Enter full screen"}
-          aria-pressed={fullscreen}
-          onClick={() => toggleBrowserFullscreen(paneId)}
-        >
-          {fullscreen ? <Minimize2 size={13} aria-hidden /> : <Maximize2 size={13} aria-hidden />}
-        </button>
+        <div className="urlbar-group">
+          <button
+            className="ghost urlbar-btn"
+            title="Back (uses the page's real history)"
+            aria-label="Back"
+            onClick={back}
+            disabled={!canGoBack}
+          >
+            <ArrowLeft size={14} strokeWidth={1.8} aria-hidden />
+          </button>
+          <button
+            className="ghost urlbar-btn"
+            title="Forward (uses the page's real history)"
+            aria-label="Forward"
+            onClick={forward}
+            disabled={!canGoForward}
+          >
+            <ArrowRight size={14} strokeWidth={1.8} aria-hidden />
+          </button>
+          <button className="ghost urlbar-btn" title="Refresh" aria-label="Refresh" onClick={refresh}>
+            <RotateCw size={13} strokeWidth={1.9} aria-hidden />
+          </button>
+        </div>
+
+        <div className="urlbar-omnibox">
+          {activeTab?.faviconUrl ? (
+            <img
+              className="urlbar-favicon"
+              src={activeTab.faviconUrl}
+              alt=""
+              onError={(e) => {
+                // Site has no /favicon.ico — drop the img instead of
+                // showing a broken-image glyph forever.
+                e.currentTarget.style.display = "none";
+              }}
+            />
+          ) : (
+            <Globe className="urlbar-site-glyph" size={13} strokeWidth={1.8} aria-hidden />
+          )}
+          <input
+            className="urlbar-input"
+            aria-label="Address"
+            value={addressDrafts[activeTabId] ?? activeTabState?.address ?? ""}
+            onChange={(e) => {
+              const value = e.target.value;
+              setAddressDrafts((prev) => ({ ...prev, [activeTabId]: value }));
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                const addr = addressDrafts[activeTabId] ?? tabStates.get(activeTabId)?.address ?? "";
+                if (addr) navigate(addr);
+              }
+            }}
+            // NO onBlur navigate: the native webview steals focus mid-typing
+            // (every navigation/bounds change), the input blurred after each
+            // character, and blur-navigate fired a search per KEYSTROKE
+            // ("g" → bing?q=g, "o" → bing?q=o…). Navigate on Enter only.
+            // Select the whole URL on focus/click so a single keystroke replaces it
+            // — matches a normal browser's address bar behavior.
+            onFocus={(e) => e.currentTarget.select()}
+            onClick={(e) => e.currentTarget.select()}
+            spellCheck={false}
+          />
+          {activeTabState?.loading && (
+            <span className="browser-spinner" role="status" aria-label="Page loading" />
+          )}
+        </div>
+
+        {/* Overflow: the two tools nobody reaches for every page live one
+            click away instead of crowding the bar's right edge. */}
+        <div className="urlbar-overflow" ref={urlbarMenuRef}>
+          <button
+            className={`ghost urlbar-btn${urlbarMenuOpen ? " active" : ""}`}
+            title="More browser tools"
+            aria-label="More browser tools"
+            aria-haspopup="menu"
+            aria-expanded={urlbarMenuOpen}
+            onClick={() => setUrlbarMenuOpen((v) => !v)}
+          >
+            <MoreHorizontal size={14} strokeWidth={1.8} aria-hidden />
+          </button>
+          {urlbarMenuOpen && (
+            <div className="urlbar-menu" role="menu" aria-label="Browser tools">
+              <button
+                className="urlbar-menu-item"
+                role="menuitem"
+                onClick={() => {
+                  setUrlbarMenuOpen(false);
+                  goHome();
+                }}
+              >
+                <Home size={13} strokeWidth={1.8} aria-hidden />
+                Home (project default URL)
+              </button>
+              <button
+                className="urlbar-menu-item"
+                role="menuitem"
+                onClick={() => {
+                  setUrlbarMenuOpen(false);
+                  void browserOpenDevtools(paneId, activeTabId).catch(() => {});
+                }}
+              >
+                <Bug size={13} strokeWidth={1.8} aria-hidden />
+                Open DevTools (console + network)
+              </button>
+            </div>
+          )}
+        </div>
+
+        <div className="urlbar-group">
+          <button
+            className="ghost urlbar-btn"
+            title={copied ? "Copied!" : "Copy URL"}
+            aria-label={copied ? "URL copied" : "Copy URL"}
+            onClick={copyUrl}
+          >
+            {copied ? (
+              <Check size={14} strokeWidth={1.9} aria-hidden />
+            ) : (
+              <Copy size={14} strokeWidth={1.8} aria-hidden />
+            )}
+          </button>
+          <button
+            className="ghost urlbar-btn"
+            title="Open in external browser"
+            aria-label="Open in external browser"
+            onClick={openExternal}
+          >
+            <ExternalLink size={13} strokeWidth={1.8} aria-hidden />
+          </button>
+          <button
+            className={`ghost urlbar-btn browser-fs-btn${fullscreen ? " active" : ""}`}
+            title={fullscreen ? "Exit full screen (Esc)" : "Full screen"}
+            aria-label={fullscreen ? "Exit full screen" : "Enter full screen"}
+            aria-pressed={fullscreen}
+            onClick={() => toggleBrowserFullscreen(paneId)}
+          >
+            {fullscreen ? (
+              <Minimize2 size={13} strokeWidth={1.8} aria-hidden />
+            ) : (
+              <Maximize2 size={13} strokeWidth={1.8} aria-hidden />
+            )}
+          </button>
+        </div>
       </div>
 
       {/* Indeterminate load bar. It lives in the DOM chrome directly BELOW the

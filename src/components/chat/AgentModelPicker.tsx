@@ -674,7 +674,13 @@ export function AgentModelPickerInner({
     const h = harnessIdOf(agent);
     if (h) {
       const name = harnesses.find((x) => x.id === h)?.displayName ?? h;
-      return model ? (modelLabels?.[model] ?? model) : name;
+      if (!model) return name;
+      // The harness prefix rides INSIDE the model id ("opencode/mimo-…") — and
+      // the catalog's own labels usually repeat it verbatim — so strip it from
+      // whatever resolves here: the chip already shows the harness icon, and
+      // the family must not be spelled twice. Tooltip keeps "harness · model".
+      const raw = modelLabels?.[model] ?? model;
+      return raw.startsWith(`${h}/`) ? raw.slice(h.length + 1) : raw;
     }
     const a = acpIdOf(agent);
     if (a) return acpAgents.find((x) => x.id === a)?.displayName ?? a;
@@ -696,7 +702,10 @@ export function AgentModelPickerInner({
     const h = harnessIdOf(agent);
     if (h) {
       const name = harnesses.find((x) => x.id === h)?.displayName ?? h;
-      return model ? `${name} · ${modelLabels?.[model] ?? model}` : name;
+      if (!model) return name;
+      const raw = modelLabels?.[model] ?? model;
+      const bare = raw.startsWith(`${h}/`) ? raw.slice(h.length + 1) : raw;
+      return `${name} · ${bare}`;
     }
     const a = acpIdOf(agent);
     if (a) return acpAgents.find((x) => x.id === a)?.displayName ?? a;
@@ -806,7 +815,6 @@ export function AgentModelPickerInner({
         ) : (
           <>⌘ Select agent</>
         )}
-        <span className="model-effort-chevron" aria-hidden="true">▾</span>
       </button>
 
       {/* The popup is portaled to <body>: rendered inside the composer card

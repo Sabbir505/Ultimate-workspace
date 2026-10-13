@@ -31,7 +31,17 @@ export function effortAppliesTo(
   if (!model || model === "auto") return false;
   const p = (provider ?? "").toLowerCase();
   if (p === "anthropic" || p === "anthropic_compatible") return true;
-  if (p === "openai" || p === "openrouter" || p === "openai_compatible") {
+  if (
+    p === "openai" ||
+    p === "openrouter" ||
+    p === "openai_compatible" ||
+    // Both explicit API-style kinds map effort onto their wire's reasoning
+    // control (chat completions: `reasoning_effort`; Responses: the nested
+    // `reasoning` object). Endpoints/model ids that don't honor it ignore the
+    // field, same as the pre-existing OpenAI-family behavior.
+    p === "openai_chat" ||
+    p === "openai_responses"
+  ) {
     return supportsReasoningEffort(model);
   }
   if (p === "auto") {

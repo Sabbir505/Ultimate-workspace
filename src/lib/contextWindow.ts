@@ -345,10 +345,15 @@ export async function contextWindowForModel(
     debugContext("anthropic", `'${model}' → no live entry, registry stands`);
     return null;
   }
-  if (p === "openai_compatible") {
-    // Generic OpenAI-compatible relays (incl. the commandcode family):
-    // probe their /models for `context_length` — the same field OpenRouter
-    // popularized. Servers that don't publish it return an empty map.
+  if (
+    p === "openai_compatible" ||
+    p === "openai_chat" ||
+    p === "openai_responses"
+  ) {
+    // Generic OpenAI-compatible relays (incl. the commandcode family) and the
+    // explicit API-style kinds: probe their /models for `context_length` — the
+    // same field OpenRouter popularized. Servers that don't publish it return
+    // an empty map.
     const windows = await fetchProviderModelWindows(provider ?? "");
     if (!windows || Object.keys(windows).length === 0) {
       debugContext("compatible", `'${model}' → no live windows published, registry stands`);

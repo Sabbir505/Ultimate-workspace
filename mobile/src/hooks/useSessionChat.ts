@@ -60,6 +60,7 @@ import {
   onCheckpoints,
   onConnected,
   onDomainError,
+  isSessionLive,
   type ChatCheckpointInfo,
   useRelay,
   type SessionMessageRecord,
@@ -106,6 +107,61 @@ export interface SessionMetaInfo {
 const ALWAYS_ALLOWABLE_TOOLS = new Set([
   'write_file', 'edit_file', 'delete_file', 'move_file', 'copy_file',
 ]);
+
+/** The persisted first page of one chat (`chat:<sessionId>` cache entry).
+ *  Older builds stored the bare array. */
+interface CachedChatPage {
+  messages: SessionMessageRecord[];
+  hasMore: boolean;
+}
+
+/**
+ * Read the cached first page for a chat. Pre-shape entries (a bare array)
+ * still hydrate — only `hasMore` degrades to false, which merely hides the
+ * "Load older messages" row until the fresh page lands.
+ */
+function readCachedPage(sessionId: string): CachedChatPage {
+  const cached = screenCacheGet<CachedChatPage | SessionMessageRecord[]>(`chat:${sessionId}`);
+  if (Array.isArray(cached)) return { messages: cached, hasMore: false };
+  return { messages: cached?.messages ?? [], hasMore: cached?.hasMore ?? false };
+}
+
+/**
+ * Split the in-flight reply out of a message page.
+ *
+ * While a harness/CLI turn streams, the desktop crash-flushes a PARTIAL
+ * assistant row every ~3s (`agent_sessions/lifecycle.rs` PartialFlush). Its
+ * `completed_at` stays NULL until `finish_turn` persists the real row — so an
+ * incomplete assistant row IS the running reply, not a finished message.
+ * When the session has a turn live per the wire, move that row out of the
+ * list and hand its content to the streaming tail; leaving it in the page is
+ * what made a re-opened chat show the running turn as a completed bubble
+ * (and, once tokens resumed, as a second bubble below the tail).
+ */
+function foldLivePartial(
+  messages: SessionMessageRecord[],
+  live: boolean,
+): { rows: SessionMessageRecord[]; partial: string | null } {
+  if (!live) return { rows: messages, partial: null };
+  const newest = messages[0];
+  if (!newest || newest.role !== 'assistant' || newest.completedAt != null) {
+    return { rows: messages, partial: null };
+  }
+  return { rows: messages.slice(1), partial: newest.content };
+}
+
+/**
+ * Merge the desktop's partial-row snapshot into our token buffer. Both are
+ * snapshots of the SAME in-flight reply: ours holds every token received
+ * since this hook attached, theirs holds everything up to the last 3s flush.
+ * Keep whichever is the superset — concatenating would double-render the
+ * overlap window (~3s of tokens) our own stream already covered.
+ */
+function mergeLivePrefix(local: string, remote: string): string {
+  if (!local) return remote;
+  if (remote.startsWith(local)) return remote;
+  return local;
+}
 
 export interface SessionChatState {
   /** Newest-first, in render order. The latest user + assistant turn are at the top. */
@@ -162,8 +218,13 @@ const INITIAL: SessionChatState = {
   lastUsage: null,
 };
 
-export function useSessionChat(sessionId: string | null) {
+export function useSessionChat(sessionId: string | null, liveHint = false) {
   const [state, setState] = useState<SessionChatState>(INITIAL);
+  // Session-list hint ("this chat is live") captured for the session-switch
+  // effect. Read through a ref so a re-render with a fresh params object can
+  // never re-run that effect (and re-fetch the whole chat).
+  const liveHintRef = useRef(liveHint);
+  liveHintRef.current = liveHint;
   // Track which session this hook instance is "for" so streaming events
   // from a previous session (delivered after a navigation) don't leak in.
   const currentSessionId = useRef<string | null>(null);
@@ -212,6 +273,19 @@ export function useSessionChat(sessionId: string | null) {
   // the next queued follow-up — the user explicitly STOPPED; a queued chip
   // drains on the next real turn boundary (or "send now").
   const suppressNextFlush = useRef(false);
+  // True when the streaming turn was ADOPTED on entry — this hook instance
+  // never dispatched it (the user opened the chat while it was running, or
+  // started on the desktop/an automation). Its buffer can only hold the tail,
+  // so Done refetches the desktop's authoritative row instead of promoting a
+  // partial reply as a second bubble.
+  const adoptedRef = useRef(false);
+  // Whether the adopted turn was proven live by a WIRE frame (passing through
+  // the relay's owner/watcher forwarding) rather than only by the session
+  // list's `is_live` hint. Only the wire is authoritative enough to let the
+  // watchdog declare a silent turn over — a hint-only adoption stays in its
+  // wait-and-reconcile loop, since long tool phases legitimately stream no
+  // tokens for minutes.
+  const liveFromWireRef = useRef(false);
   const connectedRef = useRef(true);
   // (The `connected` mirror lives just below, after the useRelay()
   // destructure declares it.)
@@ -224,6 +298,7 @@ export function useSessionChat(sessionId: string | null) {
         stopFlushTimer();
         streamActive.current = false;
         turnInFlight.current = false;
+        adoptedRef.current = false;
         cancelledTurn.current = false;
       }
     });
@@ -295,16 +370,28 @@ export function useSessionChat(sessionId: string | null) {
   useEffect(() => {
     const offMessages = onSessionMessages.on(({ sessionId: sid, messages, hasMore, append }) => {
       if (sid !== currentSessionId.current) return;
+      // Live per the wire (a turn started here, on another phone, on the
+      // desktop or by an automation): fold its partial row out of the page —
+      // see foldLivePartial. Doing it on EVERY first page, not just at seed
+      // time, is what keeps the 2.5s poll from re-adding the running reply
+      // as a completed bubble below the streaming tail. Pagination pages are
+      // left untouched: their newest row is an OLDER message, and folding an
+      // incomplete row left over from a crashed turn would silently drop it.
+      const live = isSessionLive(sid);
+      const folded = append
+        ? { rows: messages, partial: null as string | null }
+        : foldLivePartial(messages, live);
+      const { rows, partial } = folded;
       // Persist the first page per chat: an offline reopen paints the cached
       // conversation instead of a blank screen (stale-while-revalidate).
-      if (!append) screenCacheSet(`chat:${sid}`, messages);
+      if (!append) screenCacheSet(`chat:${sid}`, { messages, hasMore });
       setState((s) => {
         // The CALLER says which this is: a pagination reply prepends, a
         // first-page reply replaces. Guessing from ids broke deletion — a
         // shortened first page looked "older" and got prepended, so the
         // deleted message never left the list.
         if (append) {
-          return { ...s, messages: [...messages, ...s.messages], hasMore, loading: false };
+          return { ...s, messages: [...rows, ...s.messages], hasMore, loading: false };
         }
         // An empty page can be a STALE reply that raced a just-sent message
         // (the optimistic bubble isn't persisted yet) — never blank the list
@@ -312,15 +399,22 @@ export function useSessionChat(sessionId: string | null) {
         // page is authoritative: it is how deleting the last remaining
         // message converges. The old unconditional guard pinned that bubble
         // on screen forever.
-        if (messages.length === 0 && s.messages.length > 0) {
+        if (rows.length === 0 && s.messages.length > 0) {
           const onlyOptimistic = s.messages.every((m) => m.id < 0);
           if (onlyOptimistic) return { ...s, hasMore, loading: false };
         }
-        // Convergence: tokens never arrived (the desktop's re-broadcast
-        // didn't reach us) but the server already holds the finished turn
-        // — clear the phantom streaming state instead of spinning forever.
-        if (s.streaming && !streamActive.current && messages[0]?.role === 'assistant') {
-          return { ...s, messages, hasMore, loading: false, streaming: false, streamingContent: '' };
+        // Convergence: the turn is over, one way or another. Either the
+        // newest row the server holds is a finished reply with no in-flight
+        // partial above it (the desktop's re-broadcast / Done frame never
+        // reached us), or the session is not live per the wire and no send of
+        // ours is still waiting for its first token — a stale `is_live` hint
+        // (or a lost Done) would otherwise spin the tail forever. A turn that
+        // IS live lands on its user row once the partial is folded out, so it
+        // is never caught here.
+        const serverFinishedTurn = partial == null && rows[0]?.role === 'assistant';
+        const orphanedTail = !live && !turnInFlight.current;
+        if (s.streaming && !streamActive.current && (serverFinishedTurn || orphanedTail)) {
+          return { ...s, messages: rows, hasMore, loading: false, streaming: false, streamingContent: '' };
         }
         // Keep optimistic bubbles the server hasn't persisted yet — a
         // mid-turn poll must not make the user's sent message blink out of
@@ -336,9 +430,19 @@ export function useSessionChat(sessionId: string | null) {
           }
           return content;
         };
-        const serverContent = new Set(messages.map((m) => baseText(m.content)));
+        const serverContent = new Set(rows.map((m) => baseText(m.content)));
         const pending = s.messages.filter((m) => m.id < 0 && !serverContent.has(baseText(m.content)));
-        return { ...s, messages: [...pending, ...messages], hasMore, loading: false };
+        return {
+          ...s,
+          messages: [...pending, ...rows],
+          hasMore,
+          loading: false,
+          // The turn is still running but this hook instance never saw a
+          // token (the user just opened the chat): the tail must render
+          // anyway — "Working for…" plus typing dots until tokens resume.
+          streaming: s.streaming || live,
+          streamingContent: partial == null ? s.streamingContent : mergeLivePrefix(s.streamingContent, partial),
+        };
       });
     });    // Delete ack: drop the row immediately. The relay also sends a refreshed
     // first page, but waiting on it left the deleted message on screen for
@@ -377,6 +481,11 @@ export function useSessionChat(sessionId: string | null) {
       // and clearing the flag for another conversation's turn let send()
       // start a second concurrent turn mid-stream.
       turnInFlight.current = false;
+      // The desktop names a chat from its first prompt and refines that on the
+      // next turns; the open-chat header reads `meta.title`, which was only
+      // ever fetched on mount — so a phone chat stayed "Chat" for the whole
+      // session even once the title existed. Re-pull it when a turn lands.
+      getSessionMeta(sid);
       // The ack of a locally-cancelled turn: tear nothing down (cancel()
       // already did) and promote nothing — consume the flag and move on.
       if (cancelledTurn.current) {
@@ -385,6 +494,32 @@ export function useSessionChat(sessionId: string | null) {
       }
       // Flush BEFORE promoting so the unflushed tail isn't dropped.
       endStream();
+      // The turn is persisted now, so its checkpoint exists backend-side —
+      // refresh the per-turn changes cards (nothing pushes ChatCheckpoints;
+      // it is a request/response pair).
+      listChatCheckpoints(sid);
+      // ADOPTED turn: this hook opened the chat while the turn was already
+      // running, so the buffer may only hold its tail — promoting that would
+      // write a truncated reply AND leave the desktop's full row to land as a
+      // duplicate. The authoritative row is already persisted (the desktop
+      // writes it before emitting done), so pull the page instead.
+      if (adoptedRef.current) {
+        adoptedRef.current = false;
+        getSessionMessages(sid);
+        setState((s) =>
+          s.streaming || s.streamingContent
+            ? {
+                ...s,
+                streaming: false,
+                streamingContent: '',
+                lastUsage: usage
+                  ? { inputTokens: usage.input_tokens, outputTokens: usage.output_tokens, costUsd: usage.cost_usd }
+                  : s.lastUsage,
+              }
+            : s,
+        );
+        return;
+      }
       setState((s) => {
         if (!s.streaming) return s;
         // Zero tokens arrived (e.g. an empty reply) — nothing to promote;
@@ -433,6 +568,13 @@ export function useSessionChat(sessionId: string | null) {
         return;
       }
       endStream();
+      // An adopted turn's failure is persisted backend-side (the cancel/error
+      // path writes the partial row) — pull the page so the truncated reply
+      // the desktop kept is what stays on screen.
+      if (adoptedRef.current) {
+        adoptedRef.current = false;
+        getSessionMessages(sid);
+      }
       setState((s) => ({ ...s, streaming: false, error, status: null }));
     });
     // Session-scoped relay ops (GetSessionMeta, ListSessionArtifacts, the
@@ -564,6 +706,9 @@ export function useSessionChat(sessionId: string | null) {
     (text: string, attachments: SessionChatAttachment[] = [], isRetry = false): boolean => {
       if (!sessionId) return false;
       tokenReceived.current = false;
+      // This hook is dispatching the turn itself, so its buffer holds the
+      // whole reply: Done may promote it (no refetch needed).
+      adoptedRef.current = false;
       turnStartedAt.current = Math.floor(Date.now() / 1000);
       // A watchdog retry must NOT reset the attempt counter (infinite loop);
       // every fresh user send does.
@@ -631,6 +776,10 @@ export function useSessionChat(sessionId: string | null) {
         // honestly. No cancel storm, no re-sends.
         turnInFlight.current = false;
         streamActive.current = false;
+        // Give up on the adopted turn: leaving `adoptedRef` set would queue
+        // the user's NEXT send behind a turn that is already over (and the
+        // queue only drains on a streaming transition, which never comes).
+        adoptedRef.current = false;
         setState((x) => ({
           ...x,
           streaming: false,
@@ -644,6 +793,20 @@ export function useSessionChat(sessionId: string | null) {
       // the stream was lost, onSessionMessages renders it (and a ChatDone that
       // raced in clears streaming).
       getSessionMessages(sid);
+      // Safety net for an adopted turn whose end frame never arrived (the
+      // relay only forwards to owners/watchers, so a turn started while this
+      // phone was elsewhere can vanish from the registry's perspective):
+      // not live per the wire and no tokens in flight → the turn is over.
+      if (liveFromWireRef.current && !isSessionLive(sid)) {
+        // Declaring the turn over also un-gates `send()` (see cancel()).
+        adoptedRef.current = false;
+        setState((x) =>
+          x.streaming
+            ? { ...x, streaming: false, streamingContent: '', status: null }
+            : x,
+        );
+        return;
+      }
       setState((x) => ({
         ...x,
         status: x.streaming
@@ -720,23 +883,55 @@ export function useSessionChat(sessionId: string | null) {
     turnInFlight.current = false;
     cancelledTurn.current = false;
     suppressNextFlush.current = false;
+    adoptedRef.current = false;
+    // A fresh chat has no tokens of its own; the watchdog below must be free
+    // to reconcile an adopted turn.
+    tokenReceived.current = false;
     currentSessionId.current = sessionId;
     if (!sessionId) {
       setState(INITIAL);
       return;
     }
+    // Stale-while-revalidate: paint the cached first page for THIS chat while
+    // the round-trip is in flight. The cache was written on every first page
+    // but never read, so every switch showed a spinner over a conversation
+    // the phone already had.
+    const cached = readCachedPage(sessionId);
+    // A turn that is running right now (started here, on another phone, on
+    // the desktop, or by an automation) must survive the switch: without
+    // this the re-fetched transcript rendered the in-flight reply as a
+    // finished bubble and the composer recovered as if it had ended. The
+    // session-list hint covers turns started before any frame reached this
+    // phone (never an owner/watcher); the registry covers the rest.
+    const live = isSessionLive(sessionId) || liveHintRef.current;
+    liveFromWireRef.current = isSessionLive(sessionId);
+    const { rows, partial } = foldLivePartial(cached.messages, live);
+    if (live) {
+      // Adopted: this hook instance never dispatched the turn, so its buffer
+      // can only hold the tail (the Done handler refetches instead of
+      // promoting). Watchdog reconciles if the frame for its end never
+      // arrives.
+      adoptedRef.current = true;
+      armTurnWatchdog(sessionId);
+    }
     // A disconnected phone can't fetch the page; leaving `loading: true`
     // left the chat on its first-load spinner forever.
-    if (connectedRef.current !== false) {
-      setState((s) => ({ ...INITIAL, loading: true }));
-      getSessionMessages(sessionId, undefined, 50);
-    } else {
-      setState((s) => ({ ...INITIAL, loading: false }));
-    }
+    const seed: SessionChatState = {
+      ...INITIAL,
+      messages: rows,
+      hasMore: cached.hasMore,
+      loading: connectedRef.current !== false,
+      streaming: live,
+      streamingContent: partial ?? '',
+    };
+    setState(seed);
+    if (connectedRef.current !== false) getSessionMessages(sessionId, undefined, 50);
     // Header (model chip) + artifacts gallery state for this chat.
     getSessionMeta(sessionId);
     listSessionArtifacts(sessionId);
-  }, [sessionId, getSessionMessages, stopFlushTimer, getSessionMeta, listSessionArtifacts]);
+    // Per-turn checkpoint files (TurnChangesCard rows + Undo targets).
+    listChatCheckpoints(sessionId);
+  }, [sessionId, getSessionMessages, stopFlushTimer, getSessionMeta, listSessionArtifacts, listChatCheckpoints]);
 
   // Disconnect recovery: a mid-stream disconnect means the Done/Error events
   // for the in-flight turn will NEVER arrive — the chat used to sit "streaming"
@@ -767,13 +962,17 @@ export function useSessionChat(sessionId: string | null) {
   useEffect(() => {
     if (!connected || !sessionId) return;
     getSessionMessages(sessionId, undefined, 50);
+    // Checkpoints rode the session-switch fetch that was dropped offline —
+    // re-pull them so the per-turn changes cards come back too.
+    listChatCheckpoints(sessionId);
     const queued = queuedRef.current;
-    if (queued.length > 0 && !streamActive.current && !turnInFlight.current) {
+    // An adopted turn is still running: a blind dispatch would race it.
+    if (queued.length > 0 && !streamActive.current && !turnInFlight.current && !adoptedRef.current) {
       const [next, ...rest] = queued;
       setState((s) => ({ ...s, queued: rest }));
       dispatchTurn(next);
     }
-  }, [connected, sessionId, getSessionMessages, dispatchTurn]);
+  }, [connected, sessionId, getSessionMessages, dispatchTurn, listChatCheckpoints]);
 
   // --- actions ---
 
@@ -783,10 +982,10 @@ export function useSessionChat(sessionId: string | null) {
       // Mid-turn sends would collide with the running turn on the desktop —
       // queue them and flush in order when it completes. `turnInFlight` is set
       // at SEND time, so a fast double-send queues instead of racing a
-      // second concurrent turn. No cap: the desktop queue is unbounded, and
-      // `.slice(-10)` silently discarded the OLDEST queued messages with no
-      // error or indication.
-      if (streamActive.current || turnInFlight.current) {
+      // second concurrent turn. `adoptedRef` covers a turn this hook is
+      // watching but did not dispatch (adopted on entry / started on the
+      // desktop): it is just as live, and a blind send would race it.
+      if (streamActive.current || turnInFlight.current || adoptedRef.current) {
         setState((s) => ({ ...s, queued: [...s.queued, text.trim()] }));
         return;
       }
@@ -806,6 +1005,10 @@ export function useSessionChat(sessionId: string | null) {
     stopFlushTimer();
     streamActive.current = false;
     turnInFlight.current = false;
+    // The turn is dead — forgetting the adoption matters: `adoptedRef` also
+    // gates `send()`, and leaving it set would queue the user's next message
+    // behind a turn that no longer exists.
+    adoptedRef.current = false;
     // The relay's Done/Error ack for this turn is now stale — swallow it
     // (and never auto-flush the queue because of it: the user STOPPED).
     cancelledTurn.current = true;

@@ -344,6 +344,43 @@ export const onCostDetails = new EventBus<CostDetails>();
 export const onLocalModelReady = new EventBus<{ model: string; baseUrl: string }>();
 export const onLocalModelError = new EventBus<{ model: string; error: string }>();
 
+/**
+ * Sessions with a turn in flight on the desktop, per the WIRE.
+ *
+ * Token / Done / Error frames arrive for every session the phone owns or is
+ * watching — including ones no screen currently has open. The chat hook used
+ * to keep this per hook instance, so switching chats threw the live state
+ * away: the re-fetched transcript rendered the in-flight reply as a finished
+ * bubble and the composer recovered as if the turn had already ended. The
+ * registry is module-level precisely so it survives navigation, chat
+ * switches and hook remounts, and lets any freshly-opened chat adopt the
+ * running turn.
+ *
+ * Send/cancel update it optimistically: a turn is live from the moment it is
+ * dispatched (the first token can be seconds away — minutes for a local
+ * sidecar loading into VRAM), and a chat switch in that window must still
+ * see the turn as running when the user comes back.
+ */
+const liveSessions = new Set<string>();
+
+function setSessionLive(sessionId: string | null | undefined, live: boolean): void {
+  if (!sessionId) return;
+  if (live) liveSessions.add(sessionId);
+  else liveSessions.delete(sessionId);
+}
+
+/** True when `sessionId` has a turn in flight on the desktop. */
+export function isSessionLive(sessionId: string | null | undefined): boolean {
+  return sessionId != null && liveSessions.has(sessionId);
+}
+
+/** Every live-turn record dies with the socket. After a reconnect the phone
+ *  has no idea which desktop turns survived — a stale entry would pin a
+ *  phantom "Working for…" tail on the next open. */
+export function clearLiveSessions(): void {
+  liveSessions.clear();
+}
+
 // Session-scoped chat event buses (Task 6). Keyed by the mobile session id.
 /**
  * `append` is true only for a PAGINATION reply (the caller sent a
@@ -700,11 +737,11 @@ const bytesToHex = (b: Uint8Array): string =>
 // as the last fallback chain.
 const _storedUrlReady: Promise<string | null> = getSecureRelayUrl()
   .then(async (secure) => {
-    if (secure) { _url = secure; _token = extractToken(secure); return secure; }
+    if (secure) { _url = secure; _token = extractToken(secure); nurl(); return secure; }
     const stored = await AsyncStorage.getItem(RELAY_URL_STORAGE_KEY).catch(() => null);
     if (stored) {
       void setSecureRelayUrl(stored);
-      _url = stored; _token = extractToken(stored); return stored;
+      _url = stored; _token = extractToken(stored); nurl(); return stored;
     }
     const legacyUrl = await AsyncStorage.getItem(LEGACY_URL_STORAGE_KEY).catch(() => null);
     if (!legacyUrl) return null;
@@ -715,6 +752,7 @@ const _storedUrlReady: Promise<string | null> = getSecureRelayUrl()
     _url = migrated;
     _token = extractToken(migrated) ?? legacyToken;
     void setSecureRelayUrl(migrated).catch(() => {});
+    nurl();
     return migrated;
   })
   .catch(() => null);
@@ -752,6 +790,13 @@ function nh() { _hl.forEach(fn => fn(_harnesses)); }
 function nd() { _dl.forEach(fn => fn(_defaults)); }
 
 function nc(v: boolean) { onConnected.emit(v); _cl.forEach(fn => fn(v)); }
+/** The relay URL changed (paired, re-pointed, or cleared). Screens that gate
+ *  on `getRelayUrl() != null` must re-read on this, not once at mount: the
+ *  Home pairing screen sampled it with an empty-dep memo, so scanning a QR
+ *  connected the relay while the screen kept rendering the "pair with your
+ *  desktop" layout until the app was restarted. */
+const _ul = new Set<(v: string | null) => void>();
+function nurl() { _ul.forEach(fn => fn(_url)); }
 /** True while a connect attempt is in flight and NOT yet paired. Kept
  *  separate from `connected` so the UI can hold one stable view for the
  *  whole handshake instead of flipping between its offline and online
@@ -861,6 +906,7 @@ function _doConnect(target: string) {
   if (_ws) { _ws.onclose = null; _ws.close(); _ws = null; }
   _url = target;
   _token = extractToken(target);
+  nurl();
   _e2eKey = null; _outCounter = 0; _inCounter = 0; _decryptFailures = 0;
   _pairingToken = null; _pendingFrames = [];
   _pairChallenge = null; _pairSent = false;
@@ -1130,12 +1176,14 @@ function _doConnect(target: string) {
           case 'LocalModelError': onLocalModelError.emit({ model: msg.model, error: msg.error }); break;
           // Session-scoped chat events (Task 6). Route to the new event buses.
           case 'SessionMessages': onSessionMessages.emit({ sessionId: msg.session_id, messages: msg.messages.map(normalizeSessionMessage), hasMore: msg.has_more, append: routeMessageReply(msg.session_id) }); break;
-          case 'SessionChatToken': onSessionChatToken.emit({ sessionId: msg.session_id, token: msg.token }); break;
+          case 'SessionChatToken': setSessionLive(msg.session_id, true); onSessionChatToken.emit({ sessionId: msg.session_id, token: msg.token }); break;
           case 'SessionChatDone':
+            setSessionLive(msg.session_id, false);
             onSessionChatDone.emit({ sessionId: msg.session_id, usage: msg.usage });
             journalNotification('turn_done', 'Turn complete', 'Your agent finished a reply.', msg.session_id);
             break;
           case 'SessionChatError':
+            setSessionLive(msg.session_id, false);
             onSessionChatError.emit({ sessionId: msg.session_id, error: msg.error });
             journalNotification('turn_error', 'Turn failed', msg.error, msg.session_id);
             break;
@@ -1259,6 +1307,7 @@ function _doConnect(target: string) {
     // target) so a URL change between close and reconnect wins (audit M8).
     ws.onclose = () => {
       _connecting = false; stopPolling(); nc(false); nconnecting(false); _ws = null;
+      clearLiveSessions();
       if (_pairFallbackTimer) { clearTimeout(_pairFallbackTimer); _pairFallbackTimer = null; }
       if (_reconnectTimer === null) {
         const delay = _reconnectDelay;
@@ -1271,10 +1320,12 @@ function _doConnect(target: string) {
     };
     ws.onerror = (ev: any) => {
       _connecting = false; nc(false); nconnecting(false);
+      clearLiveSessions();
       nerr(typeof ev?.message === 'string' && ev.message ? ev.message : 'Connection failed');
     };
   } catch (e) {
     _connecting = false; nc(false); nconnecting(false);
+    clearLiveSessions();
     nerr(e instanceof Error ? e.message : String(e));
   }
 }
@@ -1285,6 +1336,7 @@ function globalConnect(url?: string) {
     // separate duplicate key). A fresh URL restarts the reconnect backoff.
     _url = url;
     _token = extractToken(url);
+    nurl();
     resetReconnectBackoff();
     // PERSIST ONLY AFTER A SUCCESSFUL PAIR (audit H41): the old code wrote
     // the URL to SecureStore BEFORE connecting, so a malformed one (an
@@ -1332,7 +1384,7 @@ export function getRelayToken(): string | null { return _token; }
 export function reconnectPending(): boolean {
   return _reconnectTimer !== null || _connecting || _ws !== null;
 }
-function globalDisconnect() { stopPolling(); resetReconnectBackoff(); if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; } if (_ws) { _ws.onclose = null; _ws.close(); _ws = null; } _e2eKey = null; _outCounter = 0; _inCounter = 0; _decryptFailures = 0; nc(false); nconnecting(false); }
+function globalDisconnect() { stopPolling(); resetReconnectBackoff(); if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; } if (_ws) { _ws.onclose = null; _ws.close(); _ws = null; } _e2eKey = null; _outCounter = 0; _inCounter = 0; _decryptFailures = 0; nc(false); nconnecting(false); clearLiveSessions(); }
 
 // Stable sender identities (module-level) so screens can safely put them in
 // useEffect dependency arrays — an inline arrow in the return object would
@@ -1344,6 +1396,10 @@ function refreshCostDetailsSend() { _send({ type: 'GetCostDetails' }); }
 export function useRelay() {
   const [connected, setConnected] = useState(_ws?.readyState === WebSocket.OPEN);
   const [connecting, setConnecting] = useState(_connecting);
+  // Reactive mirror of the module-level `_url`. Screens gate their
+  // pairing-vs-home layout on this, so it must update the moment a scan or
+  // manual entry sets the URL — not only after the store read resolves.
+  const [relayUrl, setRelayUrl] = useState<string | null>(_url);
   const [lastError, setLastError] = useState<string | null>(_lastError);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -1361,18 +1417,20 @@ export function useRelay() {
     const d = (v: { provider: string; model: string } | null) => setDefaultModelState(v);
     const cs = (v: CostSummary) => setCostSummary(v);
     const cd = (v: CostDetails) => setCostDetails(v);
+    const u = (v: string | null) => setRelayUrl(v);
     _cl.add(c); _clConnecting.add(cg); _pl.add(p); _sl.add(s); _csl.add(cs); _cdl.add(cd);
-    _hl.add(h); _dl.add(d); _clErr.add(err);
+    _hl.add(h); _dl.add(d); _clErr.add(err); _ul.add(u);
     setConnected(_ws?.readyState === WebSocket.OPEN);
     setConnecting(_connecting);
     setLastError(_lastError);
+    setRelayUrl(_url);
     // Late-mounting screens (SessionChat's model sheet) must see the last
     // broadcast immediately — providers/harnesses only refresh every 30s,
     // so without this sync the sheet shows "no providers" for up to 30s.
     setProviders(_providers);
     setHarnessesState(_harnesses);
     setDefaultModelState(_defaults);
-    return () => { _cl.delete(c); _clConnecting.delete(cg); _pl.delete(p); _sl.delete(s); _csl.delete(cs); _cdl.delete(cd); _hl.delete(h); _dl.delete(d); _clErr.delete(err); };
+    return () => { _cl.delete(c); _clConnecting.delete(cg); _pl.delete(p); _sl.delete(s); _csl.delete(cs); _cdl.delete(cd); _hl.delete(h); _dl.delete(d); _clErr.delete(err); _ul.delete(u); };
   }, []);
   const connect = useCallback((url?: string) => { globalConnect(url); }, []);
   const applyPairingToken = useCallback((token: string) => { globalApplyPairingToken(token); }, []);
@@ -1402,12 +1460,23 @@ export function useRelay() {
     [],
   );
   const sendSessionChat = useCallback(
-    (sessionId: string, text: string, attachments: SessionChatAttachment[] = []): boolean =>
-      _send({ type: 'SendChatMessage', session_id: sessionId, text, attachments } as SessionChatMessage),
+    (sessionId: string, text: string, attachments: SessionChatAttachment[] = []): boolean => {
+      const sent = _send({ type: 'SendChatMessage', session_id: sessionId, text, attachments } as SessionChatMessage);
+      // Optimistic: a turn is live from dispatch — the first token can be
+      // seconds away (minutes for a local sidecar loading into VRAM), and a
+      // chat switch in that window must still show the turn running.
+      if (sent) setSessionLive(sessionId, true);
+      return sent;
+    },
     [],
   );
   const cancelSessionStream = useCallback(
-    (sessionId: string) => { _send({ type: 'CancelSessionStream', session_id: sessionId } as SessionChatMessage); },
+    (sessionId: string) => {
+      // Optimistic: the turn-scoped owner mapping (and the Done ack that
+      // follows) lag the frame, and neither may resurrect the chat as live.
+      setSessionLive(sessionId, false);
+      _send({ type: 'CancelSessionStream', session_id: sessionId } as SessionChatMessage);
+    },
     [],
   );
   const resolveSessionApproval = useCallback(
@@ -1545,7 +1614,7 @@ const _createSession = (pid: string, h: string, provider?: string, model?: strin
 const _spawnSession = (sid: string) => { _send({ type: 'SpawnSession', session_id: sid }); };
 const _startLocalModel = (model: string, ggufPath: string) => { _send({ type: 'StartLocalModel', model, gguf_path: ggufPath }); };
 
-  return { connected, desktopUnreachable: !connected, connecting, lastError, sessions, providers, harnesses, defaultModel, costSummary, costDetails, connect, applyPairingToken, disconnect, sendChatTurn, sendToSession, getTranscript,
+  return { connected, desktopUnreachable: !connected, connecting, lastError, relayUrl, sessions, providers, harnesses, defaultModel, costSummary, costDetails, connect, applyPairingToken, disconnect, sendChatTurn, sendToSession, getTranscript,
     cancelChatTurn: _cancelChatTurn,
     setSessionStarred: _setSessionStarred,
     listArtifacts: _listArtifacts,

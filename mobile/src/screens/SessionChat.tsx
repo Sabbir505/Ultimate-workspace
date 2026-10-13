@@ -67,6 +67,7 @@ import ActionSheet, { type ActionSheetItem } from '../components/chat/ActionShee
 import ArtifactSheet, { extOf } from '../components/chat/ArtifactSheet';
 import DiffSheet from '../components/chat/DiffSheet';
 import ChatGitSheet from '../components/chat/ChatGitSheet';
+import TurnChangesCard, { buildTurnFiles, type TurnChangeFile } from '../components/chat/TurnChangesCard';
 import { useDrawerActions } from '../components/AppDrawer';
 import * as Clipboard from 'expo-clipboard';
 
@@ -80,7 +81,11 @@ export default function SessionChat() {
 
   const c = themeMod.colors;
   const { providers, harnesses, connected, transcribeAudio, startLocalModel, listConnectors, getSessionConnectors, setSessionConnectors, listAcpAgents } = useRelay();
-  const chat = useSessionChat(sessionId);
+  // `liveHint` seeds the streaming tail for a turn already running on the
+  // desktop: the session list knows which chats are live, and without it a
+  // chat opened mid-turn rendered the in-flight reply as a finished bubble.
+  // The hint is consumed once, at session-switch time.
+  const chat = useSessionChat(sessionId, route.params?.session?.isLive === true);
   const insets = useSafeAreaInsets();
 
   const [modelSheetOpen, setModelSheetOpen] = useState(false);
@@ -341,10 +346,11 @@ export default function SessionChat() {
     return list;
   }, [chat.messages]);
 
-  const openArtifact = useCallback((path: string, filename: string) => {
+  const openArtifact = useCallback((path: string, filename?: string) => {
     // Preview straight from a message chip — the same ArtifactSheet the
     // library uses, scoped to this session.
-    setSheetArtifacts([{ path, filename, kind: extOf(filename) as 'jsx' | 'tsx' | undefined }]);
+    const name = filename ?? path.split(/[\\/]/).pop() ?? path;
+    setSheetArtifacts([{ path, filename: name, kind: extOf(name) as 'jsx' | 'tsx' | undefined }]);
     setSheetInitialPath(path);
     setGalleryOpen(true);
   }, []);
@@ -365,8 +371,58 @@ export default function SessionChat() {
     [chat],
   );
 
+  // Per-turn changed files (desktop TurnChangesRow parity): the turn's
+  // checkpoint supplies the git status letters, artifact paths fill in the
+  // generated files the checkpoint never captured. The flat artifact chips
+  // this replaces are gone — the card's rows ARE the entry points (Open =
+  // the old chip's preview, Review = the git diff). An artifact-only turn
+  // (generated deliverable, no checkpoint) still lists — with no status
+  // badge, exactly what the old chip row showed.
+  const turnFilesById = useMemo(() => {
+    const map = new Map<number, TurnChangeFile[]>();
+    for (const m of chat.messages) {
+      if (m.role !== 'assistant' || m.id <= 0) continue;
+      const cp = chat.checkpoints.find((c) => c.message_id === m.id);
+      const files = buildTurnFiles(cp?.files ?? [], m.artifactPaths ?? []);
+      if (files.length > 0) map.set(m.id, files);
+    }
+    return map;
+  }, [chat.checkpoints, chat.messages]);
+
+  // Undo target: the checkpoint BEFORE this turn's own snapshot (restoring
+  // that one rolls the workspace back to the state before the turn).
+  const undoTargetById = useMemo(() => {
+    const map = new Map<number, number>();
+    chat.checkpoints.forEach((cp, i) => {
+      if (cp.message_id == null || i === 0) return;
+      map.set(cp.message_id, chat.checkpoints[i - 1].id);
+    });
+    return map;
+  }, [chat.checkpoints]);
+
+  const undoOpenTurn = useCallback(
+    (targetId: number) => {
+      // Files only: the phone never trims the conversation on a restore
+      // (rollbackMessages stays false, unlike the desktop's default).
+      const restore = chat.restoreCheckpoint;
+      Alert.alert(
+        'Undo this turn?',
+        'Files will be rolled back to the state right BEFORE this turn. Changes made by this turn and any later turns will be overwritten. The conversation stays.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Roll back files',
+            style: 'destructive',
+            onPress: () => restore(targetId, false),
+          },
+        ],
+      );
+    },
+    [chat.restoreCheckpoint],
+  );
+
   const renderItem = useCallback(({ item }: { item: SessionMessageRecord }) => {
-    const paths = item.artifactPaths ?? [];
+    const turnFiles = item.role === 'assistant' ? turnFilesById.get(item.id) ?? [] : [];
     // Turn duration (desktop turn-rail parity): process turns show it INSIDE
     // the collapsed "Worked for Xs" fold header; pure-text turns keep the
     // plain caption below the bubble.
@@ -404,31 +460,28 @@ export default function SessionChat() {
             Worked for {worked}
           </Text>
         ) : null}
-        {paths.length > 0 ? (
-          <View style={styles.artifactChips}>
-            {paths.map((p) => {
-              const name = p.split(/[\/]/).pop() || p;
-              return (
-                <TouchableOpacity
-                  key={p}
-                  style={[styles.artifactChip, { backgroundColor: c.surface2, borderColor: c.border }]}
-                  activeOpacity={0.7}
-                  accessibilityRole="button"
-                  accessibilityLabel={`Artifact ${name}`}
-                  onPress={() => openArtifact(p, name)}
-                >
-                  <Ionicons name="document-text-outline" size={12} color={c.accent} />
-                  <Text style={[styles.artifactChipText, { color: c.text }]} numberOfLines={1}>
-                    {name}
-                  </Text>
-                </TouchableOpacity>
-              );
-            })}
-          </View>
+        {turnFiles.length > 0 ? (
+          <TurnChangesCard
+            files={turnFiles}
+            undoTargetId={undoTargetById.get(item.id) ?? null}
+            onReview={handlePeekDiff}
+            onOpen={openArtifact}
+            onUndo={() => {
+              const target = undoTargetById.get(item.id);
+              if (target == null) {
+                Alert.alert(
+                  'Nothing to undo',
+                  'No checkpoint exists before this turn — it is the earliest snapshot of this chat.',
+                );
+                return;
+              }
+              undoOpenTurn(target);
+            }}
+          />
         ) : null}
       </TouchableOpacity>
     );
-  }, [openArtifact, handlePeekDiff]);
+  }, [openArtifact, handlePeekDiff, turnFilesById, undoTargetById, undoOpenTurn]);
 
   // ---- Batch 1: derived sheet contents ----
   const PERMISSION_MODES: { value: string; label: string; icon: keyof typeof Ionicons.glyphMap }[] = [
@@ -1033,24 +1086,6 @@ const styles = StyleSheet.create({
     paddingVertical: 5,
   },
   queueText: { flex: 1, fontSize: 11 },
-  artifactChips: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 6,
-    paddingHorizontal: themeMod.spacing.md,
-    paddingBottom: 6,
-  },
-  artifactChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-    maxWidth: 220,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: themeMod.radius.pill,
-    paddingHorizontal: 9,
-    paddingVertical: 4,
-  },
-  artifactChipText: { fontSize: 11 },
   modalScrim: { flex: 1, justifyContent: 'center', padding: 20 },
   editCard: {
     borderRadius: themeMod.radius.lg,

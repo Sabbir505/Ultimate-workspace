@@ -96,3 +96,10 @@ exp-qr.png
 # Scratch text dumps
 _short.txt
 doc_cmds2.txt
+
+# Local promo captures for the v0.7.0 update video (27 MB of frames + capture
+# scripts, unreferenced by the app) and the goal-notch preview frames. Kept on
+# disk, never committed — anchored so only the repo-root dirs match.
+/.preview/
+/v0.7.0-shots/
+/v0.7.0-shots-20/

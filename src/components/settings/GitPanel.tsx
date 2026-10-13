@@ -163,6 +163,8 @@ const checkpointsEnabled = useSettingsStore((s) => s.checkpointsEnabled);
                   { value: "openrouter", label: "OpenRouter" },
                   { value: "anthropic_compatible", label: "Anthropic Compatible" },
                   { value: "openai_compatible", label: "OpenAI Compatible" },
+                  { value: "openai_chat", label: "Chat Completions" },
+                  { value: "openai_responses", label: "Responses" },
                 ]}
                 onChange={(v) => {
                   setCmProvider(v);

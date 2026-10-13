@@ -61,6 +61,24 @@ interface Props {
   onFork?: (id: string) => void;
 }
 
+/** Tooltip under the row's brand icon. A CLI session's provider column is
+ *  cosmetic (the CLI runs the turn, and the row keeps whichever provider it
+ *  was created under — a chat made while a local model was active still reads
+ *  "local_gguf" after being switched to a harness), so it is omitted there
+ *  rather than labelling a Claude Code chat "local_gguf · claude_code". */
+function sessionIconTitle(
+  agent?: string | null,
+  provider?: string | null,
+): string {
+  const isCli = !!agent && (agent.startsWith("harness:") || agent.startsWith("acp:"));
+  const agentLabel = agent?.startsWith("harness:")
+    ? agent.slice("harness:".length)
+    : agent;
+  return (isCli ? [agentLabel] : [provider, agentLabel])
+    .filter(Boolean)
+    .join(" · ");
+}
+
 export function ChatSessionRow({
   session,
   active,
@@ -322,9 +340,7 @@ export function ChatSessionRow({
           )}
           <span
             className="chat-session-provider"
-            title={[session.provider, session.agent?.startsWith("harness:") ? session.agent.slice(8) : session.agent]
-              .filter(Boolean)
-              .join(" · ")}
+            title={sessionIconTitle(session.agent, session.provider)}
           >
             {sessionModelIcon(session.agent, session.provider)}
           </span>

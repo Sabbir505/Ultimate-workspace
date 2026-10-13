@@ -214,18 +214,28 @@ export function MonogramIcon({ letter }: { letter: string }): ReactElement {
 }
 
 /** Brand icon for a session's agent+provider pair — the same mapping the
- *  model picker's rail uses (sidebar inbox rows, agent chips). Precedence:
- *  a local sidecar beats everything, then a harness/ACP agent, then the
- *  cloud provider; "auto" routing and unknown pairs fall back to the
- *  auto-route mark. Lives here (not in AgentModelPicker) so lightweight
- *  consumers like the sidebar don't pull the picker chunk. */
+ *  model picker's rail uses (sidebar inbox rows, agent chips). Precedence
+ *  mirrors the picker's `sessionRailKey` / chipIcon order: a CLI agent
+ *  (harness/ACP) decides the icon, then a local sidecar, then the cloud
+ *  provider; "auto" routing and unknown pairs fall back to the auto-route
+ *  mark.
+ *
+ *  The agent has to be resolved BEFORE the provider column: for a
+ *  harness/ACP session the provider is cosmetic (the CLI runs the turn, and
+ *  the row keeps whichever provider it was created under — a chat created
+ *  while a local model was active carries "local_gguf" even after the picker
+ *  switched it to a CLI agent). Keying `local` off the provider first made
+ *  those rows show the local desktop glyph for a chat that runs on the CLI,
+ *  while the picker rail and the composer chip correctly showed it as
+ *  harness (v0.7.0 report). Lives here (not in AgentModelPicker) so
+ *  lightweight consumers like the sidebar don't pull the picker chunk. */
 export function sessionModelIcon(
   agent?: string | null,
   provider?: string | null,
 ): JSX.Element {
-  if (agent === "local" || provider === "local_gguf") return railIcon("local", "Local");
   if (agent?.startsWith("harness:")) return railIcon(agent, agent.slice("harness:".length));
   if (agent?.startsWith("acp:")) return railIcon(agent, agent.slice("acp:".length));
+  if (agent === "local" || provider === "local_gguf") return railIcon("local", "Local");
   if (provider === "auto" || !provider) return railIcon("auto", "Auto");
   return railIcon(`provider:${provider}`, provider);
 }
@@ -258,7 +268,12 @@ export function railIcon(key: string, label: string): JSX.Element {
       </span>
     );
   }
-  if (key === "provider:openai" || key === "provider:openai_compatible") {
+  if (
+    key === "provider:openai" ||
+    key === "provider:openai_compatible" ||
+    key === "provider:openai_chat" ||
+    key === "provider:openai_responses"
+  ) {
     return <OpenAiIcon />;
   }
   if (key === "provider:openrouter") return <OpenRouterIcon />;

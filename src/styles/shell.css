@@ -246,6 +246,7 @@
 :root[data-wallpaper] .vault-view,
 :root[data-wallpaper] .subagent-view,
 :root[data-wallpaper] .wiki-view,
+:root[data-wallpaper] .logs-view,
 :root[data-wallpaper] .popout-chat-root {
   background: color-mix(in srgb, var(--bg-tint) var(--wallpaper-canvas-tint, 76%), transparent);
 }
@@ -612,14 +613,19 @@
   animation: branch-popover-fade 0.15s var(--ease);
 }
 
-/* ---- Git tools sidebar (floating panel overlaying the chat view) ---- */
+/* ---- Git tools sidebar (right-side panel over the chat column) ---- */
 /* The shell is always mounted. Width animates between the full panel
-   (260px) and a compact icon chip (48px) while the body's max-height
+   (260px) and a compact icon chip (42px) while the body's max-height
    collapses — smooth expand/collapse with no DOM swap. Content is pinned
    to the 260px panel width inside .git-sidebar-inner AND right-aligned in
-   the shell (align-self: flex-end), so the collapsed 48px window shows the
+   the shell (align-self: flex-end), so the collapsed 42px window shows the
    RIGHT edge of the content — the header icon sits in that right edge and
-   therefore NEVER moves between states. */
+   therefore NEVER moves between states.
+   Expanded, the panel is flanked by a shrunken chat column rather than
+   floating on top of it — the chat side reserves the space in
+   chat.css ("Git tools sidebar clearance"). Collapsed it returns to a
+   bare chip floating over the transcript (no reservation), so the
+   default state costs the chat nothing. */
 .git-sidebar {
   position: absolute;
   /* Clear the overlay title bar the same way the transcript's first row does
@@ -629,7 +635,11 @@
   top: calc(var(--toolbar-h, 37px) + 6px);
   right: 12px;
   width: 260px;
-  max-height: 600px;
+  /* Never tall enough to reach the composer dock: the chat column shrinks
+     beside the panel, so the only thing left it could cover is the dock at
+     the bottom. The floor reserves the dock's minimum space (the same 220px
+     floor the transcript's spacer uses) plus the top offset above. */
+  max-height: min(600px, calc(100% - var(--toolbar-h, 37px) - 236px));
   z-index: 20;
   display: flex;
   flex-direction: column;

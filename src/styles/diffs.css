@@ -785,7 +785,9 @@
   font-size: 11px;
   padding: 1px 5px;
   border-radius: 4px;
-  background: var(--surface-3, var(--surface-2));
+  /* Glass veil, not opaque --surface-3: the review markdown renders on glass
+     surfaces where a solid pill reads as a dark slab. */
+  background: color-mix(in srgb, var(--surface-glass) 60%, transparent);
   border: 1px solid var(--border-soft, var(--border));
 }
 .dev-diff-review-md pre {

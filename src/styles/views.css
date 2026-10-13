@@ -501,7 +501,7 @@
   padding: 2px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  background: var(--surface-glass);
+  background: var(--glass-card-2);
 }
 .range-toggle button.ghost {
   padding: 4px 10px;
@@ -523,7 +523,7 @@
   padding: 16px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  background: var(--surface-glass);
+  background: var(--glass-card);
   box-shadow: var(--glass-rim);
 }
 .cost-hero-headline {
@@ -594,7 +594,7 @@
   padding: 14px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  background: var(--surface-glass);
+  background: var(--glass-card);
   box-shadow: var(--glass-rim);
 }
 .chart-toggle {
@@ -605,7 +605,7 @@
   width: fit-content;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  background: var(--surface);
+  background: var(--glass-card-2);
 }
 .chart-toggle button.ghost {
   padding: 4px 14px;
@@ -788,7 +788,7 @@
   padding: 12px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  background: var(--surface-glass);
+  background: var(--glass-card);
   display: flex;
   flex-direction: column;
   gap: 3px;
@@ -812,7 +812,7 @@
 }
 .stat-accent {
   border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
-  background: linear-gradient(180deg, color-mix(in srgb, var(--accent-soft) 60%, var(--surface-glass)), var(--surface-glass));
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent-soft) 60%, var(--glass-card)), var(--glass-card));
 }
 .stat-accent .stat-value {
   color: var(--accent);
@@ -822,7 +822,7 @@
   padding: 14px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  background: var(--surface-glass);
+  background: var(--glass-card);
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -846,7 +846,7 @@
 .cost-quality-bar-track {
   height: 6px;
   border-radius: 3px;
-  background: var(--surface-3);
+  background: var(--glass-card-2);
   overflow: hidden;
 }
 .cost-quality-bar-fill {
@@ -895,7 +895,7 @@
   padding: 10px 14px;
   border: 1px solid color-mix(in srgb, var(--danger) 50%, var(--border));
   border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--danger) 8%, var(--surface-glass));
+  background: color-mix(in srgb, var(--danger) 8%, var(--glass-card-2));
   color: var(--danger);
   font-size: 12px;
   display: flex;
@@ -946,7 +946,7 @@
 .cost-bottom-grid .model-breakdown {
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  background: var(--surface-glass);
+  background: var(--glass-card);
   box-shadow: var(--glass-rim);
   padding: 14px;
   height: 300px;
@@ -972,7 +972,7 @@
   position: sticky;
   top: 0;
   z-index: 1;
-  background: var(--surface-glass);
+  background: var(--glass-card-2);
 }
 /* NB: no `height: 100%` here. The breakdown card is a locked 300px box, and
    stretching the quality panel to match forced its ~180px of content into
@@ -1055,7 +1055,7 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-sm, 6px);
   padding: 12px 14px;
-  background: var(--surface-glass);
+  background: var(--glass-card);
 }
 .budget-panel-title {
   margin: 0 0 8px;
@@ -1106,7 +1106,7 @@
   padding: 3px 6px;
   font-size: 12px;
   color: var(--text);
-  background: var(--surface);
+  background: var(--glass-card-2);
   border: 1px solid var(--border);
   border-radius: var(--radius-xs, 4px);
 }

@@ -79,7 +79,7 @@
   pointer-events: auto;
 }
 .chat-session-row .chat-session-menu-btn:hover {
-  background: var(--surface-3, var(--surface-2));
+  background: color-mix(in srgb, var(--text) 13%, transparent);
 }
 
 .chat-session-unread-dot {
@@ -418,7 +418,9 @@ div[data-index]:has(.chat-session-row.menu-open) {
   animation: chat-jump-live-in 0.16s var(--ease);
 }
 .chat-jump-live:hover {
-  background: var(--surface-3, rgba(255, 255, 255, 0.1));
+  /* Brighten the pill's own surface with a veil — an opaque --surface-3 fill
+     would step the glass pill DOWN to a flat slab on hover. */
+  background: color-mix(in srgb, var(--text) 13%, var(--surface-glass));
 }
 .chat-jump-live:active {
   transform: translateX(-50%) scale(0.94);
@@ -579,10 +581,17 @@ div[data-index]:has(.chat-session-row.menu-open) {
   text-align: left;
   border: 1px solid var(--border);
   border-radius: 12px;
-  background: var(--surface-glass);
-  backdrop-filter: blur(16px) saturate(140%);
-  -webkit-backdrop-filter: blur(16px) saturate(140%);
-  box-shadow: var(--glass-rim-soft);
+  /* Same liquid glass as the composer card: true-transparent gradient + heavy
+     frost. The fill used to be opaque --surface-glass, which blinded the
+     card's own backdrop-filter and read as a dark slab over the wallpaper. */
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 45%, transparent),
+    color-mix(in srgb, var(--surface-glass) 25%, transparent)
+  );
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  box-shadow: var(--glass-rim), var(--glass-drop);
   cursor: pointer;
   opacity: 0;
   animation: chat-welcome-card 0.3s var(--ease) forwards;
@@ -593,9 +602,20 @@ div[data-index]:has(.chat-session-row.menu-open) {
   from { opacity: 0; transform: translateY(6px); }
   to { opacity: 1; transform: translateY(0); }
 }
+/* Light theme: a touch more body so text keeps contrast on bright backdrops —
+   the same bump the composer card gets. */
+:root[data-theme="light"] .chat-welcome-prompt {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 55%, transparent),
+    color-mix(in srgb, var(--surface-glass) 38%, transparent)
+  );
+}
 .chat-welcome-prompt:hover {
   border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
-  background: color-mix(in srgb, var(--accent) 6%, var(--surface-glass));
+  /* Accent veil over the translucent base — mixing into the opaque token
+     here would step the card back down to a slab on hover. */
+  background: color-mix(in srgb, var(--accent) 6%, var(--glass-card));
   transform: translateY(-2px);
 }
 .chat-welcome-prompt-icon {
@@ -760,7 +780,11 @@ div[data-index]:has(.chat-session-row.menu-open) {
 }
 .chat-msg-action:hover {
   color: var(--text);
-  background: var(--surface-2);
+  /* Glass veil, not --surface-2: these buttons sit on glass surfaces (the
+     user bubble, the composer card, the transcript), where an opaque fill
+     reads as a dark slab. Same veil the slash-menu rows highlight with —
+     translucent, so it also adapts to light theme. */
+  background: color-mix(in srgb, var(--text) 13%, transparent);
 }
 /* Destructive action (delete) â€” turns red on hover so it reads as a
  * "this removes content" gesture rather than a neutral toggle. */
@@ -803,10 +827,28 @@ div[data-index]:has(.chat-session-row.menu-open) {
   -webkit-user-select: text;
 }
 .chat-bubble.user .chat-bubble-inner {
-  background: var(--surface-2);
   border: 1px solid var(--border);
   border-radius: 16px;
-  box-shadow: var(--glass-rim-soft);
+  /* Same liquid glass as the composer card (true-transparent gradient + heavy
+     frost) — the bubble reads as part of the same surface family instead of an
+     opaque slab that ignores the wallpaper behind it. */
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 45%, transparent),
+    color-mix(in srgb, var(--surface-glass) 25%, transparent)
+  );
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  box-shadow: var(--glass-rim), var(--glass-drop);
+}
+/* Light theme: a touch more body so text keeps contrast on bright backdrops —
+   the same bump the composer card gets. */
+:root[data-theme="light"] .chat-bubble.user .chat-bubble-inner {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 55%, transparent),
+    color-mix(in srgb, var(--surface-glass) 38%, transparent)
+  );
 }
 .chat-bubble.assistant .chat-bubble-inner {
   background: transparent;
@@ -1262,7 +1304,7 @@ div[data-index]:has(.chat-session-row.menu-open) {
 }
 .chat-turn-changes-toggle:hover {
   color: var(--text);
-  background: var(--surface-2);
+  background: color-mix(in srgb, var(--text) 13%, transparent);
 }
 .chat-turn-changes-count {
   font-weight: 600;
@@ -1295,7 +1337,7 @@ div[data-index]:has(.chat-session-row.menu-open) {
 }
 .chat-turn-changes-undo:hover {
   color: var(--text);
-  background: var(--surface-2);
+  background: color-mix(in srgb, var(--text) 13%, transparent);
 }
 .chat-turn-changes-body {
   border-top: 1px solid var(--border);
@@ -1329,7 +1371,7 @@ div[data-index]:has(.chat-session-row.menu-open) {
   border-radius: var(--radius-xs);
 }
 .chat-turn-changes-body .chat-files-row:hover {
-  background: var(--surface-2);
+  background: color-mix(in srgb, var(--text) 13%, transparent);
 }
 .chat-files-name {
   color: var(--text);
@@ -1369,7 +1411,7 @@ div[data-index]:has(.chat-session-row.menu-open) {
 .chat-files-open:hover {
   color: var(--text);
   border-color: var(--text-dim);
-  background: var(--surface-2);
+  background: color-mix(in srgb, var(--text) 13%, transparent);
 }
 
 /* Expanded step list */
@@ -1770,6 +1812,20 @@ div[data-index]:has(.chat-session-row.menu-open) {
 .chat-markdown {
   user-select: text;
   -webkit-user-select: text;
+}
+
+/* Inline code — backticked file paths, commands, identifiers: a quiet glass
+   pill (translucent veil + hairline border) so it reads as a chip on the
+   glass bubbles instead of either bare browser-default code or an opaque
+   slab. Block code is excluded — fenced blocks keep their .chat-code-block
+   treatment. */
+.chat-markdown :not(pre) > code {
+  padding: 1px 6px;
+  border-radius: var(--radius-xs);
+  background: color-mix(in srgb, var(--surface-glass) 60%, transparent);
+  border: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 0.92em;
 }
 
 /* ---------- Markdown languages: RTL & mixed-direction text ----------
@@ -4148,6 +4204,10 @@ button.chat-mermaid-open:focus-visible {
   border: none;
   border-radius: 0;
   box-shadow: none;
+  /* Kill the glass too: an unblurred backdrop-filter with no fill would frost
+     a full-width rectangle behind the editor. */
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
   padding: 0;
   width: 100%;
 }
@@ -5439,6 +5499,58 @@ button.chat-mermaid-open:focus-visible {
 }
 .popout-chat-root:has(.turn-rail) .citation-report-strip {
   margin-left: max(30px, calc((100% - 780px) / 2));
+}
+
+/* ---------- Git tools sidebar clearance (right edge) ----------
+   Mirrors the turn-rail clearance above. Expanded, the git tools panel is
+   no longer a floating overlay on the transcript: the chat column shrinks
+   to the width that's LEFT, so bubbles, docked notch cards and the
+   composer card never slide under the glass. The panel itself does not
+   move at all — it keeps its right: 12px anchor, which is measured from
+   .chat-view's PADDING box — so reserving the padding here simply drops
+   the content column into the space beside it.
+   The reservation yields to a 320px content floor (the min-width the chat
+   view keeps everywhere else — split panes and the artifact split): in a
+   narrow column the panel keeps covering a slice of the transcript
+   instead of crushing the chat to a sliver, which reads far worse. */
+/* The base transition is what carries the COLLAPSE back: a transition is
+   read from the style the property is moving TO, so without this rule the
+   reservation snapped back to 0 the instant the panel started shrinking
+   (expand animated, collapse jumped). Same duration/easing as the panel's
+   own width transition, so the two move as one. */
+.chat-view {
+  transition: padding-right 0.28s var(--ease);
+}
+.chat-view .chat-composer-dock {
+  transition: right 0.28s var(--ease);
+}
+.chat-view .chat-jump-live {
+  transition: left 0.28s var(--ease);
+}
+/* 260px panel + the 12px inset it anchors to. Custom property so the
+   absolutely-positioned children (which pad against the padding box, not
+   the content box) shift by the SAME amount. */
+.chat-view:has(> .git-sidebar:not(.git-sidebar-collapsed)) {
+  --git-rail-reserve: min(272px, max(0px, calc(100% - 320px)));
+  padding-right: var(--git-rail-reserve);
+}
+/* The dock spans left: 0 / right: 0 against the padding box, and the jump
+   pill centers on it — neither follows the padding above on its own. */
+.chat-view:has(> .git-sidebar:not(.git-sidebar-collapsed)) .chat-composer-dock {
+  right: var(--git-rail-reserve);
+}
+.chat-view:has(> .git-sidebar:not(.git-sidebar-collapsed)) .chat-jump-live {
+  left: calc(50% - var(--git-rail-reserve) / 2);
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-view,
+  .chat-view .chat-composer-dock,
+  .chat-view .chat-jump-live,
+  .chat-view:has(> .git-sidebar:not(.git-sidebar-collapsed)),
+  .chat-view:has(> .git-sidebar:not(.git-sidebar-collapsed)) .chat-composer-dock,
+  .chat-view:has(> .git-sidebar:not(.git-sidebar-collapsed)) .chat-jump-live {
+    transition: none;
+  }
 }
 
 /* ---------- Citation-integrity strip (research turns) ---------- */

@@ -160,7 +160,7 @@ table.kv th {
   display: flex;
   align-items: center;
   gap: 6px;
-  background: var(--surface-2);
+  background: var(--glass-card-2);
   border: 1px solid var(--border);
   border-radius: var(--radius-xs);
   padding: 5px 8px;
@@ -230,7 +230,7 @@ table.kv th {
 }
 .settings-nav .nav-item:hover {
   color: var(--text);
-  background: var(--surface-2);
+  background: color-mix(in srgb, var(--text) 13%, transparent);
 }
 .settings-nav .nav-item.active {
   color: var(--text);
@@ -318,7 +318,7 @@ table.kv th {
   padding: 8px 12px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  background: var(--surface-2);
+  background: var(--glass-card-2);
   word-break: break-all;
 }
 .settings-form-row {
@@ -376,7 +376,7 @@ table.kv th {
   align-items: center;
   gap: 10px;
   padding: 6px 10px;
-  background: var(--surface);
+  background: var(--glass-card);
   border-radius: var(--radius-xs);
   margin-bottom: 10px;
   font-size: 12px;
@@ -401,7 +401,7 @@ table.kv th {
   padding: 2px 8px;
   border-radius: 99px;
   font-size: 11px;
-  background: var(--surface);
+  background: var(--glass-card);
   color: var(--text-dim);
   max-width: 100%;
 }
@@ -429,7 +429,7 @@ table.kv th {
   flex-direction: column;
   gap: 0;
   padding: 16px 14px;
-  background: var(--surface);
+  background: var(--glass-card);
   border: 1px solid var(--border);
   border-radius: 12px;
   min-height: 140px;
@@ -478,7 +478,7 @@ table.kv th {
   gap: 12px;
   padding: 14px 14px;
   min-height: 64px;
-  background: var(--surface);
+  background: var(--glass-card);
   border: 1px solid var(--border);
   border-radius: 10px;
   transition: border-color 0.15s, box-shadow 0.15s;
@@ -597,10 +597,15 @@ table.kv th {
   flex-direction: column;
   gap: 2px;
   padding: 4px;
-  background: var(--surface);
+  /* Floating menu over glass rows: the house popover recipe (opaque surface
+     + frost, like .permission-mode-popup) — a translucent menu here would
+     show the rows underneath bleeding through its items. */
+  background: var(--surface-glass);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
   border: 1px solid var(--border);
   border-radius: 8px;
-  box-shadow: var(--glass-drop-lg);
+  box-shadow: var(--glass-rim), var(--glass-drop-lg);
 }
 .row-menu button {
   width: 100%;
@@ -613,7 +618,7 @@ table.kv th {
   color: var(--text);
 }
 .row-menu button:hover {
-  background: var(--surface-glass-2, rgba(255, 255, 255, 0.06));
+  background: color-mix(in srgb, var(--text) 13%, transparent);
 }
 .row-menu button.danger-menu { color: var(--danger); }
 .local-row-advanced {
@@ -626,7 +631,7 @@ table.kv th {
   border-radius: 0 0 10px 10px;
   margin: -4px 0 0;
   padding-top: 10px;
-  background: var(--surface);
+  background: var(--glass-card);
 }
 .local-row-advanced-head {
   display: flex;
@@ -729,7 +734,7 @@ table.kv th {
   justify-content: center;
   padding: 0;
   border: 1px solid var(--border);
-  background: var(--surface-glass);
+  background: var(--glass-card);
   color: var(--text-dim);
   border-radius: 6px;
   cursor: pointer;
@@ -936,7 +941,7 @@ table.kv th {
   padding: 12px 14px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  background: var(--surface-glass, var(--surface));
+  background: var(--glass-card);
 }
 .local-model-settings-row > details {
   flex: 1;
@@ -972,7 +977,7 @@ table.kv th {
   padding: 5px 8px;
   border: 1px solid var(--border);
   border-radius: var(--radius-xs, 4px);
-  background: var(--surface);
+  background: var(--glass-card);
   color: var(--text);
   font-size: 12px;
   -moz-appearance: textfield;
@@ -1032,7 +1037,7 @@ table.kv th {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  background: var(--surface-glass);
+  background: var(--glass-card);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
   box-shadow: var(--glass-rim-soft);

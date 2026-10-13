@@ -62,6 +62,15 @@
      Crossed repeating gradients at this alpha read as frosted mesh, not net. */
   --glass-mesh-line: rgba(255, 255, 255, 0.03);
   --glass-mesh-line-light: rgba(0, 0, 0, 0.03);
+  /* Cards/chips resting ON an already-glass panel (settings, skills, usage —
+     the inner surfaces of the .view-panel modals): translucent veils of the
+     glass surface, so the panel's frost reads THROUGH the card instead of
+     the card stacking an opaque slab over it. The plain --surface tokens are
+     fully opaque paints — right on the app shell, wrong one layer inside a
+     glass panel. Per-theme overrides live in the theme blocks below (light
+     needs more body for contrast). */
+  --glass-card: color-mix(in srgb, var(--surface-glass) 55%, transparent);
+  --glass-card-2: color-mix(in srgb, var(--surface-glass) 80%, transparent);
   --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
 
   /* Theme switch transition â€” color/bg only, no layout-affecting props.
@@ -265,6 +274,10 @@
   --surface-solid: #fafafa;
   --surface-glass: #ffffff;
   --surface-glass-2: #f3f3f3;
+  /* Glass-panel inner cards: light needs notably more body than dark — 55%
+     white glass on a bright backdrop reads as no card at all. */
+  --glass-card: color-mix(in srgb, var(--surface-glass) 72%, transparent);
+  --glass-card-2: color-mix(in srgb, var(--surface-glass) 90%, transparent);
   --surface-1: #f0f0f0;
   --surface-3: #e8e8e8;
   --bg-elevated: rgba(0, 0, 0, 0.04);

@@ -19,6 +19,15 @@
   container-name: logs-view;
 }
 
+/* With a wallpaper set, the logs view joins the other big canvases (chat,
+   vault, wiki…) as tinted glass over the wallpaper — the shell rule sets the
+   translucent tint on .logs-view; the detail pane must step aside or its
+   opaque fill would paint the tint back out. No wallpaper → both stay on the
+   flat opaque --surface like every other view. */
+:root[data-wallpaper] .logs-detail-pane {
+  background: transparent;
+}
+
 .logs-header {
   display: flex;
   align-items: center;

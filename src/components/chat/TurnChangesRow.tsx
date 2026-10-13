@@ -139,6 +139,25 @@ function FileRow({
   );
 }
 
+/** Paths (as recorded) that the expanded changes row lists: every diff
+ *  block's path PLUS the newest checkpoint's files (the A/M/D rows — files
+ *  made outside write_file/edit_file, e.g. by a shell command or the harness
+ *  CLI itself). Shared with MessageBubble so an artifact the row ALREADY
+ *  covers is not ALSO rendered inline in the bubble: the row's Review / Open
+ *  buttons are that file's entry point. Only the newest checkpoint counts —
+ *  the row renders its files, so an older checkpoint's would leave a file
+ *  listed nowhere while its artifact stayed suppressed. */
+export function turnChangesCoveredPaths(
+  files: TurnFileChange[],
+  checkpoints: ChatCheckpoint[],
+): string[] {
+  const paths = new Set<string>();
+  for (const f of files) paths.add(f.path);
+  const latest = checkpoints[checkpoints.length - 1];
+  for (const f of latest?.files ?? []) paths.add(f.path);
+  return [...paths];
+}
+
 export function TurnChangesRow({
   files,
   checkpoints,

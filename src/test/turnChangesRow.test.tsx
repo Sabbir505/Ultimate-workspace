@@ -40,6 +40,7 @@ import { useProjectsStore } from "../state/projects";
 import { useUiStore } from "../state/ui";
 import {
   sameTurnFile,
+  turnChangesCoveredPaths,
   TurnChangesRow,
   type TurnFileChange,
 } from "../components/chat/TurnChangesRow";
@@ -438,5 +439,26 @@ describe("sameTurnFile", () => {
     // absolute/relative drift.
     expect(sameTurnFile("index.html", "other/index.html")).toBe(true);
     expect(sameTurnFile("a.ts", "b.ts")).toBe(false);
+  });
+});
+
+describe("turnChangesCoveredPaths", () => {
+  it("lists the diff paths plus the newest checkpoint's files", () => {
+    // What the expanded row shows → what an artifact must not also render for.
+    const covered = turnChangesCoveredPaths(diffFiles(), [ckpt()]);
+    expect(covered).toContain("src/main.rs");
+    expect(covered).toContain("docs/new.md");
+    // "docs/new.md" is both a diff block and a checkpoint file — listed once.
+    expect(covered.filter((p) => p === "docs/new.md")).toHaveLength(1);
+  });
+
+  it("ignores earlier checkpoints (only the newest row is rendered)", () => {
+    const older = ckpt({ id: 10, files: [{ path: "stale.ts", status: "A" }] });
+    const covered = turnChangesCoveredPaths([], [older, ckpt()]);
+    expect(covered).toEqual(["src/main.rs", "docs/new.md"]);
+  });
+
+  it("returns nothing when the row has no files and no checkpoint", () => {
+    expect(turnChangesCoveredPaths([], [])).toEqual([]);
   });
 });

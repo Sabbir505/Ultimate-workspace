@@ -31,7 +31,7 @@ import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { MdLink } from "./MdLink";
 import { DiffCard, editLineStats, type EditPayload } from "./DiffCard";
 import { parseSegments, type Segment, type ToolData } from "../../lib/segments";
-import { sameTurnFile, TurnChangesRow } from "./TurnChangesRow";
+import { sameTurnFile, turnChangesCoveredPaths, TurnChangesRow } from "./TurnChangesRow";
 // InlineDiagram (vector diagrams) and MermaidDiagram (mermaid + its
 // highlight.js language pack) are rarely seen on the initial chat surface and
 // pull in heavy dependencies; lazy-load both so the main bundle stays small.
@@ -336,6 +336,15 @@ function MessageBubbleInner({
       }
     }
   }
+  // Files the turn's changes row already lists (write_file/edit_file diffs +
+  // the checkpoint's A/M/D rows). While a folder/project is bound, work on
+  // html/tsx/jsx files is tracked by git and surfaces there — so an artifact
+  // for one of those files must NOT render a second time inline in the
+  // bubble. A `generate_diagram` deliverable never lands in a checkout, so
+  // it keeps its inline frame (see InlineDiagram's `covered` prop).
+  const coveredPaths = turnChangesCoveredPaths(fileChanges, msgCheckpoints);
+  const coveredByChangesRow = (a: ChatArtifact) =>
+    coveredPaths.some((p) => sameTurnFile(a.path, p));
   // The collapsed row's label is ALWAYS the timer: "Working for Xs" while
   // streaming, "Worked for Xs" once the duration is known. A turn the user
   // stopped reads "Stopped" (and its process section stays expanded — see
@@ -544,13 +553,13 @@ function MessageBubbleInner({
               chatSessionId={chatSessionId}
             />
           )}
-        {/* Artifact chips for files the changes row already covers would be
-            duplicates — only chip the leftovers (rare non-write artifacts). */}
+        {/* Artifact rows for files the changes row already covers would be
+            duplicates — suppress them (the row's Open/Review shows the file),
+            leaving only the leftovers (generated deliverables, diagrams). */}
         {!isUser && artifacts && artifacts.length > 0 && (
           <MessageArtifacts
-            artifacts={artifacts.filter(
-              (a) => !fileChanges.some((f) => sameTurnFile(a.path, f.path)),
-            )}
+            artifacts={artifacts}
+            isCovered={coveredByChangesRow}
             onPreviewArtifact={onPreviewArtifact}
           />
         )}

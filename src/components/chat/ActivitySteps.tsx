@@ -34,6 +34,7 @@ import { MdLink } from "./MdLink";
 import { DiffCard, editLineStats, type EditPayload } from "./DiffCard";
 import { parseSegments, type Segment, type ToolData } from "../../lib/segments";
 import { sameTurnFile, TurnChangesRow } from "./TurnChangesRow";
+import { VizCard } from "./viz/VizCard";
 // InlineDiagram (vector diagrams) and MermaidDiagram (mermaid + its
 // highlight.js language pack) are rarely seen on the initial chat surface and
 // pull in heavy dependencies; lazy-load both so the main bundle stays small.
@@ -140,21 +141,24 @@ export function RepeatIcon() {
 }
 
 /** Fork = "continue this chat in a second pane beside this one" (fork the
- *  conversation at this message). One stem splitting into two branches.
+ *  conversation at this message). A trend line that splits: the main line
+ *  climbs on to an up-right arrow while a second arrow diverges down-right.
  *
  *  Deliberately node-free: the old three-circle git-branch mark was the same
  *  picture as the `GitBranch` icon the session rows and the Git Graph pane
- *  use, so one shape meant two unrelated things in a single window. Dropping
- *  the circles (and staying out of the git icon family entirely) keeps "this
- *  path splits here" readable without borrowing version control's vocabulary,
- *  and it still says fork rather than split — the branch arms are the point.
+ *  use, so one shape meant two unrelated things in a single window. Staying
+ *  out of the git icon family keeps "this path forks here" readable without
+ *  borrowing version control's vocabulary. The paths are lucide's
+ *  `trending-up-down` verbatim so the mark sits naturally beside the lucide
+ *  icons used everywhere else — copy them, don't hand-tune them.
  */
 export function ForkIcon() {
   return (
     <svg {...iconProps} aria-hidden="true">
-      <path d="M12 21v-6" />
-      <path d="M12 15 6.5 9.5" />
-      <path d="M12 15l5.5-5.5" />
+      <path d="m21 3-9 9-4-4-6 6" />
+      <path d="M21 8V3h-5" />
+      <path d="M14.828 14.828 21 21" />
+      <path d="M21 16v5h-5" />
     </svg>
   );
 }
@@ -215,41 +219,58 @@ export function ArtifactChip({
 }
 
 /** The files an assistant message produced. .html/.svg artifacts are probed via
- *  InlineDiagram, which renders ONLY true diagrams (kind "diagram", authored by
- *  generate_diagram) inline; a plain .html webpage or .svg image falls back to
- *  a download chip so it opens in the preview pane instead. Every other file is
- *  always a download chip. */
+ *  InlineDiagram, which renders true diagrams inline and falls back to a
+ *  download chip for a plain .html webpage or .svg image so it opens in the
+ *  preview pane instead. Every other file is always a download chip.
+ *
+ *  `isCovered` marks artifacts the turn's changes row already lists (files
+ *  written/edited inside the chat's working folder — see
+ *  `turnChangesCoveredPaths`). Those drop out entirely: the row's Review /
+ *  Open is the file's entry point, so a second inline frame or chip would be
+ *  a duplicate. The one exception is a `generate_diagram` deliverable, which
+ *  InlineDiagram keeps inline via its `covered` prop. */
 export function MessageArtifacts({
   artifacts,
   onPreviewArtifact,
+  isCovered,
 }: {
   artifacts: ChatArtifact[];
   onPreviewArtifact?: (artifact: ChatArtifact) => void;
+  /** True for artifacts the per-turn changes row already lists. */
+  isCovered?: (artifact: ChatArtifact) => boolean;
 }) {
   const isVisual = (name: string) => {
     const ext = name.split(".").pop()?.toLowerCase();
     return ext === "html" || ext === "svg";
   };
-  const chips = artifacts.filter((a) => !isVisual(a.filename));
+  const chips = artifacts.filter((a) => !isVisual(a.filename) && !(isCovered?.(a) ?? false));
   const visuals = artifacts.filter((a) => isVisual(a.filename));
   return (
     <>
-      {visuals.map((a) => (
-        <Suspense key={a.path} fallback={
-          <div className="chat-msg-artifacts">
-            <ArtifactChip artifact={a} onPreviewArtifact={onPreviewArtifact} />
-          </div>
-        }>
-          <InlineDiagram
-            artifact={a}
-            onFallback={() => (
+      {visuals.map((a) => {
+        // A covered visual renders nothing (no lazy-chunk flash of a chip that
+        // is about to be dropped) unless it turns out to be a real diagram.
+        const covered = isCovered?.(a) ?? false;
+        return (
+          <Suspense key={a.path} fallback={
+            covered ? null : (
               <div className="chat-msg-artifacts">
                 <ArtifactChip artifact={a} onPreviewArtifact={onPreviewArtifact} />
               </div>
-            )}
-          />
-        </Suspense>
-      ))}
+            )
+          }>
+            <InlineDiagram
+              artifact={a}
+              covered={covered}
+              onFallback={() => (
+                <div className="chat-msg-artifacts">
+                  <ArtifactChip artifact={a} onPreviewArtifact={onPreviewArtifact} />
+                </div>
+              )}
+            />
+          </Suspense>
+        );
+      })}
       {chips.length > 0 && (
         <div className="chat-msg-artifacts" aria-label="Generated files">
           {chips.map((a) => (
@@ -1982,7 +2003,12 @@ export type Block =
   | { kind: "think"; text: string; done: boolean }
   | { kind: "activity"; group: ActivityGroup }
   | { kind: "folded"; title: string; icon: string; count: number; steps: ActivityStep[] }
-  | { kind: "editrow"; step: ActivityStep };
+  | { kind: "editrow"; step: ActivityStep }
+  /** A completed structured visualization (visualize tool): renders in the
+   *  ANSWER area via VizCard, never inside the collapsible process region —
+   *  it is the turn's result, like an inline artifact. MessageBubble's
+   *  process/answer split excludes this kind. */
+  | { kind: "viz"; step: ActivityStep };
 
 /** Titles used for the consecutive-same-tool folding. Subagent chips, edit
  *  cards, result rows and visualization markers keep their dedicated

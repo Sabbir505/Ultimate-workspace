@@ -1442,8 +1442,14 @@ async fn run_task_subagent(
     );
 
     // Build the streaming request. OpenAI-style providers use /v1/chat/completions;
-    // Anthropic uses /v1/messages with a different body shape.
-    let is_anthropic = matches!(provider_str.as_str(), "anthropic" | "anthropic_compatible");
+    // Anthropic uses /v1/messages with a different body shape; the Responses
+    // kind its own /v1/responses (input items, typed events).
+    let wire = match crate::chat::providers::provider_kind(&provider_str) {
+        "anthropic" | "anthropic_compatible" => SubagentWire::Anthropic,
+        "openai_responses" => SubagentWire::Responses,
+        _ => SubagentWire::ChatCompletions,
+    };
+    let is_anthropic = wire == SubagentWire::Anthropic;
     // Local sidecars serialize prompt prefill, so their headers legitimately
     // wait on a busy server — widen the time-to-headers window for them.
     let headers_timeout = crate::chat::reconnect::headers_timeout(provider_str == "local_gguf");
@@ -1491,7 +1497,26 @@ async fn run_task_subagent(
             // back into the follow-up rounds' assistant messages.
             "thinking": {"type": "enabled", "budget_tokens": 2048},
         });
-        run_subagent_loop(&client, &url, &api_key, &mut body, app, sid, sub_id, true, headers_timeout, &run_ctx).await
+        run_subagent_loop(&client, &url, &api_key, &mut body, app, sid, sub_id, wire, headers_timeout, &run_ctx).await
+    } else if wire == SubagentWire::Responses {
+        // Responses: instructions + an input item array instead of messages.
+        // Audit: like the chat-completions branch, a compatible endpoint
+        // REQUIRES a configured base URL — never fall back to api.openai.com.
+        match subagent_openai_base(&provider_str, base_url.as_deref()) {
+            Err(e) => Err(e),
+            Ok(base) => {
+                let url = format!("{base}/v1/responses");
+                let mut body = serde_json::json!({
+                    "model": model,
+                    "stream": true,
+                    "store": false,
+                    "instructions": system_prompt,
+                    "input": [{"role": "user", "content": prompt}],
+                });
+                run_subagent_loop(&client, &url, &api_key, &mut body, app, sid, sub_id, wire, headers_timeout, &run_ctx)
+                    .await
+            }
+        }
     } else {
         // Audit: compatible/local endpoints REQUIRE a configured base URL —
         // the api.openai.com fallback used to send the user's key and the
@@ -1511,7 +1536,7 @@ async fn run_task_subagent(
                         {"role": "user", "content": prompt},
                     ],
                 });
-                run_subagent_loop(&client, &url, &api_key, &mut body, app, sid, sub_id, false, headers_timeout, &run_ctx)
+                run_subagent_loop(&client, &url, &api_key, &mut body, app, sid, sub_id, wire, headers_timeout, &run_ctx)
                     .await
             }
         }
@@ -1605,6 +1630,17 @@ struct SubagentRunContext {
     fs_roots: Vec<String>,
 }
 
+/// Wire format one subagent round speaks, selected from the parent session's
+/// provider kind (see `run_subagent`). Anthropic and OpenAI chat completions
+/// keep their historical bodies; Responses is its own (`/v1/responses`, input
+/// items, typed events).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubagentWire {
+    Anthropic,
+    ChatCompletions,
+    Responses,
+}
+
 /// Spec list for one subagent run, in the provider's format, filtered to the
 /// run's effective set.
 ///
@@ -1612,7 +1648,7 @@ struct SubagentRunContext {
 /// builders apply (see `specs::apply_allow_filter`) — so the OpenAI
 /// `/function/name` envelope quirk is handled once, in the builders, instead
 /// of a second copy here.
-fn subagent_tool_specs(is_anthropic: bool, run: &SubagentRunContext) -> Vec<Value> {
+fn subagent_tool_specs(wire: SubagentWire, run: &SubagentRunContext) -> Vec<Value> {
     // research: the default allowlist carries the ledger tools (research
     // fan-out records against the SESSION's ledger — see the allowlist
     // comment), so the subagent registry renders with the research family on
@@ -1626,10 +1662,13 @@ fn subagent_tool_specs(is_anthropic: bool, run: &SubagentRunContext) -> Vec<Valu
         fs_roots: run.fs_roots.clone(),
         ..tools::ToolCaps::default()
     };
-    if is_anthropic {
-        tools::anthropic_tool_specs(&caps, run.sandbox)
-    } else {
-        tools::openai_tool_specs(&caps, run.sandbox)
+    match wire {
+        SubagentWire::Anthropic => tools::anthropic_tool_specs(&caps, run.sandbox),
+        SubagentWire::ChatCompletions => tools::openai_tool_specs(&caps, run.sandbox),
+        // Responses declares functions flat (no `/function` envelope).
+        SubagentWire::Responses => {
+            crate::chat::streaming::responses_tool_specs(&caps, run.sandbox)
+        }
     }
 }
 
@@ -1857,13 +1896,15 @@ async fn run_subagent_loop(
     app: &AppHandle,
     sid: &str,
     sub_id: &str,
-    is_anthropic: bool,
+    wire: SubagentWire,
     headers_timeout: std::time::Duration,
     run: &SubagentRunContext,
 ) -> Result<String, String> {
     use crate::types::SubagentTokenPayload;
     use futures_util::StreamExt;
     use std::collections::BTreeMap;
+
+    let is_anthropic = wire == SubagentWire::Anthropic;
 
     let emit = |chunk: &str| {
         let _ = app.emit(
@@ -1887,14 +1928,12 @@ async fn run_subagent_loop(
         fs_roots: run.fs_roots.clone(),
         ..tools::ToolCaps::default()
     };
-    let tool_specs = subagent_tool_specs(is_anthropic, run);
+    let tool_specs = subagent_tool_specs(wire, run);
     let has_tools = !tool_specs.is_empty();
     if has_tools {
-        if is_anthropic {
-            body["tools"] = Value::Array(tool_specs);
-        } else {
-            body["tools"] = Value::Array(tool_specs);
-        }
+        // All three wires declare the tool array under `tools` (only the
+        // ENTRY shapes differ — see `subagent_tool_specs`).
+        body["tools"] = Value::Array(tool_specs);
     }
 
     let mut output = String::new();
@@ -1949,6 +1988,9 @@ async fn run_subagent_loop(
         // …"). These are display-captured separately from `output` (which
         // wraps them in <think> for the pane).
         let mut ant_think: BTreeMap<i64, (String, String)> = BTreeMap::new();
+        // Responses: function_call items assembled from the typed events (the
+        // shared parser folds output_item / arguments events in).
+        let mut resp_calls: Vec<crate::chat::streaming::ResponsesRoundCall> = Vec::new();
 
         loop {
             // B-9: same 60s stall watchdog as the main loops — a stuck
@@ -2107,8 +2149,43 @@ async fn run_subagent_loop(
                         }
                         _ => {}
                     }
+                } else if wire == SubagentWire::Responses {
+                    // Responses: typed events, shared parser + shared
+                    // accumulator (streaming.rs) so the event vocabulary has
+                    // one home.
+                    match crate::chat::streaming::parse_responses_event(&v, &mut resp_calls) {
+                        crate::chat::streaming::ResponsesEvent::Text(c) => {
+                            if in_think {
+                                output.push_str("</think>");
+                                emit("</think>");
+                                in_think = false;
+                            }
+                            round_text.push_str(&c);
+                            let clean = crate::chat::streaming::sanitize_stream_text(&c);
+                            output.push_str(&clean);
+                            emit(&clean);
+                        }
+                        crate::chat::streaming::ResponsesEvent::Reasoning(r) => {
+                            if !in_think {
+                                output.push_str("<think>");
+                                emit("<think>");
+                                in_think = true;
+                            }
+                            let clean = crate::chat::streaming::sanitize_stream_text(&r);
+                            output.push_str(&clean);
+                            emit(&clean);
+                        }
+                        crate::chat::streaming::ResponsesEvent::Failed(msg) => {
+                            return Err(format!("provider error: {msg}"));
+                        }
+                        // Terminal / bookkeeping events: the inner loop keeps
+                        // reading until the stream closes (the outer break
+                        // below has the round's state).
+                        crate::chat::streaming::ResponsesEvent::Completed
+                        | crate::chat::streaming::ResponsesEvent::Incomplete
+                        | crate::chat::streaming::ResponsesEvent::Ignore => {}
+                    }
                 } else {
-                    // OpenAI-style deltas.
                     // B-17: a mid-stream {"error": …} event fails the round
                     // instead of silently truncating the subagent answer.
                     if let Some(err) = v.get("error").filter(|e| !e.is_null()) {
@@ -2206,7 +2283,8 @@ async fn run_subagent_loop(
         }
 
         // No tool calls → this round's text is the final answer.
-        let has_calls = !oai_calls.is_empty() || !ant_calls.is_empty();
+        let has_calls =
+            !oai_calls.is_empty() || !ant_calls.is_empty() || !resp_calls.is_empty();
         if !has_calls {
             break;
         }
@@ -2256,8 +2334,57 @@ async fn run_subagent_loop(
                 m.push(json!({ "role": "assistant", "content": blocks }));
                 m.push(json!({ "role": "user", "content": results }));
             });
+        } else if wire == SubagentWire::Responses {
+            // Echo the assistant text (as a message item) + the function_call
+            // items + one function_call_output per result — the Responses
+            // input grammar.
+            if let Some(input) = body["input"].as_array_mut() {
+                if !round_text.trim().is_empty() {
+                    input.push(json!({
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{ "type": "output_text", "text": round_text }],
+                    }));
+                }
+                for call in resp_calls.iter() {
+                    let id = if call.call_id.is_empty() {
+                        call.item_id.clone()
+                    } else {
+                        call.call_id.clone()
+                    };
+                    if id.is_empty() {
+                        // A call the endpoint never identified can't be paired
+                        // with a result item — skip it rather than echo an
+                        // orphaned function_call.
+                        continue;
+                    }
+                    let args = parse_subagent_args(&call.arguments);
+                    input.push(json!({
+                        "type": "function_call",
+                        "call_id": id,
+                        "name": call.name,
+                        "arguments": args.to_string(),
+                    }));
+                    let result = run_subagent_call(
+                        &emit,
+                        app,
+                        sid,
+                        client,
+                        &artifacts_dir,
+                        &caps,
+                        run,
+                        &call.name,
+                        &args,
+                    )
+                    .await;
+                    input.push(json!({
+                        "type": "function_call_output",
+                        "call_id": id,
+                        "output": result,
+                    }));
+                }
+            }
         } else {
-            // Echo assistant tool_calls + feed results back (OpenAI format).
             let mut calls_json: Vec<Value> = Vec::new();
             let mut results: Vec<Value> = Vec::new();
             for (_idx, (id, name, args_acc)) in oai_calls.iter() {

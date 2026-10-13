@@ -274,6 +274,7 @@ impl Caller {
                     system,
                     user,
                     anthropic_max_tokens,
+                    None,
                 );
                 match cancel {
                     // Drop the request future on cancel — reqwest aborts the

@@ -68,7 +68,7 @@ import {
 } from "./agentIcons";
 
 
-/** The five cloud providers from Settings → API Keys — each is its own
+/** The cloud providers from Settings → API Keys — each is its own
  *  endpoint, so each gets its own rail entry. */
 type ProviderId = (typeof PROVIDER_IDS)[number];
 
@@ -78,6 +78,8 @@ const PROVIDER_LABELS: Record<ProviderId, string> = {
   openrouter: "OpenRouter",
   anthropic_compatible: "Anthropic-compatible",
   openai_compatible: "OpenAI-compatible",
+  openai_chat: "Chat Completions",
+  openai_responses: "Responses",
 };
 
 /** Display name for a saved endpoint: the user-assigned name when set, else

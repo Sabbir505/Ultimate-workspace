@@ -186,6 +186,40 @@ pub(crate) async fn summarize_via_provider(
                 Ok((text, in_tok, out_tok))
             }) as Box<dyn Fn(Value) -> Result<(String, i64, i64), String> + Send>,
         )
+    } else if provider_id == ChatProviderId::OpenAIResponses {
+        // Responses wire: `instructions` + an input item array, usage under
+        // the top-level `usage` object.
+        let body = json!({
+            "model": model,
+            "stream": false,
+            "store": false,
+            "max_output_tokens": 2048,
+            "instructions": system,
+            "input": [{ "role": "user", "content": user }],
+        });
+        let req = client
+            .post(format!("{base}/v1/responses"))
+            .header("Authorization", format!("Bearer {api_key}"))
+            .header("content-type", "application/json")
+            .json(&body);
+        (
+            req,
+            Box::new(|v: Value| -> Result<(String, i64, i64), String> {
+                let text = crate::chat::llm_client::responses_output_text(&v)
+                    .trim()
+                    .to_string();
+                let usage = v.get("usage");
+                let in_tok = usage
+                    .and_then(|u| u.get("input_tokens"))
+                    .and_then(|t| t.as_i64())
+                    .unwrap_or(0);
+                let out_tok = usage
+                    .and_then(|u| u.get("output_tokens"))
+                    .and_then(|t| t.as_i64())
+                    .unwrap_or(0);
+                Ok((text, in_tok, out_tok))
+            }) as Box<dyn Fn(Value) -> Result<(String, i64, i64), String> + Send>,
+        )
     } else {
         // OpenAI / OpenRouter / compatible — the OpenAI wire shape.
         let body = json!({

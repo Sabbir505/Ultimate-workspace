@@ -72,6 +72,12 @@ pub fn set_chat_api_key(
     }
 
     if let Some(url) = base_url {
+        // Canonicalize before storing: provider docs advertise the full
+        // endpoint (`https://host/v1/chat/completions`), but every request
+        // builder appends `/v1/...` itself — a stored base ending in `/v1`
+        // produced `.../v1/v1/...` (404) and read as a broken key. See
+        // providers::normalize_base_url.
+        let url = crate::chat::providers::normalize_base_url(&url);
         db::set_setting(&conn, &format!("chat.{provider}.base_url"), &url)
             .map_err(|e| e.to_string())?;
     }
@@ -309,6 +315,8 @@ pub fn get_chat_config(
                 "openrouter",
                 "anthropic_compatible",
                 "openai_compatible",
+                "openai_chat",
+                "openai_responses",
             ] {
                 if secrets::has_chat_api_key(&conn, p) {
                     let base_url = db::get_setting(&conn, &format!("chat.{p}.base_url"))
@@ -371,9 +379,15 @@ pub async fn list_chat_models(
                     "openai" => Some(OpenAIProvider::DEFAULT_BASE.to_string()),
                     _ => None,
                 })
-                .ok_or_else(|| "base_url is required for compatible providers".to_string())?
+                .ok_or_else(|| {
+                    format!("no base URL configured for {provider} — set the endpoint in Settings \u{2192} API")
+                })?
         }
     };
+
+    // Canonicalize before probing: the panel passes what the field shows, and
+    // a pasted docs URL (`.../v1`) would otherwise probe `.../v1/v1/models`.
+    let base = crate::chat::providers::normalize_base_url(&base);
 
     // Resolve API key: prefer the passed argument, then the keychain.
     let key = match api_key {
@@ -442,6 +456,8 @@ pub fn list_chat_instances(db: State<'_, DbState>) -> CmdResult<Vec<ChatInstance
         "openrouter",
         "anthropic_compatible",
         "openai_compatible",
+        "openai_chat",
+        "openai_responses",
     ] {
         if ids.iter().any(|i| i == kind) {
             continue;

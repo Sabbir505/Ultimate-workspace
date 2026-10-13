@@ -237,6 +237,21 @@ fn from_single(v: &Value, ttft_hint_ms: Option<i64>) -> Telemetry {
         t.output_tokens = u.get("completion_tokens").and_then(Value::as_i64);
     }
 
+    // ── Responses API dialect ──
+    // Its terminal `response.completed` event nests the id and usage one level
+    // down (`response.{id,usage}`) and spells the counts `input_tokens` /
+    // `output_tokens` (the same words Anthropic uses, but at the TOP level —
+    // so gating on the nested `response` object keeps the two apart).
+    if let Some(resp) = v.get("response") {
+        if let Some(u) = resp.get("usage") {
+            t.input_tokens = u.get("input_tokens").and_then(Value::as_i64);
+            t.output_tokens = u.get("output_tokens").and_then(Value::as_i64);
+        }
+        if let Some(id) = resp.get("id").and_then(Value::as_str) {
+            t.response_id = Some(id.to_string());
+        }
+    }
+
     // ── timings (llama.cpp) ──
     if let Some(tim) = v.get("timings") {
         t.timings = Some(tim.clone());
@@ -418,6 +433,26 @@ mod tests {
         let tps = t.tokens_per_second.expect("stats.tokens_per_second");
         assert!((tps - 64.5).abs() < 1e-9);
         assert_eq!(t.response_id.as_deref(), Some("lm-1"));
+    }
+
+    // ── Responses API ──
+
+    #[test]
+    fn responses_terminal_event_reports_usage_and_id() {
+        // A captured /v1/responses stream (Settings → Logs): the counts ride
+        // the terminal event, nested under `response`, with the
+        // input_tokens/output_tokens spellings.
+        let body = concat!(
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hi\"}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_123\",\"usage\":{\"input_tokens\":120,\"output_tokens\":45}}}\n\n",
+        );
+        let t = extract(body, Framing::Sse, None);
+        assert!(t.streamed, "an SSE body is a streamed turn");
+        assert_eq!(t.response_id.as_deref(), Some("resp_123"));
+        assert_eq!(t.input_tokens, Some(120));
+        assert_eq!(t.output_tokens, Some(45));
     }
 
     // ── tolerance ──

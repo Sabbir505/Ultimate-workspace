@@ -508,6 +508,34 @@ pub(crate) fn openai_message_json(m: &ChatMessage) -> Value {
     json!({ "role": m.role, "content": parts })
 }
 
+/// Build one Responses-API `input` item from a stored message. Text-only
+/// messages stay a bare string (the Responses API accepts it); messages
+/// carrying images become a content-part array with `input_text` /
+/// `input_image` parts, the Responses spellings of the chat wire's
+/// `text` / `image_url`. Assistant text uses `output_text`, the part type the
+/// API assigns to model-authored content.
+pub(crate) fn responses_message_json(m: &ChatMessage) -> Value {
+    if m.images.is_empty() {
+        return json!({ "role": m.role, "content": m.content });
+    }
+    let text_type = if m.role == "assistant" {
+        "output_text"
+    } else {
+        "input_text"
+    };
+    let mut parts: Vec<Value> = Vec::new();
+    if !m.content.is_empty() {
+        parts.push(json!({ "type": text_type, "text": m.content }));
+    }
+    for img in &m.images {
+        parts.push(json!({
+            "type": "input_image",
+            "image_url": format!("data:{};base64,{}", img.media_type, img.data)
+        }));
+    }
+    json!({ "role": m.role, "content": parts })
+}
+
 /// Build an Anthropic-style message object, using a content-block array with
 /// `image` blocks when the message carries images, otherwise a plain string.
 pub(crate) fn anthropic_message_json(m: &ChatMessage) -> Value {

@@ -146,7 +146,7 @@ pub async fn fetch_provider_model_windows(
         // OpenRouter: the frontend fetches the public endpoint directly (no
         // key). OpenAI: no window data on any keyed API. Both keep the
         // registry fallback.
-        "openai_compatible" => {
+        "openai_compatible" | "openai_chat" | "openai_responses" => {
             // OpenAI-compatible relays (the commandcode/provider family)
             // commonly mirror OpenRouter's `context_length` on their own
             // `/models`. Base URL from the provider's setting key (same one
@@ -266,6 +266,8 @@ fn is_provider_kind(kind: &str) -> bool {
     matches!(
         kind,
         "openai_compatible"
+            | "openai_chat"
+            | "openai_responses"
             | "anthropic_compatible"
             | "anthropic"
             | "openrouter"
@@ -405,6 +407,8 @@ pub(crate) fn parse_provider_id(s: &str) -> Option<ChatProviderId> {
     match crate::chat::providers::provider_kind(s) {
         "anthropic" => Some(ChatProviderId::Anthropic),
         "openai" => Some(ChatProviderId::OpenAI),
+        "openai_chat" => Some(ChatProviderId::OpenAIChat),
+        "openai_responses" => Some(ChatProviderId::OpenAIResponses),
         "anthropic_compatible" => Some(ChatProviderId::AnthropicCompatible),
         "openai_compatible" => Some(ChatProviderId::OpenAICompatible),
         "openrouter" => Some(ChatProviderId::OpenRouter),
@@ -534,11 +538,21 @@ pub(crate) fn resolve_session_summarizer(
         return None;
     }
     let api_key = crate::secrets::get_chat_api_key(conn, &provider)?;
-    let base = db::get_setting(conn, &format!("chat.{provider}.base_url"))
+    let stored_base = db::get_setting(conn, &format!("chat.{provider}.base_url"))
         .ok()
         .flatten()
-        .filter(|b| !b.trim().is_empty())
-        .unwrap_or_else(|| "https://api.openai.com".to_string());
+        .filter(|b| !b.trim().is_empty());
+    let base = match stored_base {
+        Some(b) => b,
+        // The API-style kinds have NO default endpoint (mirrors the send
+        // path's candidate resolution): a missing base is a configuration
+        // gap, not a reason to post the user's relay key to api.openai.com.
+        None if matches!(
+            provider_id,
+            ChatProviderId::OpenAIChat | ChatProviderId::OpenAIResponses
+        ) => return None,
+        None => "https://api.openai.com".to_string(),
+    };
     let model = session.model.trim().to_string();
     if model.is_empty() {
         return None;
@@ -1692,6 +1706,8 @@ mod tests {
         for s in [
             "anthropic",
             "openai",
+            "openai_chat",
+            "openai_responses",
             "anthropic_compatible",
             "openai_compatible",
             "openrouter",

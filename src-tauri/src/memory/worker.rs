@@ -1255,8 +1255,11 @@ async fn oneshot(
     user: &str,
     max_tokens: u32,
 ) -> Result<String, String> {
-    if matches!(provider, "openai_compatible" | "local_gguf" | "anthropic_compatible")
-        && base_url.map(|b| b.trim().is_empty()).unwrap_or(true)
+    if matches!(
+        provider,
+        "openai_compatible" | "openai_chat" | "openai_responses" | "local_gguf"
+            | "anthropic_compatible"
+    ) && base_url.map(|b| b.trim().is_empty()).unwrap_or(true)
     {
         return Err(format!(
             "no base_url configured for {provider} memory extraction — \
@@ -1265,7 +1268,7 @@ async fn oneshot(
     }
     let client = crate::chat::llm_client::oneshot_client()?;
     crate::chat::llm_client::oneshot(
-        provider, &client, api_key, base_url, model, system, user, max_tokens,
+        provider, &client, api_key, base_url, model, system, user, max_tokens, None,
     )
     .await?
     .ok_or_else(|| format!("unsupported provider for memory extraction: {provider}"))

@@ -168,6 +168,8 @@ export const countContextTokens = (chatSessionId: string) =>
  *  backend's `provider_input_includes_cache` (chat/commands.rs). */
 export const PROVIDER_INPUT_INCLUDES_CACHE = new Set([
   "openai",
+  "openai_chat",
+  "openai_responses",
   "openai_compatible",
   "openrouter",
   "local_gguf",

@@ -179,6 +179,38 @@ fn migrate_unc_paths(conn: &Connection) -> DbResult<()> {
     Ok(())
 }
 
+/// One-time fix-up for provider base URLs saved with the `/v1` suffix.
+///
+/// Provider docs advertise the full endpoint (`https://host/v1/chat/completions`),
+/// so pasting one into Settings → API stored a base ending in `/v1` — while
+/// every request builder appends `/v1/...` itself, producing `.../v1/v1/...`
+/// and a 404 that read as "my API key doesn't work" (relay errors: "is not a
+/// registered API route"). New saves are canonicalized in `set_chat_api_key`;
+/// this heals rows written before that, so every reader (chat sends, model
+/// lists, context windows, one-shots, mobile relay) agrees without them each
+/// normalizing at read time. Idempotent: a canonical value normalizes to
+/// itself.
+fn migrate_provider_base_urls(conn: &Connection) -> DbResult<()> {
+    let rows: Vec<(String, String)> = {
+        let mut stmt = conn
+            .prepare("SELECT key, value FROM app_settings WHERE key LIKE 'chat.%.base_url'")?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+    for (key, value) in rows {
+        let normalized = crate::chat::providers::normalize_base_url(&value);
+        if normalized != value {
+            conn.execute(
+                "UPDATE app_settings SET value = ?1 WHERE key = ?2",
+                rusqlite::params![normalized, key],
+            )?;
+        }
+    }
+    Ok(())
+}
+
 /// One-time backfill for databases created before the FTS index existed.
 /// The FTS table is external-content, so a plain scan of it reads the CONTENT
 /// table and can't reveal whether the index is populated — compare row counts
@@ -473,7 +505,8 @@ pub fn configure(conn: &Connection) -> DbResult<()> {
     // Research caches grow without bound otherwise: drop rows past their TTL
     // on every open (research_cache.rs also purges on insert).
     research_cache::purge_expired(conn)?;
-    migrate_unc_paths(conn)
+    migrate_unc_paths(conn)?;
+    migrate_provider_base_urls(conn)
 }
 
 /// The registry tables shipped as `crew_agents`/`crew_runs`; the feature is
@@ -2299,6 +2332,43 @@ mod tests {
         // SUBSTR would mangle a share path into `UNC\server\share` — it must
         // stay verbatim (walkdir accepts the form; only display keeps it).
         assert_eq!(read(&unc.id), r"\\?\UNC\server\share");
+    }
+
+    /// Provider base URLs saved before the `/v1` canonicalization: pasting a
+    /// provider's documented endpoint (`https://host/v1/chat/completions`)
+    /// stored a base ending in `/v1`, and every request builder appends
+    /// `/v1/...` itself — the relay answered 404 "is not a registered API
+    /// route", which reads as a dead key. The migration strips exactly that
+    /// suffix (once, idempotently) and leaves every other shape alone.
+    #[test]
+    fn migrate_provider_base_urls_strips_only_the_v1_suffix() {
+        let conn = mem();
+        let set = |key: &str, value: &str| crate::db::set_setting(&conn, key, value).unwrap();
+
+        // The reported failure, and its trailing-slash twin.
+        set("chat.openai_chat.base_url", "https://api.commandcode.ai/provider/v1");
+        set("chat.openai_responses.base_url", "https://relay.example.com/v1/");
+        // Shapes that must survive verbatim.
+        set("chat.openai.base_url", "https://api.openai.com");
+        set("chat.openai_compatible.base_url", "https://host/api/v1beta");
+        set("chat.anthropic_compatible.base_url", "https://gateway.example.com/llm");
+
+        super::migrate_provider_base_urls(&conn).unwrap();
+        // Idempotent — configure() re-runs it on every open.
+        super::migrate_provider_base_urls(&conn).unwrap();
+
+        let read = |key: &str| crate::db::get_setting(&conn, key).unwrap().unwrap_or_default();
+        assert_eq!(
+            read("chat.openai_chat.base_url"),
+            "https://api.commandcode.ai/provider"
+        );
+        assert_eq!(read("chat.openai_responses.base_url"), "https://relay.example.com");
+        assert_eq!(read("chat.openai.base_url"), "https://api.openai.com");
+        assert_eq!(read("chat.openai_compatible.base_url"), "https://host/api/v1beta");
+        assert_eq!(
+            read("chat.anthropic_compatible.base_url"),
+            "https://gateway.example.com/llm"
+        );
     }
 
     /// Subagent-run sessions link to their definition through `agent_def_id` with

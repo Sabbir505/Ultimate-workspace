@@ -6,6 +6,8 @@ import type { ChatAttachmentInput } from "./artifacts";
 export type ChatProvider =
   | "anthropic"
   | "openai"
+  | "openai_chat"
+  | "openai_responses"
   | "openrouter"
   | "anthropic_compatible"
   | "openai_compatible"

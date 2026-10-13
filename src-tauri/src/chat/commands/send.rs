@@ -185,7 +185,7 @@ pub(crate) async fn fetch_models_list(
         "anthropic" | "anthropic_compatible" => req
             .header("x-api-key", &key)
             .header("anthropic-version", ANTHROPIC_API_VERSION),
-        "openai" | "openai_compatible" | "openrouter" => {
+        "openai" | "openai_compatible" | "openai_chat" | "openai_responses" | "openrouter" => {
             req.header("Authorization", format!("Bearer {key}"))
         }
         _ => return Err("list_chat_models only supports compatible providers".to_string()),
@@ -230,9 +230,19 @@ pub(crate) async fn fetch_models_list(
     };
     let models: Vec<crate::types::ChatModel> =
         if let Some(data) = json.get("data").and_then(|v| v.as_array()) {
+            let endpoint_path = kind_endpoint_path(provider);
             data.iter()
                 .filter_map(|v| {
                     let id = v.get("id")?.as_str()?.to_string();
+                    // Relays that publish per-model `supported_endpoints` (e.g.
+                    // api.commandcode.ai/provider) serve each model on ONE
+                    // wire: its Claude models only on /messages, most others on
+                    // /chat/completions and/or /responses, some on chat only.
+                    // Offering a model under a kind that cannot call it made
+                    // every send 404 — indistinguishable from a bad key.
+                    if !model_supports_endpoint(v, endpoint_path) {
+                        return None;
+                    }
                     let object = v
                         .get("object")
                         .and_then(|o| o.as_str())
@@ -272,6 +282,34 @@ pub(crate) async fn fetch_models_list(
         };
 
     Ok(models)
+}
+
+/// The endpoint path a provider KIND actually calls — the wire every request
+/// builder appends (`{base}/v1/...`). Used to filter a relay's per-model
+/// `supported_endpoints` metadata down to the models this endpoint can serve.
+pub(crate) fn kind_endpoint_path(provider: &str) -> &'static str {
+    match crate::chat::providers::provider_kind(provider) {
+        "anthropic" | "anthropic_compatible" => "/messages",
+        "openai_responses" => "/responses",
+        // OpenAI, the Chat Completions kind, OpenAI-compatible relays,
+        // OpenRouter and the local sidecar all speak chat completions.
+        _ => "/chat/completions",
+    }
+}
+
+/// True when a model entry is servable on `path`. A server that publishes no
+/// `supported_endpoints` (or an empty list) serves everything on whatever wire
+/// it implements — missing metadata must never hide models. Entries are
+/// matched by suffix so both `/chat/completions` and `/v1/chat/completions`
+/// spellings count.
+fn model_supports_endpoint(model: &serde_json::Value, path: &str) -> bool {
+    match model.get("supported_endpoints").and_then(|e| e.as_array()) {
+        Some(list) if !list.is_empty() => list
+            .iter()
+            .filter_map(|p| p.as_str())
+            .any(|p| p.trim_end_matches('/').ends_with(path)),
+        _ => true,
+    }
 }
 
 /// Public alias for the mobile relay path (mobile/session_chat.rs), which
@@ -1605,7 +1643,10 @@ pub async fn send_chat_message(
         let base_ready = !base_url.as_deref().unwrap_or("").trim().is_empty()
             || !matches!(
                 provider_id,
-                ChatProviderId::OpenAICompatible | ChatProviderId::AnthropicCompatible
+                ChatProviderId::OpenAICompatible
+                    | ChatProviderId::OpenAIChat
+                    | ChatProviderId::OpenAIResponses
+                    | ChatProviderId::AnthropicCompatible
             );
         let window = {
             let conn = db.0.lock();
@@ -2356,6 +2397,56 @@ mod tests {
         // decoding at all.
         let b64_too_long = "A".repeat(MAX_ATTACHMENT_B64_LEN + 1);
         assert!(decode_attachment_capped(&b64_too_long).is_none());
+    }
+
+    /// Relays that publish per-model `supported_endpoints` (the commandcode
+    /// family does) must only offer a model on a wire it can actually serve —
+    /// the Claude-only `/messages` models vanish from a chat-completions
+    /// endpoint, and a chat-only model vanishes from a Responses endpoint.
+    /// Servers without the metadata keep every model.
+    #[test]
+    fn models_are_filtered_to_the_kinds_own_wire() {
+        let entry = |eps: serde_json::Value| {
+            serde_json::json!({ "id": "m", "supported_endpoints": eps })
+        };
+
+        // The wire each kind calls.
+        assert_eq!(kind_endpoint_path("anthropic"), "/messages");
+        assert_eq!(kind_endpoint_path("anthropic_compatible"), "/messages");
+        assert_eq!(kind_endpoint_path("openai_responses"), "/responses");
+        assert_eq!(kind_endpoint_path("openai_chat"), "/chat/completions");
+        assert_eq!(kind_endpoint_path("openai_compatible"), "/chat/completions");
+        assert_eq!(kind_endpoint_path("openrouter"), "/chat/completions");
+        assert_eq!(kind_endpoint_path("local_gguf"), "/chat/completions");
+
+        // Claude on the relay: /messages only.
+        let claude = entry(serde_json::json!(["/messages"]));
+        assert!(model_supports_endpoint(&claude, "/messages"));
+        assert!(!model_supports_endpoint(&claude, "/chat/completions"));
+        assert!(!model_supports_endpoint(&claude, "/responses"));
+
+        // GPT-family: chat completions + responses.
+        let gpt = entry(serde_json::json!(["/chat/completions", "/responses"]));
+        assert!(model_supports_endpoint(&gpt, "/chat/completions"));
+        assert!(model_supports_endpoint(&gpt, "/responses"));
+        assert!(!model_supports_endpoint(&gpt, "/messages"));
+
+        // Chat-only models must not be offered to the Responses kind.
+        let chat_only = entry(serde_json::json!(["/chat/completions"]));
+        assert!(model_supports_endpoint(&chat_only, "/chat/completions"));
+        assert!(!model_supports_endpoint(&chat_only, "/responses"));
+
+        // Both prefix spellings count, trailing slashes tolerated.
+        let prefixed = entry(serde_json::json!(["/v1/chat/completions/"]));
+        assert!(model_supports_endpoint(&prefixed, "/chat/completions"));
+
+        // No metadata (or an empty list) = serve everything on whatever wire
+        // the endpoint implements — never hide models for missing metadata.
+        assert!(model_supports_endpoint(&serde_json::json!({"id": "m"}), "/responses"));
+        assert!(model_supports_endpoint(
+            &entry(serde_json::json!([])),
+            "/responses"
+        ));
     }
 
     /// An uploaded image must survive the turn: its bytes are written to disk

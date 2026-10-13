@@ -355,13 +355,87 @@ async fn call_llm_structured(
         ));
     }
 
-    let is_anthropic = matches!(llm.provider.as_str(), "anthropic" | "anthropic_compatible");
-
-    if is_anthropic {
-        call_anthropic_structured(&client, llm, system_prompt, user_prompt, json_schema).await
-    } else {
-        call_openai_structured(&client, llm, system_prompt, user_prompt, json_schema).await
+    match crate::chat::providers::provider_kind(&llm.provider) {
+        "anthropic" | "anthropic_compatible" => {
+            call_anthropic_structured(&client, llm, system_prompt, user_prompt, json_schema).await
+        }
+        "openai_responses" => {
+            call_responses_structured(&client, llm, system_prompt, user_prompt, json_schema).await
+        }
+        _ => {
+            call_openai_structured(&client, llm, system_prompt, user_prompt, json_schema).await
+        }
     }
+}
+
+/// Call the OpenAI Responses API (`/v1/responses`) with prompt-based JSON
+/// structured output — the Responses sibling of `call_openai_structured`.
+async fn call_responses_structured(
+    client: &Client,
+    llm: &LlmContext,
+    system_prompt: &str,
+    user_prompt: &str,
+    json_schema: &Value,
+) -> Result<ArtifactSpec, String> {
+    // Same base policy as the chat wire: a custom endpoint must carry an
+    // explicit base_url (falling back to api.openai.com would send a relay
+    // key to OpenAI and 401).
+    let Some(base) = llm.base_url.as_deref().filter(|b| !b.trim().is_empty()) else {
+        return Err(
+            "No base URL configured for this provider. Set one in Settings \u{2192} API.".into(),
+        );
+    };
+    let url = format!("{base}/v1/responses");
+
+    let user_with_schema = format!(
+        "{}\n\nOutput ONLY valid JSON matching this schema. Do NOT include markdown fences or any other text:\n{}",
+        user_prompt,
+        serde_json::to_string_pretty(json_schema).unwrap()
+    );
+
+    let body = serde_json::json!({
+        "model": llm.model,
+        "stream": false,
+        "store": false,
+        "instructions": system_prompt,
+        "input": [{"role": "user", "content": user_with_schema}],
+    });
+
+    let resp = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", llm.api_key))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("HTTP error: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("API error {}: {}", status, text));
+    }
+
+    let raw = resp
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read response body: {}", e))?;
+    let v: Value = serde_json::from_str(&raw).map_err(|e| {
+        format!(
+            "Failed to parse JSON response: {} (raw: {})",
+            e,
+            crate::util::truncate_chars(&raw, 200)
+        )
+    })?;
+    let content = crate::chat::llm_client::responses_output_text(&v);
+    if content.trim().is_empty() {
+        return Err(format!(
+            "Missing content in response (raw: {})",
+            crate::util::truncate_chars(&raw, 200)
+        ));
+    }
+
+    parse_spec_from_text(&content)
 }
 
 /// Generate through a harness CLI (claude/kimi/opencode): one blocking

@@ -2885,6 +2885,8 @@ pub(super) async fn handle_chat_turn(
     let provider_id = match crate::chat::providers::provider_kind(&provider_id_str) {
         "anthropic" => ChatProviderId::Anthropic,
         "openai" => ChatProviderId::OpenAI,
+        "openai_chat" => ChatProviderId::OpenAIChat,
+        "openai_responses" => ChatProviderId::OpenAIResponses,
         "anthropic_compatible" => ChatProviderId::AnthropicCompatible,
         "openai_compatible" => ChatProviderId::OpenAICompatible,
         "openrouter" => ChatProviderId::OpenRouter,
@@ -3597,7 +3599,7 @@ async fn probe_api_provider(
     let id = crate::chat::providers::provider_kind(id);
     let fetched = match id {
         "openrouter" => fetch_model_list(client, "https://openrouter.ai/api", key, "bearer").await,
-        "anthropic_compatible" | "openai_compatible" => {
+        "anthropic_compatible" | "openai_compatible" | "openai_chat" | "openai_responses" => {
             if let Some(base) = base_url {
                 let style = if id == "anthropic_compatible" {
                     "x-api-key"
@@ -3723,6 +3725,8 @@ pub async fn build_available_providers(
         ),
         ("anthropic_compatible", "Anthropic Compatible", &[]),
         ("openai_compatible", "OpenAI Compatible", &[]),
+        ("openai_chat", "Chat Completions", &[]),
+        ("openai_responses", "Responses", &[]),
     ];
 
     // Reuse a single reqwest::Client (PERF M9): constructing one per call

@@ -12,6 +12,13 @@ use serde::{Deserialize, Serialize};
 pub enum ChatProviderId {
     Anthropic,
     OpenAI,
+    /// Custom endpoint that speaks the OpenAI `/v1/chat/completions` wire.
+    /// Same protocol as `OpenAICompatible`, but selected EXPLICITLY by API
+    /// style — relay keys are often provisioned for one endpoint family only,
+    /// so "which wire does this key speak" is a first-class choice.
+    OpenAIChat,
+    /// Custom endpoint that speaks the OpenAI `/v1/responses` wire.
+    OpenAIResponses,
     AnthropicCompatible,
     OpenAICompatible,
     OpenRouter,
@@ -28,11 +35,29 @@ impl ChatProviderId {
             ChatProviderId::Anthropic | ChatProviderId::AnthropicCompatible => {
                 AnthropicProvider.default_model()
             }
+            ChatProviderId::OpenAIChat | ChatProviderId::OpenAIResponses => {
+                OpenAIProvider.default_model()
+            }
             ChatProviderId::OpenAI
             | ChatProviderId::OpenAICompatible
             | ChatProviderId::OpenRouter => OpenRouterProvider.default_model(),
             ChatProviderId::LocalGguf => LocalGgufProvider.default_model(),
         }
+    }
+
+    /// True for the two OpenAI-family wires where reported `input_tokens`
+    /// already INCLUDE the cached prompt tokens (`prompt_tokens` ⊇ cached).
+    /// Anthropic-style providers report the uncached slice instead.
+    pub fn input_includes_cache(&self) -> bool {
+        matches!(
+            self,
+            ChatProviderId::OpenAI
+                | ChatProviderId::OpenAIChat
+                | ChatProviderId::OpenAIResponses
+                | ChatProviderId::OpenAICompatible
+                | ChatProviderId::OpenRouter
+                | ChatProviderId::LocalGguf
+        )
     }
 
     /// Stable string used as the chat_messages.provider value (and thus the
@@ -41,6 +66,8 @@ impl ChatProviderId {
         match self {
             ChatProviderId::Anthropic => "anthropic",
             ChatProviderId::OpenAI => "openai",
+            ChatProviderId::OpenAIChat => "openai_chat",
+            ChatProviderId::OpenAIResponses => "openai_responses",
             ChatProviderId::AnthropicCompatible => "anthropic_compatible",
             ChatProviderId::OpenAICompatible => "openai_compatible",
             ChatProviderId::OpenRouter => "openrouter",
@@ -55,6 +82,8 @@ pub fn is_known_kind(s: &str) -> bool {
         s,
         "anthropic"
             | "openai"
+            | "openai_chat"
+            | "openai_responses"
             | "openrouter"
             | "anthropic_compatible"
             | "openai_compatible"
@@ -71,6 +100,29 @@ pub fn provider_kind(id: &str) -> &str {
     match id.split_once('-') {
         Some((kind, suffix)) if is_known_kind(kind) && !suffix.is_empty() => kind,
         _ => id,
+    }
+}
+
+/// Canonicalize a user-supplied provider base URL.
+///
+/// The app's convention is that a stored base EXCLUDES the `/v1` prefix —
+/// every request builder appends its own path (`{base}/v1/chat/completions`,
+/// `{base}/v1/responses`, `{base}/v1/messages`, `{base}/v1/models`). Provider
+/// docs, however, advertise the FULL endpoint (`https://host/v1/chat/...`),
+/// so pasting the documented URL stored a base ending in `/v1` and every
+/// request went to `.../v1/v1/...` — a 404 from the relay ("not a registered
+/// API route"), which reads exactly like "my API key doesn't work".
+///
+/// Also drops trailing slashes, which would otherwise produce `//v1/...`
+/// inside the built paths. Applied on save (`set_chat_api_key`) and once over
+/// existing rows (`db::migrate_provider_base_urls`), so both spellings mean
+/// the same endpoint and no reader has to care.
+pub fn normalize_base_url(base: &str) -> String {
+    let trimmed = base.trim().trim_end_matches('/');
+    // Only a pure `/v1` path segment — never `/v1beta` or `/v10`.
+    match trimmed.strip_suffix("/v1") {
+        Some(head) if !head.is_empty() => head.trim_end_matches('/').to_string(),
+        _ => trimmed.to_string(),
     }
 }
 
@@ -320,15 +372,22 @@ struct ChatTemplateKwargs {
     enable_thinking: bool,
 }
 
+/// OpenAI reasoning-model name heuristic used by every `max_tokens` gate:
+/// o1/o3/o4-prefixed and gpt-5-prefixed ids. Those endpoints reject the
+/// deprecated `max_tokens` field outright ("Unsupported parameter … use
+/// 'max_completion_tokens' instead"), so anything that would attach a cap
+/// must omit it for them. Mirrors the streaming-path heuristic exactly — the
+/// model ids the catalogs store are bare (no vendor prefix to strip).
+pub(crate) fn is_openai_reasoning_model(model: &str) -> bool {
+    let m = model.to_ascii_lowercase();
+    m.starts_with("o1") || m.starts_with("o3") || m.starts_with("o4") || m.starts_with("gpt-5")
+}
+
 /// E-2c: the `max_tokens` cap for OpenAI-family wire requests — sent whenever
-/// the caller set one, EXCEPT for OpenAI reasoning models whose API rejects
-/// the deprecated `max_tokens` field (they want `max_completion_tokens`).
-/// Name heuristic: o1/o3/o4-prefixed and gpt-5-prefixed ids.
+/// the caller set one, EXCEPT for OpenAI reasoning models (see
+/// [`is_openai_reasoning_model`]).
 fn openai_wire_max_tokens(req: &ChatRequest) -> Option<u32> {
-    let m = req.model.to_ascii_lowercase();
-    let reasoning_model =
-        m.starts_with("o1") || m.starts_with("o3") || m.starts_with("o4") || m.starts_with("gpt-5");
-    if reasoning_model {
+    if is_openai_reasoning_model(&req.model) {
         return None;
     }
     req.max_tokens.map(|t| t as u32)
@@ -1026,6 +1085,305 @@ impl ChatProvider for OpenAICompatibleProvider {
     }
 }
 
+// ---- OpenAIChat ----
+//
+// Explicit API-STYLE variant of `OpenAICompatible`: the same
+// `/v1/chat/completions` wire and `Authorization: Bearer` auth, but selectable
+// as "Chat Completions" in Settings because relay keys are commonly issued per
+// endpoint family. Unlike the native `OpenAI` kind it has NO default base — a
+// missing base URL is a configuration error, never a silent call to
+// api.openai.com with the user's key.
+
+pub struct OpenAIChatProvider;
+
+impl OpenAIChatProvider {
+    const REQUIRED_BASE: &'static str = "base_url is required for OpenAIChat";
+}
+
+impl ChatProvider for OpenAIChatProvider {
+    fn id(&self) -> ChatProviderId {
+        ChatProviderId::OpenAIChat
+    }
+
+    fn default_model(&self) -> &'static str {
+        OPENAI_DEFAULT_MODEL
+    }
+
+    fn build_request(
+        &self,
+        client: &reqwest::Client,
+        req: &ChatRequest,
+        api_key: &str,
+        base_url: Option<&str>,
+    ) -> Result<reqwest::RequestBuilder, String> {
+        let base = base_url.ok_or_else(|| Self::REQUIRED_BASE.to_string())?;
+        Ok(openai_request(client, req, api_key, base))
+    }
+
+    fn parse_sse_chunk(
+        &self,
+        line: &str,
+        buf: &mut String,
+    ) -> Result<(Option<String>, bool), String> {
+        OpenAIProvider.parse_sse_chunk(line, buf)
+    }
+
+    fn parse_usage(&self, buf: &str) -> Option<ChatUsage> {
+        OpenAIProvider.parse_usage(buf)
+    }
+}
+
+// ---- OpenAIResponses ----
+//
+// The OpenAI Responses API (`/v1/responses`) — OpenAI's newer wire for its
+// frontier/reasoning models and the endpoint family many relay providers now
+// expose. Structurally different from chat completions:
+//   - the system prompt is `instructions`, not a system message;
+//   - the conversation is an `input` ITEM array (messages, function_call,
+//     function_call_output) instead of role messages;
+//   - tools are flat `{type:"function", name, description, parameters}`
+//     declarations;
+//   - the stream is a sequence of TYPED events (`response.output_text.delta`,
+//     `response.output_item.done`, `response.completed`, …) rather than
+//     `choices[].delta` chunks, so tool calls arrive as whole `function_call`
+//     items.
+// Uses the same `Authorization: Bearer` auth as the rest of the OpenAI family
+// and, like the other custom kinds, REQUIRES an explicit base URL.
+
+pub struct OpenAIResponsesProvider;
+
+impl OpenAIResponsesProvider {
+    const REQUIRED_BASE: &'static str = "base_url is required for OpenAIResponses";
+}
+
+/// Assemble one OpenAI `/v1/responses` wire body. Shared by the plain
+/// (tools-off) request builder and the streaming tool loop
+/// (`streaming.rs::run_openai_responses_tool_loop`) so both paths emit one
+/// identical shape.
+pub(crate) fn responses_wire_body(
+    req: &ChatRequest,
+    input: Vec<serde_json::Value>,
+    tools: Vec<serde_json::Value>,
+) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "model": req.model,
+        "input": input,
+        "stream": true,
+        // Retention opt-out: relay endpoints pass this through to OpenAI, and
+        // response bodies are the user's prompts. Standard field, honored by
+        // every Responses-compatible server we know of.
+        "store": false,
+    });
+    if let Some(sys) = req.system.as_deref().filter(|s| !s.is_empty()) {
+        body["instructions"] = serde_json::json!(sys);
+    }
+    if !tools.is_empty() {
+        body["tools"] = serde_json::Value::Array(tools);
+    }
+    // Generation cap. Same reasoning-model heuristic as the chat-completions
+    // wire (o-series / gpt-5 endpoints reject the plain cap field).
+    if let Some(max) = openai_wire_max_tokens(req) {
+        body["max_output_tokens"] = serde_json::json!(max);
+    }
+    // Reasoning-effort hint — the Responses equivalent of the chat wire's
+    // `reasoning_effort` (a nested `reasoning` object here).
+    if let Some(effort) = &req.effort {
+        body["reasoning"] = serde_json::json!({ "effort": effort });
+    }
+    body
+}
+
+/// The `input` ITEM array for a request: optional memory block, the
+/// conversation, then the per-turn local-docs retrieval (appended LAST so the
+/// stable prefix stays byte-identical across turns — same caching rationale as
+/// the other wires; see `openai_wire_body`).
+pub(crate) fn responses_input(req: &ChatRequest) -> Vec<serde_json::Value> {
+    let mut items: Vec<serde_json::Value> = Vec::new();
+    if let Some(mem) = &req.memory_context {
+        items.push(serde_json::json!({ "role": "user", "content": mem }));
+    }
+    items.extend(
+        req.messages
+            .iter()
+            .map(crate::chat::proto::responses_message_json),
+    );
+    if !req.local_docs_retrieval.is_empty() {
+        items.push(serde_json::json!({
+            "role": "user",
+            "content": req.local_docs_retrieval.join("\n\n")
+        }));
+    }
+    items
+}
+
+/// Build the OpenAI `/v1/responses` streaming request (the tools-off path).
+fn responses_request(
+    client: &reqwest::Client,
+    req: &ChatRequest,
+    api_key: &str,
+    base: &str,
+) -> reqwest::RequestBuilder {
+    let url = format!("{base}/v1/responses");
+    let body = responses_wire_body(req, responses_input(req), Vec::new());
+    capture_request("POST", &url, &body);
+    client
+        .post(&url)
+        .header("Authorization", format!("Bearer {api_key}"))
+        .json(&body)
+}
+
+impl ChatProvider for OpenAIResponsesProvider {
+    fn id(&self) -> ChatProviderId {
+        ChatProviderId::OpenAIResponses
+    }
+
+    fn default_model(&self) -> &'static str {
+        OPENAI_DEFAULT_MODEL
+    }
+
+    fn build_request(
+        &self,
+        client: &reqwest::Client,
+        req: &ChatRequest,
+        api_key: &str,
+        base_url: Option<&str>,
+    ) -> Result<reqwest::RequestBuilder, String> {
+        let base = base_url.ok_or_else(|| Self::REQUIRED_BASE.to_string())?;
+        Ok(responses_request(client, req, api_key, base))
+    }
+
+    fn parse_sse_chunk(
+        &self,
+        line: &str,
+        buf: &mut String,
+    ) -> Result<(Option<String>, bool), String> {
+        // mi24 contract: retain ONLY usage-bearing lines (the `response.completed`
+        // event carries the usage object) — see the Anthropic impl.
+        if line.contains("\"usage\"") {
+            buf.push_str(line);
+            buf.push('\n');
+        }
+
+        let data = match line.strip_prefix("data:").map(|s| s.trim_start()) {
+            Some(d) => d,
+            None => return Ok((None, false)), // event:/id:/retry: lines
+        };
+        if data == "[DONE]" {
+            // Some gateways terminate a Responses stream with the
+            // chat-completions sentinel even though the spec ends at
+            // `response.completed`.
+            return Ok((None, true));
+        }
+
+        let payload: serde_json::Value =
+            serde_json::from_str(data).map_err(|e| format!("SSE parse error: {e}"))?;
+
+        // B-17: a mid-stream error event must fail the turn, not "complete" it
+        // with truncated text.
+        if let Some(err) = payload.get("error").filter(|e| !e.is_null()) {
+            let msg = err
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("provider returned an error event")
+                .to_string();
+            return Err(format!("provider error: {msg}"));
+        }
+
+        let event_type = payload
+            .get("type")
+            .and_then(|t| t.as_str())
+            .unwrap_or_default();
+        match event_type {
+            "response.output_text.delta" | "response.refusal.delta" => {
+                if let Some(text) = payload.get("delta").and_then(|d| d.as_str()) {
+                    if !text.is_empty() {
+                        return Ok((Some(text.to_string()), false));
+                    }
+                }
+            }
+            // Reasoning summaries / raw reasoning text — same private-use
+            // sentinel the other wires use so the pump wraps them in <think>.
+            "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
+                if let Some(text) = payload.get("delta").and_then(|d| d.as_str()) {
+                    if !text.is_empty() {
+                        return Ok((Some(format!("{REASONING_PREFIX}{text}")), false));
+                    }
+                }
+            }
+            "response.failed" | "response.incomplete" => {
+                // Terminal. `incomplete` is a truncated answer (e.g. the
+                // output cap) — the text streamed so far stands, so this is
+                // not an error; `failed` carries the provider's reason.
+                if event_type == "response.failed" {
+                    let msg = payload
+                        .pointer("/response/error/message")
+                        .and_then(|m| m.as_str())
+                        .or_else(|| payload.pointer("/error/message").and_then(|m| m.as_str()))
+                        .unwrap_or("response failed");
+                    return Err(format!("provider error: {msg}"));
+                }
+                return Ok((None, true));
+            }
+            "response.completed" => return Ok((None, true)),
+            "error" => {
+                let msg = payload
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("provider returned an error event");
+                return Err(format!("provider error: {msg}"));
+            }
+            _ => {}
+        }
+        Ok((None, false))
+    }
+
+    fn parse_usage(&self, buf: &str) -> Option<ChatUsage> {
+        // Usage rides the terminal `response.completed` event:
+        // {"type":"response.completed","response":{"usage":{…}}}. Same
+        // OpenAI-style accounting as the chat wire (input INCLUDES the cached
+        // slice; reasoning is a detail of the output tokens).
+        for line in buf.lines().rev() {
+            let data = match line
+                .strip_prefix("data: ")
+                .or_else(|| line.strip_prefix("data:"))
+            {
+                Some(d) => d,
+                None => continue,
+            };
+            if data == "[DONE]" {
+                continue;
+            }
+            let Ok(payload) = serde_json::from_str::<serde_json::Value>(data) else {
+                continue;
+            };
+            let usage = payload
+                .pointer("/response/usage")
+                .or_else(|| payload.get("usage"))
+                .filter(|u| !u.is_null());
+            let Some(u) = usage else { continue };
+            let input = u.get("input_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
+            let output = u.get("output_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
+            let cost = calculate_openai_cost(input, output);
+            return Some(ChatUsage {
+                input_tokens: input,
+                output_tokens: output,
+                cost_usd: cost,
+                reported_cost_usd: None,
+                cache_read_input_tokens: u
+                    .pointer("/input_tokens_details/cached_tokens")
+                    .and_then(|x| x.as_i64())
+                    .unwrap_or(0),
+                cache_creation_input_tokens: 0,
+                reasoning_tokens: u
+                    .pointer("/output_tokens_details/reasoning_tokens")
+                    .and_then(|x| x.as_i64())
+                    .unwrap_or(0),
+            });
+        }
+        None
+    }
+}
+
 // ---- OpenRouter ----
 //
 // OpenRouter (https://openrouter.ai) is an OpenAI-compatible aggregator: the
@@ -1131,6 +1489,20 @@ impl ChatProvider for LocalGgufProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- OpenAI reasoning-model max_tokens gate ----
+
+    #[test]
+    fn reasoning_models_are_recognized_for_the_max_tokens_gate() {
+        // The ids whose endpoints 400 on `max_tokens` without this gate.
+        for m in ["o1", "o1-mini", "o3", "o4-mini", "gpt-5", "gpt-5.2-codex", "GPT-5"] {
+            assert!(is_openai_reasoning_model(m), "{m}");
+        }
+        for m in ["gpt-4o", "gpt-4o-mini", "gpt-4.1", "o2-typo", "claude-sonnet-4-5", "qwen3-8b", ""]
+        {
+            assert!(!is_openai_reasoning_model(m), "{m}");
+        }
+    }
 
     // ---- Effort → Anthropic extended-thinking tier mapping ----
 
@@ -1661,5 +2033,284 @@ data: [DONE]
         let (tok, done) = provider.parse_sse_chunk(data_line, &mut buf).unwrap();
         assert_eq!(tok, Some("hey".to_string()));
         assert!(!done);
+    }
+
+    // ---- Responses wire tests ----
+
+    #[test]
+    fn responses_wire_body_is_instructions_plus_input_items() {
+        let req = req_with(Some("You are Relay.".to_string()));
+        let input: Vec<serde_json::Value> = req
+            .messages
+            .iter()
+            .map(crate::chat::proto::responses_message_json)
+            .collect();
+        let body = responses_wire_body(&req, input, Vec::new());
+
+        assert_eq!(body["model"], serde_json::json!("claude-sonnet-4-5"));
+        assert_eq!(body["instructions"], serde_json::json!("You are Relay."));
+        assert_eq!(body["stream"], serde_json::json!(true));
+        // Retention opt-out — prompts are the user's, not OpenAI's training set.
+        assert_eq!(body["store"], serde_json::json!(false));
+        // No system message on this wire; the roles carry only the turns.
+        let input = body["input"].as_array().unwrap();
+        assert_eq!(input.len(), 3);
+        assert_eq!(input[0]["role"], "user");
+        assert!(body.get("tools").is_none(), "no tools on the plain path");
+        // Non-reasoning model + a set cap → max_output_tokens (the Responses
+        // spelling of max_tokens).
+        assert_eq!(body["max_output_tokens"], serde_json::json!(4096));
+        assert!(body.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn responses_wire_body_reasoning_model_omits_the_cap_and_sends_effort() {
+        let mut req = req_with(None);
+        req.model = "gpt-5-codex".to_string();
+        req.effort = Some("high".to_string());
+        let body = responses_wire_body(&req, Vec::new(), Vec::new());
+        // gpt-5-family endpoints reject the plain cap field.
+        assert!(body.get("max_output_tokens").is_none(), "{body}");
+        assert_eq!(body["reasoning"]["effort"], serde_json::json!("high"));
+        // No system prompt → no instructions key at all.
+        assert!(body.get("instructions").is_none());
+    }
+
+    #[test]
+    fn responses_message_json_is_string_for_text_and_parts_for_images() {
+        let text = crate::chat::providers::ChatMessage {
+            role: "user".to_string(),
+            content: "hi".to_string(),
+            images: Vec::new(),
+        };
+        assert!(crate::chat::proto::responses_message_json(&text)["content"].is_string());
+
+        let with_image = crate::chat::providers::ChatMessage {
+            role: "user".to_string(),
+            content: "look".to_string(),
+            images: vec![crate::chat::providers::ChatImage {
+                media_type: "image/png".to_string(),
+                data: "AAAA".to_string(),
+            }],
+        };
+        let item = crate::chat::proto::responses_message_json(&with_image);
+        assert_eq!(item["content"][0]["type"], "input_text");
+        assert_eq!(item["content"][1]["type"], "input_image");
+        assert_eq!(
+            item["content"][1]["image_url"],
+            serde_json::json!("data:image/png;base64,AAAA")
+        );
+    }
+
+    #[test]
+    fn responses_parse_streams_text_and_reasoning() {
+        let provider = OpenAIResponsesProvider;
+        let mut buf = String::new();
+
+        let text = r#"data: {"type":"response.output_text.delta","delta":"Hello"}"#;
+        let (tok, done) = provider.parse_sse_chunk(text, &mut buf).unwrap();
+        assert_eq!(tok, Some("Hello".to_string()));
+        assert!(!done);
+
+        let reasoning =
+            r#"data: {"type":"response.reasoning_summary_text.delta","delta":"hmm"}"#;
+        let (tok, done) = provider.parse_sse_chunk(reasoning, &mut buf).unwrap();
+        assert_eq!(tok, Some(format!("{REASONING_PREFIX}hmm")));
+        assert!(!done);
+
+        // Non-terminal bookkeeping events stay quiet.
+        let added = r#"data: {"type":"response.output_item.added","item":{"type":"function_call"}}"#;
+        let (tok, done) = provider.parse_sse_chunk(added, &mut buf).unwrap();
+        assert!(tok.is_none());
+        assert!(!done);
+
+        let completed = r#"data: {"type":"response.completed","response":{"usage":{"input_tokens":10,"output_tokens":5}}}"#;
+        let (tok, done) = provider.parse_sse_chunk(completed, &mut buf).unwrap();
+        assert!(tok.is_none());
+        assert!(done, "response.completed terminates the stream");
+    }
+
+    #[test]
+    fn responses_parse_usage_reads_the_completed_event() {
+        let provider = OpenAIResponsesProvider;
+        let mut buf = String::new();
+        let completed = r#"data: {"type":"response.completed","response":{"usage":{"input_tokens":200,"output_tokens":80,"input_tokens_details":{"cached_tokens":150},"output_tokens_details":{"reasoning_tokens":30}}}}"#;
+        provider.parse_sse_chunk(completed, &mut buf).unwrap();
+
+        let usage = provider.parse_usage(&buf).expect("usage parsed");
+        assert_eq!(usage.input_tokens, 200);
+        assert_eq!(usage.output_tokens, 80);
+        assert_eq!(usage.cache_read_input_tokens, 150);
+        assert_eq!(usage.reasoning_tokens, 30);
+        assert!(usage.cost_usd > 0.0);
+    }
+
+    #[test]
+    fn responses_parse_error_events_are_fatal() {
+        let provider = OpenAIResponsesProvider;
+        let mut buf = String::new();
+        let err = provider
+            .parse_sse_chunk(
+                r#"data: {"type":"error","message":"overloaded"}"#,
+                &mut buf,
+            )
+            .unwrap_err();
+        assert!(err.contains("provider error: overloaded"), "{err}");
+
+        let failed = provider
+            .parse_sse_chunk(
+                r#"data: {"type":"response.failed","response":{"error":{"message":"model not found"}}}"#,
+                &mut buf,
+            )
+            .unwrap_err();
+        assert!(failed.contains("provider error: model not found"), "{failed}");
+
+        // A top-level {"error": …} frame (proxy rejections) fails too.
+        let top = provider
+            .parse_sse_chunk(r#"data: {"error":{"message":"bad key"}}"#, &mut buf)
+            .unwrap_err();
+        assert!(top.contains("provider error: bad key"), "{top}");
+    }
+
+    #[test]
+    fn responses_parse_done_sentinel_is_terminal() {
+        // A few gateways end a Responses stream with the chat-completions
+        // sentinel instead of relying on response.completed.
+        let provider = OpenAIResponsesProvider;
+        let mut buf = String::new();
+        let (tok, done) = provider.parse_sse_chunk("data: [DONE]", &mut buf).unwrap();
+        assert!(tok.is_none());
+        assert!(done);
+    }
+
+    #[test]
+    fn openai_chat_kind_requires_a_base_url_and_routes_bearer() {
+        let provider = OpenAIChatProvider;
+        let req = bare_req();
+        let client = reqwest::Client::new();
+        assert!(provider.build_request(&client, &req, "k", None).is_err());
+        let built = provider
+            .build_request(&client, &req, "k", Some("https://relay.example.com"))
+            .expect("with a base");
+        let request = built.build().unwrap();
+        assert_eq!(request.url().as_str(), "https://relay.example.com/v1/chat/completions");
+        assert_eq!(
+            request.headers().get("authorization").unwrap(),
+            "Bearer k"
+        );
+        assert_eq!(provider.id(), ChatProviderId::OpenAIChat);
+    }
+
+    #[test]
+    fn responses_kind_requires_a_base_url_and_posts_to_v1_responses() {
+        let provider = OpenAIResponsesProvider;
+        let req = bare_req();
+        let client = reqwest::Client::new();
+        assert!(provider.build_request(&client, &req, "k", None).is_err());
+        let built = provider
+            .build_request(&client, &req, "k", Some("https://relay.example.com"))
+            .expect("with a base");
+        let request = built.build().unwrap();
+        assert_eq!(request.url().as_str(), "https://relay.example.com/v1/responses");
+        assert_eq!(provider.id(), ChatProviderId::OpenAIResponses);
+    }
+
+    // ---- Base-URL canonicalization ----
+
+    #[test]
+    fn normalize_base_url_strips_a_pasted_v1_suffix() {
+        // The reported failure: providers document `https://host/v1/chat/...`,
+        // so the pasted base ended in `/v1` and every built path doubled it
+        // (`.../v1/v1/chat/completions` → the relay's 404 "not a registered API
+        // route", which reads as a broken key).
+        assert_eq!(
+            normalize_base_url("https://api.commandcode.ai/provider/v1"),
+            "https://api.commandcode.ai/provider"
+        );
+        assert_eq!(
+            normalize_base_url("  https://api.commandcode.ai/provider/v1/  "),
+            "https://api.commandcode.ai/provider"
+        );
+        // Trailing slashes alone would produce `//v1/...` inside built paths.
+        assert_eq!(
+            normalize_base_url("https://relay.example.com/"),
+            "https://relay.example.com"
+        );
+        assert_eq!(
+            normalize_base_url("https://relay.example.com/v1"),
+            "https://relay.example.com"
+        );
+    }
+
+    #[test]
+    fn normalize_base_url_leaves_other_shapes_alone() {
+        for unchanged in [
+            "https://api.openai.com",
+            // Only a pure `/v1` segment — never a lookalike prefix.
+            "https://host/api/v1beta",
+            "https://host/v10",
+            "https://openrouter.ai/api",
+            "https://host/api/v1/segment",
+            "",
+            "/v1",
+        ] {
+            assert_eq!(normalize_base_url(unchanged), unchanged, "{unchanged}");
+        }
+        // Idempotent: configure() re-runs the migration over stored rows.
+        let once = normalize_base_url("https://host/api/v1");
+        assert_eq!(normalize_base_url(&once), once);
+    }
+
+    // ---- Catalog wiring pins ----
+    //
+    // One list, checked through EVERY seam a kind string travels: the
+    // known-kind gate `set_chat_api_key` validates against, `provider_kind`'s
+    // instance-id stripping, the send-path `parse_provider_id`, and
+    // `resolve_provider`. A kind added to the enum but missed in any one of
+    // them previously failed only at runtime — "unknown provider kind" on
+    // save, an "unknown provider" send error, or a silently dead picker pane.
+    // Adding a kind means adding it here; the count assertion makes that
+    // unavoidable.
+    #[test]
+    fn every_kind_resolves_through_every_seam() {
+        const KINDS: &[&str] = &[
+            "anthropic",
+            "openai",
+            "openai_chat",
+            "openai_responses",
+            "openrouter",
+            "anthropic_compatible",
+            "openai_compatible",
+            "local_gguf",
+        ];
+
+        for kind in KINDS {
+            assert!(is_known_kind(kind), "is_known_kind must accept {kind}");
+            assert_eq!(provider_kind(kind), *kind, "provider_kind({kind})");
+            // Named endpoints ("<kind>-<suffix>") must resolve to the kind.
+            let instance = format!("{kind}-x7f2");
+            assert_eq!(
+                provider_kind(&instance),
+                *kind,
+                "provider_kind({instance}) must strip the instance suffix"
+            );
+
+            // String → enum → string round trip, both id shapes.
+            let id = crate::chat::commands::parse_provider_id(kind)
+                .unwrap_or_else(|| panic!("parse_provider_id({kind})"));
+            assert_eq!(id.as_str(), *kind, "as_str round trip for {kind}");
+            assert_eq!(
+                crate::chat::commands::parse_provider_id(&instance),
+                Some(id),
+                "parse_provider_id({instance})"
+            );
+
+            // A provider instance exists and reports the same id (the read
+            // that drives every wire branch).
+            assert_eq!(crate::chat::streaming::resolve_provider(&id).id(), id);
+        }
+
+        // Keep the list (and therefore the enum) honest.
+        assert_eq!(KINDS.len(), 8, "a kind was added or removed — update this pin");
     }
 }

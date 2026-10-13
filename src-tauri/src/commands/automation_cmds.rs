@@ -16,7 +16,7 @@ use crate::DbState;
 /// local GGUF are all valid — the execution path routes accordingly
 /// (CLI harness → run_one_shot, API/local → chat send). Kimi harness is
 /// excluded: it cannot combine prompt mode with auto-approve.
-const ALLOWED_AGENTS: [&str; 10] = [
+const ALLOWED_AGENTS: [&str; 12] = [
     // CLI harnesses
     "claude_code",
     "opencode",
@@ -29,6 +29,8 @@ const ALLOWED_AGENTS: [&str; 10] = [
     "openrouter",
     "anthropic_compatible",
     "openai_compatible",
+    "openai_chat",
+    "openai_responses",
     // local_gguf is also valid (supported at execution)
 ];
 

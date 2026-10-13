@@ -875,14 +875,21 @@ impl ChatManager {
             let mut winner: Option<(String, String, bool, ChatProviderId)> = None;
             for (ci, cand) in candidates.iter().enumerate() {
                 // OpenRouter and LocalGguf speak the OpenAI wire format; the
-                // rest ride the Anthropic path.
+                // rest ride the Anthropic path. The bool also drives OpenAI
+                // token ACCOUNTING (input_tokens include the cached slice), so
+                // the Responses kind belongs to it even though its wire is its
+                // own (`cand_is_openai_responses` below selects the loop).
                 let cand_is_openai = matches!(
                     cand.provider_id,
                     ChatProviderId::OpenAI
+                        | ChatProviderId::OpenAIChat
+                        | ChatProviderId::OpenAIResponses
                         | ChatProviderId::OpenAICompatible
                         | ChatProviderId::OpenRouter
                         | ChatProviderId::LocalGguf
                 );
+                let cand_is_openai_responses =
+                    cand.provider_id == ChatProviderId::OpenAIResponses;
                 let cand_is_anthropic = matches!(
                     cand.provider_id,
                     ChatProviderId::Anthropic | ChatProviderId::AnthropicCompatible
@@ -891,6 +898,16 @@ impl ChatManager {
                 let cand_tool_base = cand.base_url.clone().unwrap_or_else(|| {
                     if cand.provider_id == ChatProviderId::OpenRouter {
                         providers::OpenRouterProvider::DEFAULT_BASE.to_string()
+                    } else if matches!(
+                        cand.provider_id,
+                        ChatProviderId::OpenAIChat | ChatProviderId::OpenAIResponses
+                    ) {
+                        // The API-style kinds have NO default endpoint: an
+                        // empty base fails the attempt with a clear message
+                        // (the Settings form requires a base URL) instead of
+                        // quietly posting the user's relay key to
+                        // api.openai.com.
+                        String::new()
                     } else if cand_is_openai {
                         OpenAIProvider::DEFAULT_BASE.to_string()
                     } else {
@@ -961,6 +978,7 @@ impl ChatManager {
                                     &client,
                                     cand,
                                     cand_is_openai,
+                                    cand_is_openai_responses,
                                     cand_is_anthropic,
                                     cand_cache_marks,
                                     &cand_tool_base,
@@ -1839,6 +1857,7 @@ async fn run_turn_attempt(
     client: &reqwest::Client,
     cand: &AutoFallback,
     cand_is_openai: bool,
+    cand_is_openai_responses: bool,
     cand_is_anthropic: bool,
     cand_cache_marks: bool,
     cand_tool_base: &str,
@@ -1855,6 +1874,20 @@ async fn run_turn_attempt(
     perf: &turn_perf::TurnPerf,
     ping: Option<&reconnect::PingTarget>,
 ) -> Result<(String, Option<ChatUsage>), String> {
+    // The API-style kinds have no default endpoint (see the candidate loop):
+    // a missing base is a configuration error the user can act on, not a
+    // reason to post their key somewhere unintended.
+    if cand_tool_base.is_empty()
+        && matches!(
+            cand.provider_id,
+            ChatProviderId::OpenAIChat | ChatProviderId::OpenAIResponses
+        )
+    {
+        return Err(format!(
+            "no base URL configured for {} — set the endpoint in Settings \u{2192} API",
+            cand.provider_id.as_str()
+        ));
+    }
     // Local sidecars get a wider time-to-headers window — their serialized
     // prefill (warmup + this turn queued behind it) delays headers well past
     // the cloud-default 60s even on a healthy server.
@@ -1862,7 +1895,24 @@ async fn run_turn_attempt(
         cand.provider_id,
         ChatProviderId::LocalGguf
     ));
-    if tools_enabled && cand_is_openai {
+    if tools_enabled && cand_is_openai_responses {
+        run_openai_responses_tool_loop(
+            client,
+            cand_tool_base,
+            &cand.api_key,
+            chat_req,
+            caps,
+            sandbox,
+            approval,
+            mgr,
+            sid,
+            app,
+            research_mode,
+            perf.clone(),
+            headers_timeout,
+        )
+        .await
+    } else if tools_enabled && cand_is_openai {
         run_openai_tool_loop(
             client,
             cand_tool_base,
@@ -1954,8 +2004,16 @@ pub(crate) async fn run_chat_stream(
                 crate::llm_log::CaptureGuard::disabled()
             } else {
                 let target = crate::llm_log::classify_target(base_url, provider.id().as_str());
+                // The logged row's path names the WIRE that actually gets
+                // called — the Anthropic messages API and the Responses API
+                // are not /v1/chat/completions.
+                let path = match provider.id() {
+                    ChatProviderId::Anthropic | ChatProviderId::AnthropicCompatible => "/v1/messages",
+                    ChatProviderId::OpenAIResponses => "/v1/responses",
+                    _ => "/v1/chat/completions",
+                };
                 crate::llm_log::CaptureGuard::new(
-                    crate::llm_log::Capture::new("relay", &target, "POST", "/v1/chat/completions", None),
+                    crate::llm_log::Capture::new("relay", &target, "POST", path, None),
                     db,
                     cfg,
                 )
@@ -2307,16 +2365,26 @@ pub fn run_one_shot_chat(
                     crate::chat::providers::OpenAIProvider::DEFAULT_BASE
                 });
                 crate::chat::llm_client::openai_oneshot(
-                    &client, &api_key, base, &model, &system, prompt,
+                    &client, &api_key, base, &model, &system, prompt, None,
                 )
                 .await
                 .map(|t| (t, None::<crate::chat::providers::ChatUsage>))
             }
-            "openai_compatible" | "local_gguf" => {
+            "openai_compatible" | "openai_chat" | "local_gguf" => {
                 let Some(base) = base_url.as_deref() else {
                     return Err("No base URL configured for this provider. Set one in Settings \u{2192} Connectors.".into());
                 };
                 crate::chat::llm_client::openai_oneshot(
+                    &client, &api_key, base, &model, &system, prompt, None,
+                )
+                .await
+                .map(|t| (t, None::<crate::chat::providers::ChatUsage>))
+            }
+            "openai_responses" => {
+                let Some(base) = base_url.as_deref() else {
+                    return Err("No base URL configured for this provider. Set one in Settings \u{2192} Connectors.".into());
+                };
+                crate::chat::llm_client::responses_oneshot(
                     &client, &api_key, base, &model, &system, prompt,
                 )
                 .await

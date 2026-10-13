@@ -31,6 +31,7 @@ import {
   type SelectedModelEntry,
 } from "../../lib/ipc";
 import { runLoginFlow } from "../../lib/sessionLauncher";
+import { normalizeBaseUrl } from "../../lib/providerBaseUrl";
 import { useChatStore } from "../../state/chat";
 import type { HarnessId } from "../../types";
 import { useProjectsStore } from "../../state/projects";
@@ -118,7 +119,15 @@ export function ApiKeysPanel() {
   };
 
   const selectedKind = providerKindOf(provider);
-  const isCompatible = selectedKind === "anthropic_compatible" || selectedKind === "openai_compatible";
+  // Kinds that carry a user-supplied endpoint: the Base URL field (and its
+  // "Fetch models" action) shows exactly for these, and Save requires one.
+  const BASE_URL_KINDS = new Set([
+    "anthropic_compatible",
+    "openai_compatible",
+    "openai_chat",
+    "openai_responses",
+  ]);
+  const isCompatible = BASE_URL_KINDS.has(selectedKind);
   // OpenRouter uses a fixed endpoint (no base-URL field) but still supports
   // fetching its model catalogue from `/v1/models`.
   const isOpenRouter = selectedKind === "openrouter";
@@ -227,7 +236,7 @@ export function ApiKeysPanel() {
     try {
       const models = await listChatModels(
         provider,
-        baseUrl.trim() || undefined,
+        normalizeBaseUrl(baseUrl) || undefined,
         apiKey.trim() || undefined,
       );
       if (providerRef.current !== reqProvider) {
@@ -257,7 +266,7 @@ export function ApiKeysPanel() {
       await saveApiKeyFn(
         provider,
         apiKey.trim() || "",
-        isCompatible ? baseUrl.trim() : undefined,
+        isCompatible ? normalizeBaseUrl(baseUrl) : undefined,
         model || undefined,
         displayName.trim() || selectedProvider.label,
         selectedKind,
@@ -306,6 +315,11 @@ export function ApiKeysPanel() {
     { id: "openrouter", label: "OpenRouter", short: "R", description: "Access multiple model providers" },
     { id: "anthropic_compatible", label: "Anthropic Compatible", short: "A/", description: "Custom Anthropic-compatible endpoint" },
     { id: "openai_compatible", label: "OpenAI Compatible", short: "O/", description: "Custom OpenAI-compatible endpoint" },
+    // Explicit API-STYLE kinds: relay keys are commonly provisioned for one
+    // endpoint family, so "which wire does this key speak" is its own choice
+    // rather than something the user has to infer from a base URL.
+    { id: "openai_chat", label: "Chat Completions", short: "C", description: "Custom endpoint using the OpenAI Chat Completions API (/v1/chat/completions)" },
+    { id: "openai_responses", label: "Responses", short: "RS", description: "Custom endpoint using the OpenAI Responses API (/v1/responses)" },
   ];
   const selectedProvider = PROVIDERS.find((item) => item.id === selectedKind) ?? PROVIDERS[0];
   const selectedConfig = savedProviders?.[provider];
@@ -556,7 +570,14 @@ export function ApiKeysPanel() {
               <div className="api-form-field">
                 <label htmlFor="api-base-url">Base URL</label>
                 <div className="api-input-with-action">
-                  <input id="api-base-url" type="url" value={baseUrl} onChange={(e) => { formDirtyRef.current = true; setBaseUrl(e.target.value); }} placeholder="https://api.example.com/v1" />
+                  <input id="api-base-url" type="url" value={baseUrl} onChange={(e) => { formDirtyRef.current = true; setBaseUrl(e.target.value); }} placeholder="https://api.example.com/v1" onBlur={(e) => {
+                    // Paste the docs' endpoint (`…/v1/chat/completions` →
+                    // `…/v1`)? The app appends `/v1/...` itself, so the
+                    // suffix is dropped on the way out — the field then shows
+                    // exactly what will be called.
+                    const clean = normalizeBaseUrl(e.target.value);
+                    if (clean !== e.target.value) { formDirtyRef.current = true; setBaseUrl(clean); }
+                  }} />
                   <button type="button" className="api-fetch-button" onClick={handleFetchModels} disabled={fetchingModels || !baseUrl.trim()}>{fetchingModels ? "Fetching…" : "Fetch models"}</button>
                 </div>
               </div>

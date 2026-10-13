@@ -25,11 +25,13 @@ export const AGENT_OPTIONS: AgentOption[] = [
   { id: "openrouter", label: "OpenRouter", group: "api" },
   { id: "anthropic_compatible", label: "Anthropic-compatible", group: "api" },
   { id: "openai_compatible", label: "OpenAI-compatible", group: "api" },
+  { id: "openai_chat", label: "Chat Completions API", group: "api" },
+  { id: "openai_responses", label: "Responses API", group: "api" },
   // Local
   { id: "local_gguf", label: "Local GGUF", group: "local" },
 ];
 
-/** The five cloud providers from Settings → API Keys — each is its own
+/** The cloud providers from Settings → API Keys — each is its own
  *  endpoint, so surfaces that probe per-provider state iterate this tuple. */
 export const CLOUD_PROVIDER_IDS = [
   "anthropic",
@@ -37,6 +39,8 @@ export const CLOUD_PROVIDER_IDS = [
   "openrouter",
   "anthropic_compatible",
   "openai_compatible",
+  "openai_chat",
+  "openai_responses",
 ] as const;
 
 export type CloudProviderId = (typeof CLOUD_PROVIDER_IDS)[number];

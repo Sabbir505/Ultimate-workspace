@@ -218,7 +218,8 @@ pub fn build_instructions_md(
              5-field local-time cron (\"0 9 * * 1-5\" = 09:00 weekdays); `agent` \
              is one of claude_code, opencode, pi, omp, commandcode, anthropic, \
              openai, openrouter, anthropic_compatible, openai_compatible, \
-             local_gguf. The `prompt` must be fully self-contained — each run \
+             openai_chat, openai_responses, local_gguf. The `prompt` must be \
+             fully self-contained — each run \
              executes it unattended, with no conversation memory and no user to \
              answer questions — and fires only while the app is running; every \
              run is logged to its own chat session and the Automations view."

@@ -271,7 +271,7 @@ where
 /// fields (cache + reasoning) the cost model bills on. The tool loops sum
 /// these across rounds into a single `ChatUsage` via [`build_usage`],
 /// mirroring what the non-tool path (`providers.rs::parse_usage`) reports.
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct RoundUsage {
     input: i64,
     output: i64,
@@ -1677,6 +1677,629 @@ pub(crate) async fn run_openai_tool_loop(
     Ok((full, build_usage(true, total)))
 }
 
+// ---- OpenAI Responses tool loop ----
+//
+// The Responses wire (`/v1/responses`) streams TYPED events instead of
+// chat-completions chunks and carries the conversation as an `input` ITEM
+// array, so its round parser and echo-back shape differ from
+// [`openai_stream_round`] / [`run_openai_tool_loop`] — but every
+// tool-execution helper (spawn_task_fanout / run_round_tool / the late-attach
+// drain / the search-first tripwire) is shared verbatim.
+
+/// One tool call assembled from a Responses round — an `output_item` of type
+/// `function_call`. `item_id` is the provider's streaming identity (argument
+/// deltas attach to it); `call_id` is what a `function_call_output` item must
+/// echo back.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct ResponsesRoundCall {
+    pub(crate) item_id: String,
+    pub(crate) call_id: String,
+    pub(crate) name: String,
+    pub(crate) arguments: String,
+}
+
+/// Fold one partial view of a call into the accumulator, matching by item id
+/// first (the identity every streaming event carries) then by call id (the
+/// completed item's identity). Later non-empty fields win; a non-empty
+/// `arguments` replaces (the `…done` / completed views carry the full string).
+///
+/// New entries are capped at [`MAX_STREAM_BLOCK_INDEX`]: `item_id` is
+/// network-controlled (base URLs are user-configured, hence untrusted), so an
+/// endpoint sending one distinct id per event would otherwise grow this vector
+/// without bound mid-turn — the same class the index-clamped rounds guard
+/// against. Updates to already-tracked calls still apply at the cap.
+fn upsert_responses_call(calls: &mut Vec<ResponsesRoundCall>, patch: ResponsesRoundCall) {
+    let same = |c: &ResponsesRoundCall| {
+        (!patch.item_id.is_empty() && c.item_id == patch.item_id)
+            || (!patch.call_id.is_empty() && c.call_id == patch.call_id)
+    };
+    match calls.iter().position(same) {
+        Some(idx) => {
+            let c = &mut calls[idx];
+            if c.item_id.is_empty() {
+                c.item_id = patch.item_id;
+            }
+            if c.call_id.is_empty() {
+                c.call_id = patch.call_id;
+            }
+            if c.name.is_empty() {
+                c.name = patch.name;
+            }
+            if !patch.arguments.is_empty() {
+                c.arguments = patch.arguments;
+            }
+        }
+        // Over the cap: drop the stray fragment rather than grow unbounded.
+        None if calls.len() >= MAX_STREAM_BLOCK_INDEX => {}
+        None => calls.push(patch),
+    }
+}
+
+/// Fold a `function_call` item (from `response.output_item.*` or the
+/// completed event's `output`) into the round accumulator. Other item types
+/// (messages, reasoning) are ignored here — their text arrives as deltas.
+fn upsert_responses_call_item(calls: &mut Vec<ResponsesRoundCall>, item: &Value) {
+    if item.get("type").and_then(|t| t.as_str()) != Some("function_call") {
+        return;
+    }
+    let s = |k: &str| {
+        item.get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    upsert_responses_call(
+        calls,
+        ResponsesRoundCall {
+            item_id: s("id"),
+            call_id: s("call_id"),
+            name: s("name"),
+            arguments: s("arguments"),
+        },
+    );
+}
+
+/// Flatten chat-wire tool specs into Responses declarations — the same
+/// function schema, un-nested (`{type:"function", name, description,
+/// parameters}` instead of `{type:"function", function:{…}}`). Shared with
+/// the subagent loop (`dispatch::subagent_tool_specs`).
+pub(crate) fn responses_tool_specs(
+    caps: &tools::ToolCaps,
+    sandbox: permission::SandboxPolicy,
+) -> Vec<Value> {
+    tools::openai_tool_specs(caps, sandbox)
+        .into_iter()
+        .filter_map(|spec| {
+            let f = spec.get("function")?;
+            let mut out = json!({ "type": "function" });
+            for key in ["name", "description", "parameters"] {
+                if let Some(v) = f.get(key).filter(|v| !v.is_null()) {
+                    out[key] = v.clone();
+                }
+            }
+            Some(out)
+        })
+        .collect()
+}
+
+/// Responses-side mirror of [`elide_stale_tool_results`]: shrink the OLDEST
+/// `function_call_output` items (keeping the newest KEEP_LAST_TOOL_RESULTS) so
+/// a long tool turn re-sends stubs instead of every earlier result.
+fn elide_stale_responses_tool_outputs(items: &mut [Value]) {
+    let positions: Vec<usize> = items
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.get("type").and_then(|t| t.as_str()) == Some("function_call_output"))
+        .map(|(i, _)| i)
+        .collect();
+    if positions.len() <= KEEP_LAST_TOOL_RESULTS {
+        return;
+    }
+    let elide_count = positions.len() - KEEP_LAST_TOOL_RESULTS;
+    for &pos in &positions[..elide_count] {
+        if let Some(Value::String(out)) = items[pos].get_mut("output") {
+            if !out.starts_with(ELISION_MARKER) {
+                *out = elided_result_stub(out);
+            }
+        }
+    }
+}
+
+/// One parsed Responses SSE event, normalized for its callers' emit paths
+/// (the main tool loop and `dispatch::run_subagent_loop` share this parser so
+/// the event vocabulary lives in exactly one place).
+pub(crate) enum ResponsesEvent {
+    /// Answer text delta.
+    Text(String),
+    /// Reasoning delta — the caller wraps it in the `<think>` display block.
+    Reasoning(String),
+    /// Terminal `response.completed`.
+    Completed,
+    /// Terminal `response.incomplete` (e.g. the output cap was hit) — serve
+    /// the text streamed so far.
+    Incomplete,
+    /// Terminal failure (mid-stream error event / `response.failed`).
+    Failed(String),
+    /// Bookkeeping event with nothing to emit.
+    Ignore,
+}
+
+/// Parse ONE Responses SSE event, folding any `function_call` bookkeeping into
+/// `calls`. Everything except the terminal events still needs the caller's
+/// emit side, which is why this returns rather than emits.
+pub(crate) fn parse_responses_event(
+    v: &Value,
+    calls: &mut Vec<ResponsesRoundCall>,
+) -> ResponsesEvent {
+    // B-17: a mid-stream {"error": …} event must fail the round.
+    if let Some(err) = v.get("error").filter(|e| !e.is_null()) {
+        let msg = err
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("provider returned an error event");
+        return ResponsesEvent::Failed(msg.to_string());
+    }
+    match v.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+        "response.output_text.delta" | "response.refusal.delta" => match v
+            .get("delta")
+            .and_then(|d| d.as_str())
+            .filter(|c| !c.is_empty())
+        {
+            Some(c) => ResponsesEvent::Text(c.to_string()),
+            None => ResponsesEvent::Ignore,
+        },
+        "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
+            match v
+                .get("delta")
+                .and_then(|d| d.as_str())
+                .filter(|r| !r.is_empty())
+            {
+                Some(r) => ResponsesEvent::Reasoning(r.to_string()),
+                None => ResponsesEvent::Ignore,
+            }
+        }
+        "response.output_item.added" | "response.output_item.done" => {
+            if let Some(item) = v.get("item") {
+                upsert_responses_call_item(calls, item);
+            }
+            ResponsesEvent::Ignore
+        }
+        "response.function_call_arguments.delta" => {
+            if let (Some(item_id), Some(delta)) = (
+                v.get("item_id").and_then(|i| i.as_str()),
+                v.get("delta").and_then(|d| d.as_str()),
+            ) {
+                // Attach to the call the item registered; an unseen item
+                // starts one so no arguments are dropped.
+                match calls.iter_mut().find(|c| c.item_id == item_id) {
+                    Some(c) => c.arguments.push_str(delta),
+                    None => upsert_responses_call(
+                        calls,
+                        ResponsesRoundCall {
+                            item_id: item_id.to_string(),
+                            arguments: delta.to_string(),
+                            ..ResponsesRoundCall::default()
+                        },
+                    ),
+                }
+            }
+            ResponsesEvent::Ignore
+        }
+        "response.function_call_arguments.done" => {
+            if let Some(item_id) = v.get("item_id").and_then(|i| i.as_str()) {
+                let args = v.get("arguments").and_then(|a| a.as_str()).unwrap_or("");
+                match calls.iter_mut().find(|c| c.item_id == item_id) {
+                    Some(c) => c.arguments = args.to_string(),
+                    None => upsert_responses_call(
+                        calls,
+                        ResponsesRoundCall {
+                            item_id: item_id.to_string(),
+                            arguments: args.to_string(),
+                            ..ResponsesRoundCall::default()
+                        },
+                    ),
+                }
+            }
+            ResponsesEvent::Ignore
+        }
+        "response.completed" => {
+            // Terminal: its `output` array is authoritative — some gateways
+            // emit only a subset of the per-item events.
+            if let Some(output) = v.pointer("/response/output").and_then(|o| o.as_array()) {
+                for item in output {
+                    upsert_responses_call_item(calls, item);
+                }
+            }
+            ResponsesEvent::Completed
+        }
+        "response.incomplete" => ResponsesEvent::Incomplete,
+        "response.failed" => {
+            let msg = v
+                .pointer("/response/error/message")
+                .and_then(|m| m.as_str())
+                .or_else(|| v.get("message").and_then(|m| m.as_str()))
+                .unwrap_or("response failed");
+            ResponsesEvent::Failed(msg.to_string())
+        }
+        "error" => {
+            let msg = v
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("provider returned an error event");
+            ResponsesEvent::Failed(msg.to_string())
+        }
+        _ => ResponsesEvent::Ignore,
+    }
+}
+
+/// One streaming round against an OpenAI `/v1/responses` endpoint.
+///
+/// Emits assistant text (and reasoning summaries, wrapped in
+/// `<think>…</think>`) live, accumulates `function_call` items, and reads the
+/// terminal `response.completed` event for usage. Its contract mirrors
+/// [`openai_stream_round`]: returns the round's text plus its calls, and ends
+/// at the terminal event or EOF.
+async fn responses_stream_round<R: tauri::Runtime>(
+    client: &reqwest::Client,
+    url: &str,
+    api_key: &str,
+    body: &Value,
+    app: &AppHandle<R>,
+    sid: &str,
+    full: &mut String,
+    ping: &crate::chat::reconnect::PingTarget,
+    headers_timeout: std::time::Duration,
+) -> Result<(String, Vec<ResponsesRoundCall>, RoundUsage), String> {
+    let mut cap = crate::llm_log::begin_round(app, url, "openai_responses", body);
+
+    let resp = tokio::time::timeout(
+        headers_timeout,
+        client
+            .post(url)
+            .header("Authorization", format!("Bearer {api_key}"))
+            .header("content-type", "application/json")
+            .json(body)
+            .send(),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "request timed out waiting for response headers ({}s)",
+            headers_timeout.as_secs()
+        )
+    })?
+    .map_err(|e| format!("request failed: {e}"))?;
+    let status = resp.status();
+    cap.set_status(status.as_u16() as i64);
+    if !status.is_success() {
+        let b = resp.text().await.unwrap_or_default();
+        cap.set_error(format!("HTTP {status}"));
+        cap.tee(b.as_bytes());
+        crate::relay_eprintln!(
+            "[chat:stream] HTTP {status} from {url} body={}",
+            crate::util::truncate_chars(&b, 2000)
+        );
+        return Err(format!("HTTP {status}: {b}"));
+    }
+
+    let mut stream = resp.bytes_stream();
+    let mut pending = crate::util::SseLineBuffer::new();
+    let mut content = String::new();
+    let mut in_think = false;
+    let mut calls: Vec<ResponsesRoundCall> = Vec::new();
+    let mut usage = RoundUsage::default();
+    let mut parse_failures: u32 = 0;
+
+    'outer: while let Some(chunk) = {
+        // Same stall watchdog as the other rounds. The Responses stream ends
+        // with a terminal EVENT (`response.completed`), so there is no
+        // post-stop grace window to model — the loop exits on that event or
+        // on EOF.
+        match stream_next_with_watchdog(
+            &mut stream,
+            std::time::Duration::from_secs(60),
+            Some(ping),
+        )
+        .await
+        {
+            Ok(Some(chunk)) => Some(chunk),
+            Ok(None) => None,
+            Err(e) => return Err(e),
+        }
+    } {
+        cap.note_first_byte();
+        cap.tee(&chunk);
+        for line in pending.push(&chunk) {
+            let line = line.trim_end();
+            // B-18: tolerate `data:` without the trailing space.
+            let data = match line.strip_prefix("data:").map(|s| s.trim_start()) {
+                Some(d) => d,
+                None => continue,
+            };
+            // A few gateways terminate with the chat-completions sentinel.
+            if data.trim() == "[DONE]" {
+                break 'outer;
+            }
+            let v: Value = match serde_json::from_str(data) {
+                Ok(v) => {
+                    parse_failures = 0;
+                    v
+                }
+                Err(_) => {
+                    parse_failures += 1;
+                    if parse_failures >= MAX_PARSE_FAILURES {
+                        return Err(format!(
+                            "SSE parse stalled: {MAX_PARSE_FAILURES} consecutive JSON parse failures"
+                        ));
+                    }
+                    continue;
+                }
+            };
+            match parse_responses_event(&v, &mut calls) {
+                ResponsesEvent::Text(c) => {
+                    // First provider delta of any shape captures TTFT and
+                    // anchors the round's decode span (see the chat-wire
+                    // round) — a tool-call-only round is still real time.
+                    crate::chat::turn_perf::record_active_stream_delta(sid);
+                    if in_think {
+                        emit_marker(app, sid, "</think>", full);
+                        in_think = false;
+                    }
+                    let clean = sanitize_stream_text(&c);
+                    content.push_str(&clean);
+                    emit_token(app, sid, &clean, full);
+                }
+                ResponsesEvent::Reasoning(r) => {
+                    crate::chat::turn_perf::record_active_stream_delta(sid);
+                    if !in_think {
+                        emit_marker(app, sid, "<think>", full);
+                        in_think = true;
+                    }
+                    emit_token(app, sid, &sanitize_stream_text(&r), full);
+                }
+                ResponsesEvent::Completed => {
+                    // The round's usage rides the terminal event.
+                    if let Some(u) = v.pointer("/response/usage").filter(|u| !u.is_null()) {
+                        usage.input = u
+                            .get("input_tokens")
+                            .and_then(|x| x.as_i64())
+                            .unwrap_or(usage.input);
+                        usage.output = u
+                            .get("output_tokens")
+                            .and_then(|x| x.as_i64())
+                            .unwrap_or(usage.output);
+                        usage.cache_read = u
+                            .pointer("/input_tokens_details/cached_tokens")
+                            .and_then(|x| x.as_i64())
+                            .unwrap_or(usage.cache_read);
+                        usage.reasoning = u
+                            .pointer("/output_tokens_details/reasoning_tokens")
+                            .and_then(|x| x.as_i64())
+                            .unwrap_or(usage.reasoning);
+                        usage.have = true;
+                    }
+                    break 'outer;
+                }
+                // Truncated answer (e.g. the output cap): keep what streamed.
+                ResponsesEvent::Incomplete => break 'outer,
+                ResponsesEvent::Failed(msg) => return Err(format!("provider error: {msg}")),
+                ResponsesEvent::Ignore => {}
+            }
+        }
+    }
+
+    if in_think {
+        emit_marker(app, sid, "</think>", full);
+    }
+    // A call with no name can't be executed — drop the fragment a partial
+    // stream may have left behind.
+    calls.retain(|c| !c.name.is_empty());
+    Ok((content, calls, usage))
+}
+
+/// Append the assistant turn to a Responses `input` array: its text (when it
+/// produced any) as an `output_text` message item, then one `function_call`
+/// item per call — the reply order the API expects back. Arguments are
+/// re-serialized from the normalized parse so a malformed payload isn't
+/// replayed verbatim (the same normalization the chat-wire echo applies).
+fn push_responses_assistant_turn(
+    items: &mut Vec<Value>,
+    text: &str,
+    calls: &[NormalizedToolCall],
+) {
+    if !text.trim().is_empty() {
+        items.push(json!({
+            "type": "message",
+            "role": "assistant",
+            "content": [{ "type": "output_text", "text": text }],
+        }));
+    }
+    for (call_id, name, args) in calls {
+        items.push(json!({
+            "type": "function_call",
+            "call_id": call_id,
+            "name": name,
+            "arguments": args.to_string(),
+        }));
+    }
+}
+
+/// Append one `function_call_output` per executed call, in call order — each
+/// paired to its `function_call` by `call_id`.
+fn push_responses_tool_outputs(items: &mut Vec<Value>, outputs: &[(String, String)]) {
+    for (call_id, output) in outputs {
+        items.push(json!({
+            "type": "function_call_output",
+            "call_id": call_id,
+            "output": output,
+        }));
+    }
+}
+
+/// Agentic tool loop for OpenAI Responses-style providers.
+///
+/// The Responses equivalent of [`run_openai_tool_loop`]: same rounds, tools,
+/// approval flow and tripwires, but the conversation is an `input` item array
+/// and results come back as `function_call_output` items. It deliberately has
+/// NO Hermes `<tool_calls>` text-recovery fallback — that exists for
+/// aggregators serving fine-tunes over the chat wire; an endpoint speaking the
+/// Responses API translates tool calls natively.
+pub(crate) async fn run_openai_responses_tool_loop(
+    client: &reqwest::Client,
+    base: &str,
+    api_key: &str,
+    req: &ChatRequest,
+    caps: tools::ToolCaps,
+    sandbox: permission::SandboxPolicy,
+    approval: permission::ApprovalPolicy,
+    mgr: &Arc<ChatManager>,
+    sid: &str,
+    app: &AppHandle,
+    research_mode: bool,
+    perf: crate::chat::turn_perf::TurnPerf,
+    headers_timeout: std::time::Duration,
+) -> Result<(String, Option<ChatUsage>), String> {
+    let url = format!("{base}/v1/responses");
+    // Reachability probe for this round's endpoint (Bearer auth, like the
+    // chat-completions loop).
+    let ping = crate::chat::reconnect::PingTarget::new(client, base, api_key, false);
+    // Mutable working copy (owned) — see the chat-wire loop's late-attach drain.
+    let mut live_caps = caps;
+    let mut tool_specs = responses_tool_specs(&live_caps, sandbox);
+    let art_dir = artifacts_dir(app);
+    let cap = if research_mode {
+        RESEARCH_MAX_TOOL_ITERS
+    } else {
+        MAX_TOOL_ITERS
+    };
+
+    // Same item assembly as the tools-off path: memory block, then history,
+    // then the per-turn local-docs retrieval appended LAST (see
+    // `providers::responses_input`) — the loop then appends its own
+    // assistant / function items after it.
+    let mut items = crate::chat::providers::responses_input(req);
+
+    let mut full = String::new();
+    let mut total = RoundUsage::default();
+    // Search-first tripwire state — see the module section above.
+    let mut live_web_used = false;
+    let mut search_nudge_sent = false;
+
+    for round in 0..cap {
+        // Same stale-tool-output shrink as the chat-wire loop.
+        elide_stale_responses_tool_outputs(&mut items);
+        let body =
+            crate::chat::providers::responses_wire_body(req, items.clone(), tool_specs.clone());
+
+        perf.begin_gen();
+        let (text, calls, round_usage) = responses_stream_round::<tauri::Wry>(
+            client,
+            &url,
+            api_key,
+            &body,
+            app,
+            sid,
+            &mut full,
+            &ping,
+            headers_timeout,
+        )
+        .await?;
+        perf.end_gen();
+        // Fold round-boundary usage into the live snapshot so the composer's
+        // IN/CACHE chips update before chat:done. Responses input_tokens, like
+        // the chat wire's prompt_tokens, already INCLUDES cached tokens.
+        perf.note_round_usage(
+            round_usage.input,
+            round_usage.cache_read,
+            round_usage.cache_creation,
+            true,
+        );
+        total.add(round_usage);
+
+        if calls.is_empty() {
+            // No tool calls → final answer. The text was already streamed
+            // live. Search-first tripwire: one invisible reminder round when a
+            // time-sensitive question was answered with no live-web tool run.
+            if !search_nudge_sent && live_caps.web_search && round + 2 < cap {
+                if let Some(nudge) =
+                    search_first_tripwire(&last_user_text(&req.messages), &full, live_web_used)
+                {
+                    search_nudge_sent = true;
+                    // Rendered markdown hides HTML comments, so this leaves a
+                    // trace in the persisted transcript without showing in chat.
+                    emit_marker(app, sid, "\n\n<!--search-tripwire-->\n", &mut full);
+                    items.push(json!({ "role": "user", "content": nudge }));
+                    continue;
+                }
+            }
+            return Ok((full, build_usage(true, total)));
+        }
+
+        // Echo the assistant turn, then run the tools and append one output
+        // item per call — the Responses input grammar (see the push_* helpers).
+        let normalized: Vec<NormalizedToolCall> = calls
+            .iter()
+            .map(|c| {
+                let raw_id = if c.call_id.is_empty() {
+                    c.item_id.clone()
+                } else {
+                    c.call_id.clone()
+                };
+                // A call the endpoint never identified still needs SOME id to
+                // pair with its output item (the chat-wire loop synthesizes
+                // one for id-less calls too).
+                let call_id = if raw_id.is_empty() {
+                    next_synthetic_tool_id()
+                } else {
+                    raw_id
+                };
+                (call_id, c.name.clone(), parse_tool_args(&c.arguments))
+            })
+            .collect();
+        push_responses_assistant_turn(&mut items, &text, &normalized);
+        // PARALLEL SUBAGENT FAN-OUT — see the chat-wire loop's pre-pass.
+        let mut deferred = spawn_task_fanout(
+            &normalized, client, &art_dir, &live_caps, sandbox, approval, mgr, app, sid, &mut full,
+        );
+        let mut outputs: Vec<(String, String)> = Vec::with_capacity(normalized.len());
+        for (idx, (call_id, name, args)) in normalized.iter().enumerate() {
+            let (live, result) = run_round_tool(
+                client,
+                &art_dir,
+                &live_caps,
+                sandbox,
+                approval,
+                mgr,
+                app,
+                sid,
+                name,
+                args,
+                &mut deferred[idx],
+                &perf,
+                &mut full,
+            )
+            .await;
+            live_web_used |= live;
+            outputs.push((call_id.clone(), result));
+        }
+        push_responses_tool_outputs(&mut items, &outputs);
+        // Attach-on-demand drain — mirror of the chat-wire loop.
+        if fold_late_attaches(mgr, sid, &mut live_caps)
+            || refresh_browser_caps(mgr, sid, &mut live_caps)
+        {
+            tool_specs = responses_tool_specs(&live_caps, sandbox);
+        }
+    }
+
+    emit_marker(
+        app,
+        sid,
+        "\n\n_Stopped after reaching the tool-call limit._",
+        &mut full,
+    );
+    Ok((full, build_usage(true, total)))
+}
+
 /// Assemble one Anthropic `/v1/messages` tool-loop round body with prompt-cache
 /// breakpoints (see [`crate::chat::cache`]): the last tool spec, the system
 /// block, and the newest message each mark the stable prefix, so every round
@@ -2028,12 +2651,14 @@ impl<'a> ProviderSsePump<'a> {
 
 pub(crate) fn resolve_provider(id: &ChatProviderId) -> Box<dyn ChatProvider> {
     use crate::chat::providers::{
-        AnthropicCompatibleProvider, AnthropicProvider, LocalGgufProvider,
-        OpenAICompatibleProvider, OpenAIProvider, OpenRouterProvider,
+        AnthropicCompatibleProvider, AnthropicProvider, LocalGgufProvider, OpenAIChatProvider,
+        OpenAICompatibleProvider, OpenAIProvider, OpenAIResponsesProvider, OpenRouterProvider,
     };
     match id {
         ChatProviderId::Anthropic => Box::new(AnthropicProvider),
         ChatProviderId::OpenAI => Box::new(OpenAIProvider),
+        ChatProviderId::OpenAIChat => Box::new(OpenAIChatProvider),
+        ChatProviderId::OpenAIResponses => Box::new(OpenAIResponsesProvider),
         ChatProviderId::AnthropicCompatible => Box::new(AnthropicCompatibleProvider),
         ChatProviderId::OpenAICompatible => Box::new(OpenAICompatibleProvider),
         ChatProviderId::OpenRouter => Box::new(OpenRouterProvider),
@@ -2270,6 +2895,241 @@ async fn anthropic_round_accumulates_text_and_tool_input_json() {
     assert_eq!(tool["name"], "web_search");
     // input_json_delta pieces split mid-key must reassemble into valid JSON.
     assert_eq!(tool["input"]["q"], "cats");
+}
+
+/// Responses round pin: the typed event stream must produce the same
+/// accumulators the chat-wire round does — streamed text (reasoning wrapped
+/// in `<think>`), a complete `function_call` reassembled from the item events
+/// (arguments split across deltas), and usage off the terminal
+/// `response.completed`.
+#[tokio::test]
+async fn responses_round_accumulates_text_calls_and_usage() {
+    let app = tauri::test::mock_app().handle().clone();
+    let client = reqwest::Client::new();
+    let url = spawn_sse_server(concat!(
+        "data: {\"type\":\"response.created\"}\n\n",
+        "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"thinking\"}\n\n",
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hi \"}\n\n",
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"there\"}\n\n",
+        "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"web_search\",\"arguments\":\"\"}}\n\n",
+        "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"delta\":\"{\\\"q\\\":\"}\n\n",
+        "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"delta\":\"\\\"cats\\\"}\"}\n\n",
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"web_search\",\"arguments\":\"{\\\"q\\\":\\\"cats\\\"}\"}}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"input_tokens_details\":{\"cached_tokens\":40},\"output_tokens_details\":{\"reasoning_tokens\":7}}}}\n\n",
+    ))
+    .await;
+    let body = serde_json::json!({ "model": "test" });
+    let mut full = String::new();
+
+    let (text, calls, usage) = responses_stream_round(
+        &client, &url, "key", &body, &app, "sid-responses", &mut full,
+        &crate::chat::reconnect::PingTarget::new(&client, &url, "key", false),
+        std::time::Duration::from_secs(60),
+    )
+    .await
+    .expect("round succeeds");
+
+    // Reasoning is display-only (<think> in the transcript); the round text —
+    // what gets echoed back next round — carries the answer alone.
+    assert_eq!(text, "Hi there");
+    assert_eq!(full, "<think>thinking</think>Hi there");
+    assert_eq!(calls.len(), 1, "got: {calls:?}");
+    assert_eq!(calls[0].name, "web_search");
+    assert_eq!(calls[0].call_id, "call_1");
+    // The split argument deltas reassemble, and the completed item's full
+    // string wins.
+    assert_eq!(calls[0].arguments, "{\"q\":\"cats\"}");
+
+    let built = build_usage(true, usage).expect("usage must parse");
+    assert_eq!(built.input_tokens, 100);
+    assert_eq!(built.output_tokens, 20);
+    assert_eq!(built.cache_read_input_tokens, 40);
+    assert_eq!(built.reasoning_tokens, 7);
+}
+
+/// The Responses replay grammar, pinned: the assistant text rides an
+/// `output_text` message item, every call becomes a `function_call` item with
+/// NORMALIZED arguments, and each result pairs back by `call_id`. A kind that
+/// drifts here desyncs the follow-up round (the API rejects an output item
+/// with no matching call).
+#[test]
+fn responses_replay_grammar_pairs_calls_with_outputs() {
+    let calls: Vec<NormalizedToolCall> = vec![
+        (
+            "call_1".to_string(),
+            "web_search".to_string(),
+            // A provider-mangled payload (stray prefix object) must be
+            // re-serialized clean rather than replayed verbatim.
+            parse_tool_args("{}{\"q\":\"cats\"}"),
+        ),
+        ("call_2".to_string(), "read_file".to_string(), parse_tool_args("")),
+    ];
+    let mut items: Vec<Value> = Vec::new();
+    push_responses_assistant_turn(&mut items, "On it", &calls);
+    push_responses_tool_outputs(
+        &mut items,
+        &[
+            ("call_1".to_string(), "3 results".to_string()),
+            ("call_2".to_string(), "file body".to_string()),
+        ],
+    );
+
+    assert_eq!(items.len(), 5, "message + 2 calls + 2 outputs: {items:?}");
+    assert_eq!(items[0]["type"], "message");
+    assert_eq!(items[0]["role"], "assistant");
+    assert_eq!(items[0]["content"][0]["type"], "output_text");
+    assert_eq!(items[0]["content"][0]["text"], "On it");
+
+    assert_eq!(items[1]["type"], "function_call");
+    assert_eq!(items[1]["call_id"], "call_1");
+    assert_eq!(items[1]["name"], "web_search");
+    assert_eq!(items[1]["arguments"], "{\"q\":\"cats\"}");
+    assert_eq!(items[2]["name"], "read_file");
+    // Empty arguments normalize to an empty object, never an empty string.
+    assert_eq!(items[2]["arguments"], "{}");
+
+    assert_eq!(items[3]["type"], "function_call_output");
+    assert_eq!(items[3]["call_id"], "call_1");
+    assert_eq!(items[3]["output"], "3 results");
+    assert_eq!(items[4]["call_id"], "call_2");
+}
+
+/// A text-less round (the model went straight to a tool call) must not emit an
+/// empty assistant message item — the API rejects a message with no content.
+#[test]
+fn responses_replay_skips_the_empty_assistant_message() {
+    let calls: Vec<NormalizedToolCall> =
+        vec![("call_1".to_string(), "run_shell".to_string(), json!({"cmd": "ls"}))];
+    let mut items: Vec<Value> = Vec::new();
+    push_responses_assistant_turn(&mut items, "  \n ", &calls);
+    assert_eq!(items.len(), 1, "no assistant message for blank text");
+    assert_eq!(items[0]["type"], "function_call");
+}
+
+/// A hostile or buggy endpoint must not be able to grow the per-round call
+/// accumulator without bound: `item_id` is network-controlled, so one distinct
+/// id per event used to add one entry each (the index-clamp audit class).
+/// Real rounds carry a handful of calls.
+#[test]
+fn responses_call_accumulator_is_capped_against_hostile_item_ids() {
+    let mut calls: Vec<ResponsesRoundCall> = Vec::new();
+    for i in 0..(MAX_STREAM_BLOCK_INDEX * 4) {
+        let event = json!({
+            "type": "response.output_item.done",
+            "item": {
+                "type": "function_call",
+                "id": format!("fc_{i}"),
+                "call_id": format!("call_{i}"),
+                "name": "run_shell",
+                "arguments": "{}",
+            },
+        });
+        parse_responses_event(&event, &mut calls);
+    }
+    assert_eq!(
+        calls.len(),
+        MAX_STREAM_BLOCK_INDEX,
+        "the accumulator must stay bounded"
+    );
+
+    // Updates to already-tracked calls still apply at the cap — the guard
+    // drops new fragments only.
+    let done = json!({
+        "type": "response.function_call_arguments.done",
+        "item_id": "fc_0",
+        "arguments": "{\"cmd\":\"ls\"}",
+    });
+    parse_responses_event(&done, &mut calls);
+    assert_eq!(calls[0].call_id, "call_0");
+    assert_eq!(calls[0].arguments, "{\"cmd\":\"ls\"}");
+}
+
+/// The FOLLOW-UP round's wire body, end to end: the history, the echoed
+/// assistant turn and the tool-result item must all ride the same body builder
+/// the loop calls, with tool declarations flattened for the Responses schema.
+/// This is what a second round actually posts when the model used a tool.
+#[test]
+fn responses_followup_body_carries_the_echo_and_flat_tool_specs() {
+    let req = ChatRequest {
+        model: "gpt-5-codex".to_string(),
+        messages: vec![crate::chat::providers::ChatMessage {
+            role: "user".to_string(),
+            content: "weather in berlin?".to_string(),
+            images: Vec::new(),
+        }],
+        max_tokens: Some(4096),
+        system: Some("You are Relay.".to_string()),
+        effort: None,
+        thinking: None,
+        local_docs_retrieval: Vec::new(),
+        web_search_options: false,
+        memory_context: None,
+        cache_prompt: false,
+    };
+
+    let mut items = crate::chat::providers::responses_input(&req);
+    let calls: Vec<NormalizedToolCall> = vec![(
+        "call_1".to_string(),
+        "web_search".to_string(),
+        json!({ "query": "berlin weather" }),
+    )];
+    push_responses_assistant_turn(&mut items, "Searching", &calls);
+    push_responses_tool_outputs(&mut items, &[("call_1".to_string(), "8 results".to_string())]);
+
+    let specs = responses_tool_specs(
+        &tools::ToolCaps::default(),
+        permission::SandboxPolicy::WorkspaceWrite,
+    );
+    let body = crate::chat::providers::responses_wire_body(&req, items, specs);
+
+    // System prompt → `instructions`, never a system message in `input`.
+    assert_eq!(body["instructions"], "You are Relay.");
+    assert_eq!(body["store"], serde_json::json!(false));
+    let input = body["input"].as_array().unwrap();
+    assert_eq!(input[0]["role"], "user");
+    assert_eq!(input[1]["type"], "message");
+    assert_eq!(input[1]["content"][0]["type"], "output_text");
+    assert_eq!(input[2]["type"], "function_call");
+    assert_eq!(input[2]["call_id"], "call_1");
+    assert_eq!(input[3]["type"], "function_call_output");
+    assert_eq!(input[3]["call_id"], "call_1");
+    assert_eq!(input[3]["output"], "8 results");
+
+    // Tool declarations: flat Responses shape (no chat-wire `/function`
+    // envelope), and the default surface really carries web_search.
+    let declared = body["tools"].as_array().unwrap();
+    assert!(!declared.is_empty());
+    assert!(
+        declared
+            .iter()
+            .all(|t| t["type"] == "function" && t.get("function").is_none() && t.get("name").is_some()),
+        "specs must be Responses declarations, got: {declared:?}"
+    );
+    assert!(declared.iter().any(|t| t["name"] == "web_search"));
+}
+
+/// A Responses gateway that fails mid-stream (an `error` event after 200 OK)
+/// must fail the round — the same B-17 contract the other wires pin.
+#[tokio::test]
+async fn responses_round_fails_on_mid_stream_error_event() {
+    let app = tauri::test::mock_app().handle().clone();
+    let client = reqwest::Client::new();
+    let url = spawn_sse_server(concat!(
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
+        "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"rate limited\"}}}\n\n",
+    ))
+    .await;
+    let body = serde_json::json!({ "model": "test" });
+    let mut full = String::new();
+
+    let err = responses_stream_round(
+        &client, &url, "key", &body, &app, "sid-responses-err", &mut full,
+        &crate::chat::reconnect::PingTarget::new(&client, &url, "key", false),
+        std::time::Duration::from_secs(60),
+    )
+    .await
+    .expect_err("mid-stream failure must fail the round");
+    assert!(err.contains("provider error: rate limited"), "{err}");
 }
 
 #[cfg(test)]

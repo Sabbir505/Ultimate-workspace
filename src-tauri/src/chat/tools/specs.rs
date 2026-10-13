@@ -2262,7 +2262,7 @@ fn spawn_session_parameters() -> Value {
 
 /// Agent enum for the automation create/update schemas — mirrors
 /// commands::automation_cmds::ALLOWED_AGENTS (+ local_gguf).
-const AUTOMATION_AGENTS: [&str; 8] = [
+const AUTOMATION_AGENTS: [&str; 10] = [
     "claude_code",
     "opencode",
     "anthropic",
@@ -2270,6 +2270,8 @@ const AUTOMATION_AGENTS: [&str; 8] = [
     "openrouter",
     "anthropic_compatible",
     "openai_compatible",
+    "openai_chat",
+    "openai_responses",
     "local_gguf",
 ];
 

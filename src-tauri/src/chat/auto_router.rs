@@ -21,12 +21,14 @@
 
 /// Providers Auto may route to, in static preference order (fallback ranking
 /// when stickiness doesn't decide). Mirrors get_chat_config's priority scan.
-pub const AUTO_PROVIDERS: [&str; 5] = [
+pub const AUTO_PROVIDERS: [&str; 7] = [
     "anthropic",
     "openai",
     "openrouter",
     "anthropic_compatible",
     "openai_compatible",
+    "openai_chat",
+    "openai_responses",
 ];
 
 /// Synchronous fallback resolver — the core the mobile WS path runs (its
@@ -381,7 +383,10 @@ pub fn resolve(
         };
         return Err(format!("Auto couldn't pick a model: {detail}."));
     }
-    chain.truncate(5);
+    // Bound the fail-over chain at one pick per routable provider — a fixed
+    // 5 dropped the tail providers (and any candidate a bias had demoted but
+    // deliberately kept on the chain) as soon as a sixth kind was added.
+    chain.truncate(AUTO_PROVIDERS.len());
     Ok(chain)
 }
 
@@ -395,6 +400,8 @@ pub fn provider_label(provider: &str) -> std::borrow::Cow<'static, str> {
         "openrouter" => std::borrow::Cow::Borrowed("OpenRouter"),
         "anthropic_compatible" => std::borrow::Cow::Borrowed("Anthropic-compatible"),
         "openai_compatible" => std::borrow::Cow::Borrowed("OpenAI-compatible"),
+        "openai_chat" => std::borrow::Cow::Borrowed("Chat Completions"),
+        "openai_responses" => std::borrow::Cow::Borrowed("Responses"),
         "local_gguf" => std::borrow::Cow::Borrowed("Local model"),
         other => std::borrow::Cow::Owned(other.to_string()),
     }
@@ -441,9 +448,21 @@ mod tests {
         let chain = resolve(&all_keyed(vec![entry("m", None)]), &query(100)).unwrap();
         assert_eq!(chain[0].provider, "anthropic");
         assert_eq!(chain[0].model, "m");
-        // The chain carries fail-over candidates in preference order.
-        assert_eq!(chain[1].provider, "openai");
-        assert_eq!(chain.last().unwrap().provider, "openai_compatible");
+        // The chain carries fail-over candidates in preference order — one
+        // per routable provider, the API-style kinds last.
+        let providers: Vec<&str> = chain.iter().map(|c| c.provider.as_str()).collect();
+        assert_eq!(
+            providers,
+            [
+                "anthropic",
+                "openai",
+                "openrouter",
+                "anthropic_compatible",
+                "openai_compatible",
+                "openai_chat",
+                "openai_responses",
+            ]
+        );
     }
 
     #[test]

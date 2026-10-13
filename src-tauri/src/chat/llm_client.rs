@@ -26,12 +26,17 @@ pub(crate) fn resolve_base_url<'a>(provider: &str, base_url: Option<&'a str>) ->
         "anthropic" => {
             Some(base_url.unwrap_or(crate::chat::providers::AnthropicProvider::DEFAULT_BASE))
         }
-        "openai_compatible" | "local_gguf" | "anthropic_compatible" => base_url,
+        "openai_compatible" | "openai_chat" | "openai_responses" | "local_gguf"
+        | "anthropic_compatible" => base_url,
         _ => None,
     }
 }
 
 /// One-shot (non-streaming) OpenAI-style completion returning the message text.
+/// `max_tokens` is optional (the OpenAI wire treats it as such) — callers that
+/// need a bounded reply (composer predictions) pass it so a chatty model
+/// can't ramble; callers that were previously uncapped pass `None` to keep
+/// their exact behavior.
 pub(crate) async fn openai_oneshot(
     client: &reqwest::Client,
     api_key: &str,
@@ -39,9 +44,10 @@ pub(crate) async fn openai_oneshot(
     model: &str,
     system: &str,
     user: &str,
+    max_tokens: Option<u32>,
 ) -> Result<String, String> {
     let url = format!("{base}/v1/chat/completions");
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "model": model,
         "stream": false,
         "messages": [
@@ -49,6 +55,14 @@ pub(crate) async fn openai_oneshot(
             {"role": "user", "content": user},
         ],
     });
+    // Reasoning models (o1/o3/o4/gpt-5*) reject the deprecated `max_tokens`
+    // field outright — omit the cap for them rather than 400 the call. Same
+    // gate as the streaming wire (`providers::openai_wire_max_tokens`).
+    if let Some(mt) = max_tokens {
+        if !crate::chat::providers::is_openai_reasoning_model(model) {
+            body["max_tokens"] = serde_json::json!(mt);
+        }
+    }
     let resp = crate::util::checked_send(
         client
             .post(&url)
@@ -102,6 +116,70 @@ pub(crate) async fn anthropic_oneshot(
     Ok(v["content"][0]["text"].as_str().unwrap_or("").to_string())
 }
 
+/// One-shot (non-streaming) call against the OpenAI Responses API
+/// (`/v1/responses`) returning the assistant text — the Responses sibling of
+/// [`openai_oneshot`]. The reply rides `output[].content[]` as `output_text`
+/// parts instead of `choices[0].message.content`.
+pub(crate) async fn responses_oneshot(
+    client: &reqwest::Client,
+    api_key: &str,
+    base: &str,
+    model: &str,
+    system: &str,
+    user: &str,
+) -> Result<String, String> {
+    let url = format!("{base}/v1/responses");
+    let body = serde_json::json!({
+        "model": model,
+        "stream": false,
+        "store": false,
+        "instructions": system,
+        "input": [{"role": "user", "content": user}],
+    });
+    let resp = crate::util::checked_send(
+        client
+            .post(&url)
+            .header("Authorization", format!("Bearer {api_key}"))
+            .header("content-type", "application/json")
+            .json(&body),
+        500,
+    )
+    .await?;
+    let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(responses_output_text(&v))
+}
+
+/// Concatenate the `output_text` parts of a Responses reply. Non-message
+/// output items (reasoning, function calls) carry no user-visible text and are
+/// skipped; `refusal` parts are surfaced verbatim so a refusal isn't reported
+/// as an empty completion.
+pub(crate) fn responses_output_text(v: &serde_json::Value) -> String {
+    let mut out = String::new();
+    for item in v
+        .get("output")
+        .and_then(|o| o.as_array())
+        .into_iter()
+        .flatten()
+    {
+        for part in item
+            .get("content")
+            .and_then(|c| c.as_array())
+            .into_iter()
+            .flatten()
+        {
+            match part.get("type").and_then(|t| t.as_str()) {
+                Some("output_text") | Some("refusal") => {
+                    if let Some(t) = part.get("text").and_then(|t| t.as_str()) {
+                        out.push_str(t);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
 /// Dispatch one provider-agnostic non-streaming completion.
 ///
 /// - `Err` — transport/HTTP failure (propagates to the caller's user).
@@ -123,16 +201,21 @@ pub(crate) async fn oneshot(
     system: &str,
     user: &str,
     anthropic_max_tokens: u32,
+    openai_max_tokens: Option<u32>,
 ) -> Result<Option<String>, String> {
     let Some(base) = resolve_base_url(provider, base_url) else {
         return Ok(None);
     };
     match crate::chat::providers::provider_kind(provider) {
-        "openai" | "openrouter" | "openai_compatible" | "local_gguf" => {
-            openai_oneshot(client, api_key, base, model, system, user)
+        "openai" | "openrouter" | "openai_compatible" | "openai_chat" | "local_gguf" => {
+            openai_oneshot(client, api_key, base, model, system, user, openai_max_tokens)
                 .await
                 .map(Some)
         }
+        // The Responses wire has no choices[] reply shape — its own extractor.
+        "openai_responses" => responses_oneshot(client, api_key, base, model, system, user)
+            .await
+            .map(Some),
         "anthropic" | "anthropic_compatible" => anthropic_oneshot(
             client,
             api_key,
@@ -176,7 +259,13 @@ mod tests {
 
     #[test]
     fn compatible_providers_require_an_explicit_base() {
-        for p in ["openai_compatible", "local_gguf", "anthropic_compatible"] {
+        for p in [
+            "openai_compatible",
+            "openai_chat",
+            "openai_responses",
+            "local_gguf",
+            "anthropic_compatible",
+        ] {
             assert_eq!(resolve_base_url(p, None), None, "{p}");
             // Blank-filtering is the caller's job (the generators pre-filter);
             // resolve only treats absence as missing.
@@ -187,6 +276,33 @@ mod tests {
                 "{p}"
             );
         }
+    }
+
+    #[test]
+    fn responses_output_text_joins_parts_and_skips_non_messages() {
+        let reply = serde_json::json!({
+            "output": [
+                { "type": "reasoning", "summary": [] },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        { "type": "output_text", "text": "Hello " },
+                        { "type": "output_text", "text": "world" }
+                    ]
+                },
+                {
+                    "type": "message",
+                    "content": [{ "type": "refusal", "text": " — declined" }]
+                }
+            ]
+        });
+        assert_eq!(responses_output_text(&reply), "Hello world — declined");
+        // A reply with no message items yields an empty string, not a panic.
+        assert_eq!(
+            responses_output_text(&serde_json::json!({"output": []})),
+            ""
+        );
     }
 
     #[test]

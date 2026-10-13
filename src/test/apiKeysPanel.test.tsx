@@ -231,7 +231,15 @@ describe("API Keys Panel", () => {
     // The Add API form's type dropdown lists every protocol kind — and it
     // keeps listing them all no matter how many endpoints exist.
     const kinds = Array.from(getKindSelect().options).map((o) => o.value);
-    expect(kinds).toEqual(["anthropic", "openai", "openrouter", "anthropic_compatible", "openai_compatible"]);
+    expect(kinds).toEqual([
+      "anthropic",
+      "openai",
+      "openrouter",
+      "anthropic_compatible",
+      "openai_compatible",
+      "openai_chat",
+      "openai_responses",
+    ]);
   });
 
   it("lists added endpoints on the rail and locks the type while editing", async () => {
@@ -341,7 +349,9 @@ describe("API Keys Panel", () => {
     await screen.findByText(/No APIs yet/);
     fireEvent.change(getKindSelect(), { target: { value: "openai_compatible" } });
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "GLM via Z.ai" } });
-    fireEvent.change(screen.getByLabelText("Base URL"), { target: { value: "https://api.example.com/v1" } });
+    // The canonical base shape: no `/v1` suffix (the app appends it; a pasted
+    // `…/v1` is normalized away — see the dedicated test below).
+    fireEvent.change(screen.getByLabelText("Base URL"), { target: { value: "https://api.example.com" } });
     const panel = await screen.findByText("API providers");
     const container = panel.closest(".api-settings") as HTMLElement;
     fireEvent.click(getSaveButton(container));
@@ -349,7 +359,7 @@ describe("API Keys Panel", () => {
       expect(saveApiKeyMock).toHaveBeenCalledWith(
         "openai_compatible",
         "",
-        "https://api.example.com/v1",
+        "https://api.example.com",
         undefined,
         "GLM via Z.ai",
         "openai_compatible",
@@ -495,6 +505,94 @@ describe("API Keys Panel", () => {
     // Enter the add flow — every kind must remain addable.
     fireEvent.click(screen.getByLabelText("Add a new provider"));
     const kinds = Array.from(getKindSelect().options).map((o) => o.value);
-    expect(kinds).toEqual(["anthropic", "openai", "openrouter", "anthropic_compatible", "openai_compatible"]);
+    expect(kinds).toEqual([
+      "anthropic",
+      "openai",
+      "openrouter",
+      "anthropic_compatible",
+      "openai_compatible",
+      "openai_chat",
+      "openai_responses",
+    ]);
+  });
+
+  it("normalizes a pasted /v1 base URL so the provider's documented endpoint works", async () => {
+    // Reported failure: the provider documents `https://host/v1/chat/completions`,
+    // so the base gets pasted as `https://host/v1` — but every request builder
+    // appends `/v1/...` itself, and `.../v1/v1/...` answers 404 ("not a
+    // registered API route"), which reads as a dead API key.
+    render(<SettingsView />);
+    const panel = await screen.findByText("API providers");
+    const container = panel.closest(".api-settings") as HTMLElement;
+    await screen.findByText(/No APIs yet/);
+    fireEvent.change(getKindSelect(), { target: { value: "openai_chat" } });
+    const urlInput = await screen.findByLabelText("Base URL") as HTMLInputElement;
+    fireEvent.change(urlInput, {
+      target: { value: "https://api.commandcode.ai/provider/v1" },
+    });
+    // Clicking away cleans the field to what will actually be called…
+    fireEvent.blur(urlInput);
+    await waitFor(() =>
+      expect(urlInput.value).toBe("https://api.commandcode.ai/provider"),
+    );
+    // …and the save carries the canonical base, never the doubled path.
+    fireEvent.click(getSaveButton(container));
+    await waitFor(() =>
+      expect(saveApiKeyMock).toHaveBeenCalledWith(
+        "openai_chat",
+        "",
+        "https://api.commandcode.ai/provider",
+        undefined,
+        "Chat Completions",
+        "openai_chat",
+      ),
+    );
+  });
+
+  it("Chat Completions and Responses kinds require a base URL and save with their kind", async () => {
+    render(<SettingsView />);
+    const panel = await screen.findByText("API providers");
+    const container = panel.closest(".api-settings") as HTMLElement;
+    await screen.findByText(/No APIs yet/);
+
+    // Chat Completions: a base URL is what unlocks Save…
+    fireEvent.change(getKindSelect(), { target: { value: "openai_chat" } });
+    await waitFor(() => expect(getChatConfigMock).toHaveBeenCalledWith("openai_chat"));
+    expect(getSaveButton(container).disabled).toBe(true);
+    fireEvent.change(within(container).getByLabelText("Base URL"), {
+      target: { value: "https://relay.example.com" },
+    });
+    await waitFor(() => expect(getSaveButton(container).disabled).toBe(false));
+    // …and the save carries the explicit API-style kind.
+    fireEvent.click(getSaveButton(container));
+    await waitFor(() =>
+      expect(saveApiKeyMock).toHaveBeenCalledWith(
+        "openai_chat",
+        "",
+        "https://relay.example.com",
+        undefined,
+        "Chat Completions",
+        "openai_chat",
+      ),
+    );
+
+    // Responses: same contract, its own kind.
+    saveApiKeyMock.mockClear();
+    fireEvent.click(screen.getByLabelText("Add a new provider"));
+    fireEvent.change(getKindSelect(), { target: { value: "openai_responses" } });
+    fireEvent.change(within(container).getByLabelText("Base URL"), {
+      target: { value: "https://relay.example.com" },
+    });
+    fireEvent.click(getSaveButton(container));
+    await waitFor(() =>
+      expect(saveApiKeyMock).toHaveBeenCalledWith(
+        "openai_responses",
+        "",
+        "https://relay.example.com",
+        undefined,
+        "Responses",
+        "openai_responses",
+      ),
+    );
   });
 });

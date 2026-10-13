@@ -428,6 +428,8 @@ pub fn update_chat_session_provider(
     let provider = match provider.as_str() {
         "anthropic"
         | "openai"
+        | "openai_chat"
+        | "openai_responses"
         | "anthropic_compatible"
         | "openai_compatible"
         | "openrouter"
@@ -747,10 +749,14 @@ pub fn get_chat_session_metrics(
 /// unknown/harness labels, which follow the Claude Code convention) report
 /// uncached input with cache fields billed separately.
 pub(super) fn provider_input_includes_cache(provider: Option<&str>) -> bool {
-    matches!(
-        provider,
-        Some("openai") | Some("openai_compatible") | Some("openrouter") | Some("local_gguf")
-    )
+    // Routed through the ChatProviderId catalog so the OpenAI family (native,
+    // Chat Completions, Responses, compatible, OpenRouter, GGUF) is one
+    // source of truth. Harness labels and unknown strings report
+    // Anthropic-style (uncached input) — the Claude Code convention.
+    provider
+        .and_then(|p| crate::chat::commands::parse_provider_id(p))
+        .map(|id| id.input_includes_cache())
+        .unwrap_or(false)
 }
 
 /// How many tokens of a prompt were cache-accounted on the reported turn —

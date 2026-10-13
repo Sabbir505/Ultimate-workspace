@@ -111,6 +111,7 @@ pub async fn generate_chat_title(
         system,
         &user,
         32,
+        None,
     )
     .await?
     else {
@@ -220,6 +221,7 @@ pub async fn generate_commit_message(
         system,
         &user,
         64,
+        None,
     )
     .await?
     else {
@@ -322,6 +324,8 @@ pub async fn generate_diff_review(
                 "anthropic",
                 "openai_compatible",
                 "anthropic_compatible",
+                "openai_chat",
+                "openai_responses",
             ];
             let mut fallback = None;
             for p in PROVIDERS {
@@ -402,6 +406,7 @@ pub async fn generate_diff_review(
         system,
         &user,
         2048,
+        None,
     )
     .await?
     else {

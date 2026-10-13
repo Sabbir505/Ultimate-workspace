@@ -35,7 +35,15 @@ fn improvements_enabled(conn: &Connection) -> bool {
 /// + its default model). Falls back to the same priority scan the frontend
 /// uses. Returns None when no usable cloud/local model is configured.
 pub fn resolve_active_chat_model(conn: &Connection) -> Option<(String, String)> {
-    let providers = ["anthropic", "openai", "openrouter", "anthropic_compatible", "openai_compatible"];
+    let providers = [
+        "anthropic",
+        "openai",
+        "openrouter",
+        "anthropic_compatible",
+        "openai_compatible",
+        "openai_chat",
+        "openai_responses",
+    ];
     if let Ok(Some(active)) = db::get_setting(conn, "chat.active_provider") {
         if !active.is_empty()
             && active != "local_gguf"
@@ -1002,7 +1010,13 @@ mod tests {
         if let Some((provider, _model)) = resolve_active_chat_model(&conn) {
             assert!(matches!(
                 provider.as_str(),
-                "anthropic" | "openai" | "openrouter" | "anthropic_compatible" | "openai_compatible"
+                "anthropic"
+                    | "openai"
+                    | "openrouter"
+                    | "anthropic_compatible"
+                    | "openai_compatible"
+                    | "openai_chat"
+                    | "openai_responses"
             ));
         }
         // The active_provider marker, when honored, wins over the scan.

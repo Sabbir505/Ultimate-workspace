@@ -49,7 +49,14 @@ function dayValue(d: DailyCost, mode: Mode, p: string): number {
 // "chat:anthropic_compatible" stacks under Anthropic (same wire family).
 function normalizeProvider(p: string): string {
   if (p === "chat:anthropic_compatible" || p === "chat:anthropic") return "chat:anthropic";
-  if (p === "chat:openai_compatible" || p === "chat:openai") return "chat:openai";
+  if (
+    p === "chat:openai_compatible" ||
+    p === "chat:openai_chat" ||
+    p === "chat:openai_responses" ||
+    p === "chat:openai"
+  ) {
+    return "chat:openai";
+  }
   return p;
 }
 

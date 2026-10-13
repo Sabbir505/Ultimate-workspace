@@ -1126,7 +1126,7 @@ fn static_relay_schemas() -> Vec<Value> {
         }),
         json!({
             "name": "create_automation",
-            "description": "Create a Relay automation: a prompt that runs UNATTENDED on a 5-field local-time cron schedule (e.g. '0 9 * * 1-5' = 09:00 weekdays), with a chosen agent (claude_code, opencode, anthropic, openai, openrouter, anthropic_compatible, openai_compatible, local_gguf, pi, omp, commandcode). The prompt must be fully self-contained — runs have no conversation memory and no user to answer questions. Fires while the app runs; each run logs to its own chat session and the Automations view.",
+            "description": "Create a Relay automation: a prompt that runs UNATTENDED on a 5-field local-time cron schedule (e.g. '0 9 * * 1-5' = 09:00 weekdays), with a chosen agent (claude_code, opencode, anthropic, openai, openrouter, anthropic_compatible, openai_compatible, openai_chat, openai_responses, local_gguf, pi, omp, commandcode). The prompt must be fully self-contained — runs have no conversation memory and no user to answer questions. Fires while the app runs; each run logs to its own chat session and the Automations view.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

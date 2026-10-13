@@ -62,6 +62,7 @@ pub(crate) async fn verify_via_provider(
         provider_id,
         ChatProviderId::Anthropic | ChatProviderId::AnthropicCompatible
     );
+    let is_responses = provider_id == ChatProviderId::OpenAIResponses;
 
     let resp = if is_anthropic {
         client
@@ -78,6 +79,22 @@ pub(crate) async fn verify_via_provider(
                 "max_tokens": 1024,
                 "system": SYSTEM,
                 "messages": [{ "role": "user", "content": user }],
+            }))
+            .send()
+            .await
+            .map_err(|e| format!("verify request failed: {e}"))?
+    } else if is_responses {
+        client
+            .post(format!("{base}/v1/responses"))
+            .header("Authorization", format!("Bearer {api_key}"))
+            .header("content-type", "application/json")
+            .json(&json!({
+                "model": model,
+                "stream": false,
+                "store": false,
+                "max_output_tokens": 1024,
+                "instructions": SYSTEM,
+                "input": [{ "role": "user", "content": user }],
             }))
             .send()
             .await
@@ -120,6 +137,8 @@ pub(crate) async fn verify_via_provider(
                     .join("")
             })
             .unwrap_or_default()
+    } else if is_responses {
+        crate::chat::llm_client::responses_output_text(&v)
     } else {
         v.get("choices")
             .and_then(|c| c.get(0))

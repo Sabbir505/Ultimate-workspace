@@ -652,6 +652,8 @@ fn handle_send_chat_message(
         // Instance ids resolve to their kind (see provider_kind).
         "anthropic" => crate::chat::providers::ChatProviderId::Anthropic,
         "openai" => crate::chat::providers::ChatProviderId::OpenAI,
+        "openai_chat" => crate::chat::providers::ChatProviderId::OpenAIChat,
+        "openai_responses" => crate::chat::providers::ChatProviderId::OpenAIResponses,
         "anthropic_compatible" => crate::chat::providers::ChatProviderId::AnthropicCompatible,
         "openai_compatible" => crate::chat::providers::ChatProviderId::OpenAICompatible,
         "openrouter" => crate::chat::providers::ChatProviderId::OpenRouter,
@@ -1096,6 +1098,8 @@ fn handle_rename_session(
 const KNOWN_PROVIDERS: &[&str] = &[
     "anthropic",
     "openai",
+    "openai_chat",
+    "openai_responses",
     "anthropic_compatible",
     "openai_compatible",
     "openrouter",

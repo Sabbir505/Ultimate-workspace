@@ -6,6 +6,8 @@
 export type ChatProviderKind =
   | "anthropic"
   | "openai"
+  | "openai_chat"
+  | "openai_responses"
   | "openrouter"
   | "anthropic_compatible"
   | "openai_compatible"
@@ -14,6 +16,8 @@ export type ChatProviderKind =
 const CHAT_PROVIDER_KINDS: ChatProviderKind[] = [
   "anthropic",
   "openai",
+  "openai_chat",
+  "openai_responses",
   "openrouter",
   "anthropic_compatible",
   "openai_compatible",

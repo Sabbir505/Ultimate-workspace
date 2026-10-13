@@ -987,6 +987,38 @@ impl AgentSessionManager {
         flag.map(|f| f.load(Ordering::SeqCst)).unwrap_or(false)
     }
 
+    /// Turn-liveness probe for the UI's no-output watchdog, applying the same
+    /// test as the send guard's self-heal: a flag whose reader and child are
+    /// both gone is cleared here and reads as finished, so the UI can never
+    /// keep a phantom turn visible while the next send would refuse it. A
+    /// genuinely live turn (reader draining, or child not exited) reads true.
+    ///
+    /// UNLIKE `is_turn_in_flight` this touches reader/child state and so takes
+    /// the per-session lock — callers run it on a blocking worker, since
+    /// `send` holds that lock across its seconds-long harness setup.
+    pub fn turn_liveness(&self, chat_session_id: &str) -> bool {
+        let entry = {
+            let sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+            sessions.get(chat_session_id).cloned()
+        };
+        let Some(entry) = entry else {
+            return false;
+        };
+        let mut entry = entry.lock().unwrap_or_else(|e| e.into_inner());
+        if !entry.turn_in_flight.load(Ordering::SeqCst) {
+            return false;
+        }
+        if turn_actually_running(&mut entry) {
+            return true;
+        }
+        crate::relay_eprintln!(
+            "[agent_sessions] chat {chat_session_id}: turn_in_flight stuck with no live \
+             reader/child — liveness probe clearing it"
+        );
+        entry.turn_in_flight.store(false, Ordering::SeqCst);
+        false
+    }
+
     /// Kill the session's live CLI child WITHOUT cancel semantics — the
     /// per-turn completion watchdog's lever. `cancel` would poison the turn
     /// (sets `cancelled`, discards the streamed reply, emits `chat:done`);

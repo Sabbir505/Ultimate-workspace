@@ -634,6 +634,15 @@ export const cancelAgentChatMessage = (chatSessionId: string) =>
 export const reconcileAgentSessions = () =>
   safeInvoke<string[]>("reconcile_agent_sessions");
 
+/** Whether the backend still owns a turn for this chat — the built-in
+ *  provider's streaming task or a live harness/CLI turn (the harness answer
+ *  heals a flag whose reader and child are both gone, so it always agrees
+ *  with what the next send would do). The no-output watchdog consults this
+ *  before releasing a quiet turn: a minutes-long tool call keeps its bubble
+ *  and Stop button while the backend owns the turn. */
+export const chatTurnInFlight = (chatSessionId: string) =>
+  safeInvoke<boolean>("chat_turn_in_flight", { chatSessionId });
+
 /** Models/endpoint discovered in a CLI harness's own config files
  *  (harness_config.rs): settings.json / config.toml / opencode.json. */
 export interface HarnessModelInfo {

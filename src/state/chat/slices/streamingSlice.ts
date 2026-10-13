@@ -4,6 +4,7 @@
 import {
   cancelAgentChatMessage,
   cancelChatMessage,
+  chatTurnInFlight,
   persistPartialChatMessage,
   generateChatTitle,
   generateChatSuggestion,
@@ -22,6 +23,7 @@ import type { QueuedChatMessage } from "../types";
 import { tailCodePointsHysteresis } from "../../../lib/safeSlice";
 import { generateSessionTitle } from "../../../lib/sessionTitle";
 import { useProjectsStore } from "../../projects";
+import { useSettingsStore } from "../../settings";
 import {
   STREAM_TAIL_CAP,
   STREAM_TAIL_MARGIN,
@@ -29,7 +31,7 @@ import {
   bufferTargetFor,
   bufferWriteBack,
   clearStreamState,
-  registerRemoteTurnDisarmer,
+  registerTurnStallDisarmer,
   cliAgentId,
   hasManuallyRenamed,
   isCliAgent,
@@ -68,23 +70,82 @@ function consumeStaleTerminal(
   return armed === live;
 }
 
-// HUNG REMOTE TURN WATCHDOG. A backend-initiated turn (phone, automation)
-// whose model never streams — or stalls mid-stream — never emits chat:done,
-// so its streaming entry (and every turn-gated surface it gates) stayed
-// stuck FOREVER. Each entry arms a stall timer; tokens re-arm it; a timer
-// that fires clears the dead entry so the UI unblocks. The turn itself is
-// untouched backend-side — this only stops RENDERING a dead stream.
-const REMOTE_TURN_STALL_MS = 120_000;
-const remoteStallTimers = new Map<string, ReturnType<typeof setTimeout>>();
+// NO-OUTPUT WATCHDOG. A streaming entry whose turn goes quiet with NOTHING
+// arriving — no token, no perf heartbeat, no status line — would otherwise
+// leave the UI (and every turn-gated surface: composer Stop, sidebar dot,
+// queue drain) stuck forever. EVERY turn-liveness event re-arms this timer
+// (noteTurnActivity); a timer that expires does NOT blindly release the turn:
+// it asks the backend whether the turn is still in flight and KEEPS the
+// bubble — Stop button included — while it is. A long tool call (a build, a
+// test suite) emits no text deltas for minutes but is very much alive; only
+// when the backend no longer owns the turn is it released, and then through
+// the Stop path (partial persisted, turn actually stopped, queue drained) so
+// the UI and the backend can never disagree about a running turn.
+const TURN_STALL_MS = 120_000;
+const turnStallTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+/** (Re)arm the no-output watchdog for a session that is streaming. Exported
+ *  for sibling slices that carry turn-liveness events (perf heartbeats,
+ *  status lines) — arming on tokens alone read a minutes-long quiet-but-alive
+ *  phase as a dead stream, wiped the live reply mid-turn, and left the
+ *  backend turn running while Send answered "a turn is already running". */
+export function noteTurnActivity(get: ChatStoreGet, chatSessionId: string): void {
+  if (!(chatSessionId in get().streaming)) return;
+  const prev = turnStallTimers.get(chatSessionId);
+  if (prev) clearTimeout(prev);
+  turnStallTimers.set(
+    chatSessionId,
+    setTimeout(() => {
+      turnStallTimers.delete(chatSessionId);
+      void releaseStalledTurn(get, chatSessionId);
+    }, TURN_STALL_MS),
+  );
+}
+
+/** The no-output timer expired: reconcile with the backend before touching
+ *  the UI. Still in flight (or the probe failed — never hide a turn on an
+ *  unconfirmed probe) → keep everything visible and re-arm; the turn is quiet,
+ *  not gone. Finished → release through the Stop path, which persists the
+ *  streamed partial, cancels the backend turn, and drains the queue. */
+async function releaseStalledTurn(get: ChatStoreGet, chatSessionId: string): Promise<void> {
+  if (!(chatSessionId in get().streaming)) return;
+  let inFlight: boolean | null = null;
+  try {
+    inFlight = await chatTurnInFlight(chatSessionId);
+  } catch {
+    inFlight = null;
+  }
+  // A terminal event may have landed while the probe was in flight.
+  if (!(chatSessionId in get().streaming)) return;
+  if (inFlight !== false) {
+    console.warn(
+      '[stream] no output for',
+      TURN_STALL_MS / 1000,
+      's but the backend turn is',
+      inFlight === true ? 'still in flight' : 'unconfirmed',
+      '— keeping it visible:',
+      chatSessionId,
+    );
+    noteTurnActivity(get, chatSessionId);
+    return;
+  }
+  console.warn(
+    '[stream] turn released after',
+    TURN_STALL_MS / 1000,
+    's with no output and no backend turn:',
+    chatSessionId,
+  );
+  await get().cancelStream(chatSessionId);
+}
 
 export function createStreamingSlice(set: ChatStoreSet, get: ChatStoreGet) {
   // clearStreamState (moduleState.ts) disarms per-turn stall timers through
   // this hook — a direct import would cycle moduleState ↔ streamingSlice.
-  registerRemoteTurnDisarmer((id: string) => {
-    const t = remoteStallTimers.get(id);
+  registerTurnStallDisarmer((id: string) => {
+    const t = turnStallTimers.get(id);
     if (t) {
       clearTimeout(t);
-      remoteStallTimers.delete(id);
+      turnStallTimers.delete(id);
     }
   });
   return {
@@ -607,19 +668,9 @@ cancelStream: async (sessionIdOverride?: string) => {
       for (const delay of [500, 2500]) {
         setTimeout(() => void get().syncTranscript(chatSessionId), delay);
       }
-      // Arm the stall watchdog (re-armed by every token; disarmed by the
-      // terminal-event paths via clearStreamState).
-      const prev = remoteStallTimers.get(chatSessionId);
-      if (prev) clearTimeout(prev);
-      remoteStallTimers.set(
-        chatSessionId,
-        setTimeout(() => {
-          remoteStallTimers.delete(chatSessionId);
-          if (!(chatSessionId in get().streaming)) return;
-          console.warn('[stream] remote turn stalled with no tokens for', REMOTE_TURN_STALL_MS / 1000, 's — releasing UI:', chatSessionId);
-          set((st) => clearStreamState(st, chatSessionId));
-        }, REMOTE_TURN_STALL_MS),
-      );
+      // Arm the no-output watchdog (re-armed by every liveness event, disarmed
+      // by the terminal-event paths via clearStreamState).
+      noteTurnActivity(get, chatSessionId);
     },
 
     // Refetch the displayed transcript for a session and merge it into the
@@ -688,20 +739,8 @@ cancelStream: async (sessionIdOverride?: string) => {
       if (token.length > 0 && get().staleTerminalFor[chatSessionId] !== undefined) {
         set((s) => ({ staleTerminalFor: omitKey(s.staleTerminalFor, chatSessionId) }));
       }
-      // Token activity — re-arm the hung-turn watchdog.
-      {
-        const t = remoteStallTimers.get(chatSessionId);
-        if (t) clearTimeout(t);
-        remoteStallTimers.set(
-          chatSessionId,
-          setTimeout(() => {
-            remoteStallTimers.delete(chatSessionId);
-            if (!(chatSessionId in get().streaming)) return;
-            console.warn('[stream] turn stalled mid-stream — releasing UI:', chatSessionId);
-            set((st) => clearStreamState(st, chatSessionId));
-          }, REMOTE_TURN_STALL_MS),
-        );
-      }
+      // Token activity — re-arm the no-output watchdog.
+      noteTurnActivity(get, chatSessionId);
       // No-op flush guard: harnesses close a stream with runs of EMPTY
       // deltas (dozens can land in one IPC sweep on teardown/restart). Each
       // used to clone the whole streaming map and re-render ChatView for
@@ -748,6 +787,9 @@ cancelStream: async (sessionIdOverride?: string) => {
     },
 
     onStatus: (chatSessionId: string, reason: string, message: string) => {
+      // A status line is turn LIFENESS (reconnect notices, compaction, tool
+      // progress): re-arm the no-output watchdog before any early return.
+      noteTurnActivity(get, chatSessionId);
       // Routine Auto resolution notices ("Auto → Provider · model (why)") are
       // deliberately NOT displayed — a pill on every Auto turn read as noise.
       // The resolution is still visible where it matters: the composer chip

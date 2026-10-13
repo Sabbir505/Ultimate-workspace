@@ -157,6 +157,43 @@ pub async fn reconcile_agent_sessions(
         .map_err(|e| format!("reconcile task panicked: {e}"))?
 }
 
+/// Whether the backend still owns a turn for this chat — the built-in
+/// provider's streaming task or a live harness/CLI turn.
+///
+/// The desktop UI's no-output watchdog asks this before releasing a quiet
+/// turn: `chat:perf` heartbeats cover the streaming paths, but a turn that
+/// goes silent must not have its bubble (and Stop button) yanked while the
+/// backend still owns it — and a turn the backend has finished must not keep
+/// rejecting sends while the UI shows nothing. The harness probe also heals a
+/// flag whose reader and child are both gone, so its answer always agrees
+/// with what the next send would do.
+#[tauri::command]
+pub async fn chat_turn_in_flight(
+    chat_session_id: String,
+    app: AppHandle,
+) -> Result<bool, String> {
+    // Built-in path: a registered stream task means a turn is in flight.
+    // Plain mutex over the (tiny) registry map, safe on the async runtime.
+    let builtin = app
+        .try_state::<crate::ChatState>()
+        .map(|c| c.0.has_active_stream(&chat_session_id))
+        .unwrap_or(false);
+    if builtin {
+        return Ok(true);
+    }
+    // Harness path: takes the per-session lock (reader/child state), so it
+    // runs on a blocking worker — `send` holds that lock across harness setup.
+    let Some(mgr) = app
+        .try_state::<AgentSessionState>()
+        .map(|a| Arc::clone(&a.0))
+    else {
+        return Ok(false);
+    };
+    tauri::async_runtime::spawn_blocking(move || Ok(mgr.turn_liveness(&chat_session_id)))
+        .await
+        .map_err(|e| format!("turn-liveness task panicked: {e}"))?
+}
+
 /// The models/endpoint discovered in the CLI harness's own config files
 /// (settings.json / config.toml / opencode.json) — see harness_config.rs.
 ///

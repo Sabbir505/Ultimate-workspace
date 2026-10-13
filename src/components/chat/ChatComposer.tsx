@@ -56,6 +56,7 @@ import {
 } from "../../lib/ipc";
 
 import {
+  GoalNotchTimer,
   QueuedMessageRow,
   QuotedSelectionRow,
   ThinkingIcon,

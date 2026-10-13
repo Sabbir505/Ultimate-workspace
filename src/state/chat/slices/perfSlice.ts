@@ -3,6 +3,7 @@
 import { getChatSessionMetrics } from "../../../lib/ipc";
 import type { ChatCitationReportPayload, ChatPerfPayload } from "../../../lib/ipc";
 import { omitKey } from "../moduleState";
+import { noteTurnActivity } from "./streamingSlice";
 import type { ChatStoreGet, ChatStoreSet } from "../types";
 
 export function createPerfSlice(set: ChatStoreSet, get: ChatStoreGet) {
@@ -34,6 +35,12 @@ export function createPerfSlice(set: ChatStoreSet, get: ChatStoreGet) {
       // guard then froze the stale value on screen). Only a session that is
       // actually streaming may hold a live perf snapshot.
       if (!(payload.chatSessionId in get().streaming)) return;
+      // A perf heartbeat is turn LIFENESS — the backend emits one every 500ms
+      // for the whole turn (turn_perf.rs), so it re-arms the no-output
+      // watchdog. Without this, a minutes-long tool call (no text deltas)
+      // read as a dead stream: the watchdog wiped the live reply mid-turn
+      // while the backend turn kept running and rejecting sends.
+      noteTurnActivity(get, payload.chatSessionId);
       set((s) => ({
         livePerf: { ...s.livePerf, [payload.chatSessionId]: payload },
       }));

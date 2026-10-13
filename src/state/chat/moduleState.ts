@@ -906,17 +906,17 @@ export async function loadPaneBufferOlder(
  *  terminal paths share the rule; callers spread their own extras — livePerf,
  *  stoppedPartial, pending maps — on top). */
 type DisarmFn = ((id: string) => void) | null;
-let disarmRemoteTurnStall: DisarmFn = null;
+let disarmTurnStall: DisarmFn = null;
 /** Registered by streamingSlice so clearStreamState can disarm the per-turn
- *  stall timers without a circular module import. */
-export function registerRemoteTurnDisarmer(fn: (id: string) => void): void {
-  disarmRemoteTurnStall = fn;
+ *  no-output stall timers without a circular module import. */
+export function registerTurnStallDisarmer(fn: (id: string) => void): void {
+  disarmTurnStall = fn;
 }
 
 export function clearStreamState(s: ChatState, id: string): Partial<ChatState> {
-  // Disarm the hung-turn watchdog (streamingSlice owns the timer map via a
+  // Disarm the no-output watchdog (streamingSlice owns the timer map via a
   // global — importing it here would cycle, so it exposes a disarmer).
-  disarmRemoteTurnStall?.(id);
+  disarmTurnStall?.(id);
   return {
     streaming: omitKey(s.streaming, id),
     chatStatus: omitKey(s.chatStatus, id),

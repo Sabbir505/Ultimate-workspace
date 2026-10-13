@@ -115,3 +115,57 @@ describe("MessageBubble answer visibility", () => {
     expect(queryByText(/Final answer/)).not.toBeNull();
   });
 });
+
+describe("MessageBubble visualization placement", () => {
+  const vizMarker = (detail: string) =>
+    `<tool>${JSON.stringify({
+      kind: "viz-data",
+      title: "Visualizing",
+      detail,
+      viz: "chart",
+      payload: { title: "Deploys by week", bars: [{ label: "W1", value: 4 }, { label: "W2", value: 9 }] },
+    })}</tool>`;
+
+  it("keeps a mid-turn card in place and names it in the collapsed summary", async () => {
+    // VIZ_COMPOSITION_AND_PLACEMENT.md §2 (the rule change): a card the model
+    // emitted and then KEPT WORKING after is mid-turn work — it renders in
+    // place, inside the process region, between the tool rows around it. The
+    // card is named in the collapsed row, which is what keeps an in-region
+    // card discoverable now that hoisting is no longer unconditional.
+    const content =
+      vizMarker("Deploys") + tool("Searching the web", "follow-up probe") + "\n\nBoth cards are above.";
+    const { container } = render(
+      <MessageBubble message={assistantMsg(content)} chatSessionId="s1" />,
+    );
+    await flushLazy();
+    // Collapsed, the region body isn't mounted — the summary chip is the
+    // discovery path, so it must carry the card's title.
+    const toggle = container.querySelector(".chat-process-toggle")!;
+    expect(toggle.textContent).toContain("Deploys");
+    fireEvent.click(toggle);
+    await flushLazy();
+    const card = container.querySelector('[data-testid="viz-card-chart"]');
+    expect(card).toBeTruthy();
+    // In place: inside the region, alongside the LATER tool row…
+    expect(card!.closest(".chat-process")).toBeTruthy();
+    const region = container.querySelector(".chat-process")!;
+    expect(region.textContent).toContain("follow-up probe");
+    // …while the trailing prose is the answer and stays outside it.
+    expect(region.textContent).not.toContain("Both cards are above.");
+  });
+
+  it("hoists a card with no later call into the answer area", async () => {
+    // The other half of the rule, unchanged: a card with nothing after it is
+    // the turn's RESULT and must never be swallowed by the collapsed region.
+    const content = tool("Searching the web", "probe") + vizMarker("Deploys") + "\n\nCard above.";
+    const { container } = render(
+      <MessageBubble message={assistantMsg(content)} chatSessionId="s1" />,
+    );
+    await flushLazy();
+    const card = container.querySelector('[data-testid="viz-card-chart"]');
+    expect(card).toBeTruthy();
+    // Outside the collapsible, and a real card (not the unavailable fallback).
+    expect(card!.closest(".chat-process")).toBeNull();
+    expect(card!.closest(".chat-viz-card")).toBeTruthy();
+  });
+});

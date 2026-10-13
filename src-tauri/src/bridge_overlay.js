@@ -26,8 +26,31 @@
     var ACCENT = 'rgba(193, 95, 60, 1)';
     var ACCENT_SOFT = 'rgba(193, 95, 60, 0.35)';
 
+    // Document-start timing. This script is installed with WebView2's
+    // AddScriptToExecuteOnDocumentCreated (and the macOS initialization_script
+    // equivalent), which runs BEFORE the parser has created an <html> element:
+    // document.head AND document.documentElement are both null on about:blank
+    // and on the first pass of a fresh document. Appending then threw
+    // "Cannot read properties of null (reading 'appendChild')" as an UNCAUGHT
+    // error in the page — which polluted the console ring buffer the agent
+    // reads and visibly broke login/SSO pages (LinkedIn's credential_page_
+    // library fails with a null postMessage target once the document-start
+    // budget is spent on our error). So: NEVER throw here. If the document has
+    // no root yet, defer the install to DOMContentLoaded/readystatechange and
+    // report the failure honestly (callers degrade — no cursor/ripple — rather
+    // than crash).
+    function docRoot() {
+        try {
+            return document.head || document.documentElement || null;
+        } catch (e) {
+            return null;
+        }
+    }
+
     function injectStyle() {
-        if (document.getElementById(STYLE_ID)) return;
+        var root = docRoot();
+        if (!root) return false;
+        if (document.getElementById(STYLE_ID)) return true;
         var style = document.createElement('style');
         style.id = STYLE_ID;
         style.setAttribute('data-relay-overlay', '');
@@ -65,29 +88,60 @@
             '#' + CARET_ID + '.__relay_visible { opacity: 1; }',
             '@keyframes __relay_blink { to { visibility: hidden; } }'
         ].join('\n');
-        (document.head || document.documentElement).appendChild(style);
+        root.appendChild(style);
+        return true;
     }
 
     function ensureEl(id, extraAttrs) {
+        var root = docRoot();
+        if (!root) return null;
         var el = document.getElementById(id);
         if (el) return el;
         el = document.createElement('div');
         el.id = id;
         el.setAttribute('data-relay-overlay', '');
         if (extraAttrs) extraAttrs(el);
-        document.documentElement.appendChild(el);
+        root.appendChild(el);
         return el;
     }
 
-    // Public: install the overlay (idempotent). Called after navigation and
-    // lazily by every action body.
+    // Re-arm the install once the document has a root. Guarded on the window
+    // (not this closure) so re-injections of the whole script don't stack up
+    // listeners, and deduped by the normal getElementById idempotency anyway.
+    function scheduleDeferredInject() {
+        if (window.__relay_overlay_deferred) return;
+        window.__relay_overlay_deferred = true;
+        var fire = function() {
+            window.__relay_overlay_deferred = false;
+            try { window.__relay_injectOverlay(); } catch (e) {}
+        };
+        try {
+            document.addEventListener('DOMContentLoaded', fire, { once: true });
+            document.addEventListener('readystatechange', fire, { once: true });
+        } catch (e) {
+            // No addEventListener (detached about:blank document): fall back
+            // to a microtask retry, which covers the case where the parser
+            // creates <html> a tick later.
+            window.__relay_overlay_deferred = false;
+            window.setTimeout(fire, 0);
+        }
+    }
+
+    // Public: install the overlay (idempotent). Returns true when the overlay
+    // is in place, false when the document had no root yet (install deferred).
+    // Called at injection time, after navigation, and lazily by every action.
     window.__relay_injectOverlay = function() {
+        if (!docRoot()) {
+            scheduleDeferredInject();
+            return false;
+        }
         injectStyle();
         ensureEl(CURSOR_ID);
         ensureEl(RIPPLE_ID);
         ensureEl(HIGHLIGHT_ID);
         ensureEl(CARET_ID);
         window.__relay_overlay_installed = true;
+        return true;
     };
 
     // Public: tween the cursor from its last position to (x,y) over durationMs.
@@ -168,12 +222,14 @@
     window.__relay_narrate = function(text) {
         if (!text) return;
         window.__relay_injectOverlay();
+        var root = docRoot();
+        if (!root) return;
         var el = document.getElementById(NARRATION_ID);
         if (!el) {
             el = document.createElement('div');
             el.id = NARRATION_ID;
             el.setAttribute('data-relay-overlay', '');
-            (document.head || document.documentElement).appendChild(el);
+            root.appendChild(el);
             var css = document.createElement('style');
             css.setAttribute('data-relay-overlay', '');
             css.textContent = '#' + NARRATION_ID + ' {' +
@@ -184,7 +240,7 @@
                 '  border-radius: 6px; border: 1px solid ' + ACCENT_SOFT + ';' +
                 '  opacity: 0; transition: opacity 0.2s ease-out;' +
                 '}';
-            (document.head || document.documentElement).appendChild(css);
+            root.appendChild(css);
         }
         el.textContent = String(text).slice(0, 120);
         var cursor = document.getElementById(CURSOR_ID);
@@ -198,6 +254,8 @@
     };
 
     window.__relay_overlay_installed = false;
-    // Install immediately on injection; navigation re-injection re-runs this.
+    // Install immediately on injection. At document-created timing the DOM has
+    // no root yet: the call defers itself (see scheduleDeferredInject) instead
+    // of throwing into the page. Navigation re-injection re-runs this.
     window.__relay_injectOverlay();
 })();

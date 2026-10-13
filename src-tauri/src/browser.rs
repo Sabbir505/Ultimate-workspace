@@ -3234,4 +3234,38 @@ mod tests {
         assert_eq!(opts.settle_ms, 400);
         assert_eq!(opts.max_scroll_steps, 4);
     }
+
+    /// The overlay script is installed at DOCUMENT-CREATED time (WebView2's
+    /// AddScriptToExecuteOnDocumentCreated / macOS initialization_script),
+    /// which runs before the parser has created an <html> element — both
+    /// document.head and document.documentElement are null then. Its eager
+    /// install must therefore never append unguarded: doing so threw
+    /// "Cannot read properties of null (reading 'appendChild')" as an
+    /// uncaught error in the page, which broke real login flows (LinkedIn's
+    /// credential_page_library then failed with a null postMessage target).
+    /// The JS-side behaviour is pinned behaviourally in
+    /// `bridge_overlay.test.mjs`; this guards the source-level contract.
+    #[test]
+    fn overlay_js_never_appends_to_a_missing_document_root() {
+        // No unguarded documentElement/head append remains.
+        assert!(
+            !BRIDGE_OVERLAY_JS.contains("document.documentElement.appendChild"),
+            "overlay must append through the guarded docRoot()"
+        );
+        assert!(
+            !BRIDGE_OVERLAY_JS.contains("(document.head || document.documentElement).appendChild"),
+            "overlay must append through the guarded docRoot()"
+        );
+        // Every append site goes through a root lookup that can yield null.
+        assert!(BRIDGE_OVERLAY_JS.contains("function docRoot()"));
+        assert!(BRIDGE_OVERLAY_JS.contains("document.head || document.documentElement || null"));
+        // A missing root defers the install instead of throwing.
+        assert!(BRIDGE_OVERLAY_JS.contains("scheduleDeferredInject()"));
+        assert!(BRIDGE_OVERLAY_JS.contains("'DOMContentLoaded'"));
+        assert!(BRIDGE_OVERLAY_JS.contains("'readystatechange'"));
+        // The privileged z-index surgery stays under the ceiling.
+        assert!(BRIDGE_OVERLAY_JS.contains("2147483647"));
+        // Overlay nodes stay agent-invisible.
+        assert!(BRIDGE_OVERLAY_JS.contains("data-relay-overlay"));
+    }
 }

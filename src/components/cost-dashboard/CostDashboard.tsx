@@ -23,7 +23,7 @@ export function CostDashboard() {
     let cancelled = false;
     void getPriceInfo()
       .then(info => { if (!cancelled) setPriceFetchedAt(info.fetchedAt); })
-      .catch(() => { /* non-fatal — the footer just shows no age */ });
+      .catch(() => { /* non-fatal — the price bar just shows no age */ });
     return () => { cancelled = true; };
   }, []);
   const refreshPrices = async () => {
@@ -54,6 +54,20 @@ export function CostDashboard() {
           </div>
         </div>
         <div className="view-body">
+          {/* Top bar: manual refresh of the live LiteLLM price table plus
+              the age of the currently stored rates. Kept at the top of the
+              body (not the old bottom footer) so a re-fetch needs no scroll,
+              and outside the rollups branch so it works while loading too. */}
+          <div className="cost-price-bar">
+            <button className="ghost" onClick={refreshPrices} disabled={refreshingPrices}>
+              {refreshingPrices ? "Refreshing…" : "↻ Refresh model prices"}
+            </button>
+            <span className="cost-footer-note">
+              {priceFetchedAt
+                ? `Live prices updated ${new Date(priceFetchedAt * 1000).toLocaleString()}`
+                : "Live prices not fetched yet — using the built-in rate table"}
+            </span>
+          </div>
           {error && (
             <div className="cost-error">
               Failed to load: {error}
@@ -91,18 +105,6 @@ export function CostDashboard() {
                   costs (live runs + the engine's own eval turns). Renders
                   nothing until an artifact has attributed spend. */}
               <ArtifactCostPanel rangeDays={rangeDays} />
-              {/* Footer: manual refresh of the live LiteLLM price table plus
-                  the age of the currently stored rates. */}
-              <div className="cost-footer">
-                <button className="ghost" onClick={refreshPrices} disabled={refreshingPrices}>
-                  {refreshingPrices ? "Refreshing…" : "↻ Refresh model prices"}
-                </button>
-                <span className="cost-footer-note">
-                  {priceFetchedAt
-                    ? `Live prices updated ${new Date(priceFetchedAt * 1000).toLocaleString()}`
-                    : "Live prices not fetched yet — using the built-in rate table"}
-                </span>
-              </div>
             </div>
           ) : null}
         </div>

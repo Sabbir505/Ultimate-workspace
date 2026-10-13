@@ -103,21 +103,63 @@ pub(super) struct DirWatch {
     _watcher: Option<notify::RecommendedWatcher>,
 }
 
+/// An entry that is never entered by a watch or a snapshot: VCS/editor
+/// dotdirs, dependency/build trees, and the harness attachments tree
+/// (input materialized for other chats — see `watch_path_allowed`).
+pub(super) fn watch_path_pruned(name: &str) -> bool {
+    name.starts_with('.')
+        || name == "node_modules"
+        || name == "target"
+        || name == "chat-attachments"
+}
+
 /// Depth/filter rules shared by `snapshot_dir` and the watcher callback so
 /// both modes see the same file set.
 pub(super) fn watch_path_allowed(rel: &str) -> bool {
-    // Depth ≤ 4, no hidden dirs, no node_modules/target (same filter as
-    // snapshot_dir's filter_entry).
+    // Depth ≤ 4, no hidden dirs, no node_modules/target, and never the
+    // attachments tree — `<artifacts>/chat-attachments/<session>/…` is
+    // harness INPUT materialized by `prepare_agent_attachments`, not
+    // generated work. Those files belong to the sending chat (whoever that
+    // is) and no artifact row is ever written for them, so every harness
+    // turn's end-of-turn diff used to surface the OTHER chats' attachments
+    // as its own artifacts. Attachments must never reach the gallery.
     let mut depth = 0usize;
     for seg in rel.split('/') {
         depth += 1;
-        if seg.starts_with('.') || seg == "node_modules" || seg == "target" {
+        if watch_path_pruned(seg) {
             return false;
         }
     }
     // rel includes the file itself; snapshot_dir's max_depth(4) counts the
     // root as 0, so a file at walker depth 4 has 4 segments.
     depth <= 4
+}
+
+/// True when `path`'s mtime falls inside a turn window that started at
+/// `since_secs` (unix seconds), with a small slack for filesystem timestamp
+/// granularity and same-host clock jitter. `false` when the file can't be
+/// stat'ed — an unreadable file must never be claimed as an artifact.
+///
+/// The end-of-turn diff runs against directories shared by every chat
+/// (the artifacts dir above all), and a session's watcher can surface files
+/// it did not produce: claude's watcher is created once per process spawn
+/// and accumulates touches while the chat sits idle, so a file another chat
+/// wrote hours ago was reported as this turn's artifact. `finish_turn` uses
+/// this gate for files the DB has never seen — a known artifact row keeps
+/// the old semantics, an unknown file is only this turn's when it was
+/// written during this turn.
+pub(super) fn modified_since(path: &Path, since_secs: i64) -> bool {
+    const SLACK_SECS: i64 = 5;
+    std::fs::metadata(path)
+        .and_then(|md| md.modified())
+        .map(|m| {
+            m.duration_since(SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0)
+                + SLACK_SECS
+                >= since_secs
+        })
+        .unwrap_or(false)
 }
 
 impl DirWatch {
@@ -254,8 +296,7 @@ pub(super) fn snapshot_dir(dir: &Path) -> HashMap<String, (SystemTime, u64)> {
             if e.depth() == 0 || !e.file_type().is_dir() {
                 return true;
             }
-            let name = e.file_name().to_string_lossy();
-            !name.starts_with('.') && name != "node_modules" && name != "target"
+            !watch_path_pruned(&e.file_name().to_string_lossy())
         });
     for entry in walker.flatten() {
         if out.len() >= MAX_ENTRIES {
@@ -444,5 +485,46 @@ mod tests {
             previewable_ext(p) && deliverable_ext(p)
         });
         assert_eq!(narrow, vec!["report.pdf"]);
+    }
+
+    #[test]
+    fn attachments_tree_is_never_watched() {
+        // The shared artifacts dir holds `<artifacts>/chat-attachments/<sid>/…`
+        // for harness INPUT. Every chat's end-of-turn diff sees that tree, so
+        // an unfiltered watch surfaced the other chats' attachments as this
+        // session's "artifacts" (no row is ever written for them, so nothing
+        // downstream could tell they were foreign).
+        assert!(!watch_path_allowed("chat-attachments/s1/123_00_photo.png"));
+        assert!(!watch_path_allowed("chat-attachments/s1/123_00_spec.docx"));
+        assert!(!watch_path_allowed("a/chat-attachments/s2/x.pdf"));
+        // Siblings in the same artifacts dir still count — the exclusion is
+        // the attachments subtree, not a name heuristic.
+        assert!(watch_path_allowed("report.pdf"));
+        assert!(watch_path_allowed("diagrams/flow.svg"));
+        // The depth/hidden/dep rules stay in force alongside it.
+        assert!(!watch_path_allowed("a/b/c/d/e.pdf"));
+        assert!(!watch_path_allowed("node_modules/x.png"));
+    }
+
+    #[test]
+    fn modified_since_gates_on_the_turn_window() {
+        let dir = std::env::temp_dir().join(format!(
+            "relay-dirwatch-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("fresh.md");
+        std::fs::write(&file, b"x").unwrap();
+        let now = crate::db::now_ts();
+
+        // Written just now → inside a window that started a minute ago.
+        assert!(modified_since(&file, now - 60));
+        // A window that starts in the future cannot include it (the slack is
+        // seconds, not hours) — this is the "another chat's file from an
+        // earlier turn" case the gate exists for.
+        assert!(!modified_since(&file, now + 3600));
+        // Unreadable path → never claim.
+        assert!(!modified_since(&dir.join("does-not-exist.md"), now - 60));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

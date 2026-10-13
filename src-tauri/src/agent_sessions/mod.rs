@@ -1553,6 +1553,31 @@ fn finish_turn(
                     }
                     Ok(false) => {}
                 }
+                // Turn-window gate for files the DB has never seen. The watch
+                // dirs are shared by every chat, and a session's watcher can
+                // surface files it did NOT produce: claude's watcher is created
+                // once per process spawn and keeps accumulating touches while
+                // the chat sits idle, so another chat's files (or anything else
+                // that landed in the shared artifacts dir since the last turn)
+                // were reported as this turn's artifacts. A file with an
+                // artifact row is a known work product and keeps the old
+                // semantics (including a legitimate re-write bump); an unknown
+                // file only belongs to this turn when it was written inside the
+                // turn's window. Trade-off: a file a turn's background process
+                // finishes writing AFTER the turn ended (so its mtime predates
+                // the next turn) is no longer claimed as an artifact by that
+                // later turn — it stays a plain file on disk, previewable via
+                // open_file, just not a gallery card.
+                let known = match crate::db::artifact_path_known(&conn, &path) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        crate::relay_eprintln!("[artifacts] path-known check failed, skipping {path}: {e}");
+                        continue;
+                    }
+                };
+                if !known && !modified_since(Path::new(&path), started_at) {
+                    continue;
+                }
                 crate::chat::stream_events::insert_and_emit_artifact(
                     app,
                     &conn,

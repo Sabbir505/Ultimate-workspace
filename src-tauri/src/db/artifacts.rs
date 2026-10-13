@@ -132,6 +132,22 @@ pub fn artifact_claimed_by_other_since(
     ))
 }
 
+/// True when ANY artifact row exists for `path` (regardless of owner).
+/// Callers use this to tell a known work product apart from a file the DB has
+/// never seen: end-of-turn directory diffs must gate only the unknown files by
+/// the turn window (see `finish_turn`), so re-writing an already-tracked file
+/// keeps its old ownership semantics.
+pub fn artifact_path_known(conn: &Connection, path: &str) -> DbResult<bool> {
+    let found: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM artifacts WHERE path = ?1 LIMIT 1",
+            params![path],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(found.is_some())
+}
+
 /// Artifacts attributed to one assistant message (timeline order).
 pub fn list_artifacts_for_message(
     conn: &Connection,
@@ -379,5 +395,20 @@ mod tests {
             )
             .unwrap();
         assert_eq!(loser, ("old.md".to_string(), 100));
+    }
+
+    #[test]
+    fn path_known_sees_any_owner_but_not_unknown_paths() {
+        let conn = super::super::mem();
+        insert_artifact(&conn, Some("s1"), "report.md", "C:/out/report.md", "markdown").unwrap();
+        // Owned by ANOTHER session, still "known" — finish_turn's turn-window
+        // gate only applies to files the DB has never seen, so a tracked file
+        // keeps its old ownership semantics.
+        assert!(artifact_path_known(&conn, "C:/out/report.md").unwrap());
+        // Unowned rows count too (they are work products, just unattributed).
+        insert_artifact(&conn, None, "shot.png", "C:/out/shot.png", "png").unwrap();
+        assert!(artifact_path_known(&conn, "C:/out/shot.png").unwrap());
+        // A file the DB has never seen is what the gate exists for.
+        assert!(!artifact_path_known(&conn, "C:/out/stranger.docx").unwrap());
     }
 }

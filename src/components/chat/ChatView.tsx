@@ -1866,6 +1866,13 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
                     This conversation has outgrown the model&apos;s context window. Start a new
                     chat, or edit an earlier message to trim the history, then retry.
                   </>
+                ) : errorCode === "usage_limit" ? (
+                  <>
+                    This model hit its usage limit — a free model&apos;s daily allowance is used
+                    up. Switch to another model in the composer, or wait for the limit to reset,
+                    then send again.
+                    <span className="chat-error-detail">{formatChatError(error)}</span>
+                  </>
                 ) : (
                   formatChatError(error)
                 )}

@@ -12,8 +12,9 @@ export interface FetchReport {
   fetchedAt: number;
 }
 
-/** Manual re-fetch of the LiteLLM price registry (cost dashboard footer's
- *  "Refresh model prices"). Failure keeps the previous blob and rejects. */
+/** Manual re-fetch of the LiteLLM price registry (the cost dashboard
+ *  header's "↻ Refresh", alongside the rollups and plan-window refreshes).
+ *  Failure keeps the previous blob and rejects. */
 export const pricesRefreshNow = () =>
   safeInvoke<FetchReport | null>("prices_refresh_now");
 

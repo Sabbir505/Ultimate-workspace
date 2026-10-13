@@ -1,0 +1,18 @@
+<!doctype html>
+<!-- Dev-only harness (not part of the app build): the usage-limit warning
+     notch on top of the real composer card, armed through the real usage
+     store exactly as `usage:limit-alert` / `check_usage_limits` emit it.
+     Serve `npx vite` and open /usage-notch-harness.html — the floating
+     switcher cycles scenarios (no notch / cap warning / limit reached /
+     Claude 5h window / OpenRouter credits) and flips the theme. -->
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Usage-limit notch harness</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/dev/usageNotchHarness.tsx"></script>
+  </body>
+</html>

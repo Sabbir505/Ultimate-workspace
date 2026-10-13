@@ -352,6 +352,90 @@
   font-variant-numeric: tabular-nums;
   color: var(--text-dim);
 }
+
+/* Usage-limit warning notch (usage:limit-alert / cap thresholds) — the goal
+   notch's exact dock geometry and glass, with the tier accent (amber at the
+   warning threshold, red once the limit is reached) on the icon and text.
+   Sits ABOVE the goal notch when both are present; each -1px seal keeps the
+   card seam continuous. */
+.composer-usage-notch {
+  --usage-accent: var(--state-waiting, #f2c14e);
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  height: 31px;
+  padding: 0 14px;
+  margin: 0 18px -1px;
+  position: relative;
+  z-index: 1;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-bottom: none;
+  border-radius: 12px 12px 0 0;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 45%, transparent),
+    color-mix(in srgb, var(--surface-glass) 25%, transparent)
+  );
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  box-shadow: var(--glass-rim);
+  font-size: 13px;
+}
+:root[data-theme="light"] .composer-usage-notch {
+  /* --state-waiting (#dcdcaa) is tuned for dark glass and all but vanishes
+     on the light card — warn keeps its amber identity with a darker ink.
+     Crit rides --usage-accent: var(--danger), which the light theme already
+     darkens (#d64545). */
+  --usage-accent: #9a6700;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 55%, transparent),
+    color-mix(in srgb, var(--surface-glass) 38%, transparent)
+  );
+}
+/* Re-asserted AFTER the light warn override: that selector (`:root[…]` +
+   `[data-theme]` + class) is more specific than `.composer-usage-notch-crit`,
+   so without this the crit text went amber in light theme and only its border
+   stayed red. */
+:root[data-theme="light"] .composer-usage-notch-crit {
+  --usage-accent: var(--danger, #d64545);
+}
+.composer-usage-notch-crit {
+  --usage-accent: var(--danger, #e5484d);
+  border-color: color-mix(in srgb, var(--danger, #e5484d) 45%, var(--border));
+}
+.composer-usage-icon {
+  flex: none;
+  color: var(--usage-accent);
+  font-size: 13px;
+  line-height: 1;
+}
+.composer-usage-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--usage-accent);
+}
+.composer-usage-notch-crit .composer-usage-text {
+  font-weight: 600;
+}
+.composer-usage-dismiss {
+  flex: none;
+  margin-left: auto;
+  padding: 0 4px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+.composer-usage-dismiss:hover {
+  color: var(--text);
+}
 .chat-composer-textarea,
 .chat-composer-textarea:focus {
   border: none;

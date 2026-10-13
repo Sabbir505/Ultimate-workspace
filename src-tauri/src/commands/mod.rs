@@ -30,4 +30,5 @@ pub mod budget;
 pub mod memory_cmds;
 pub mod speech;
 pub mod updater_cmds;
+pub mod usage;
 pub mod worktree_cmds;

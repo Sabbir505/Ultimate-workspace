@@ -95,6 +95,7 @@ pub(super) fn send_opencode_turn(
             Arc::clone(&entry.oc_last_event_ms),
             Arc::clone(&entry.oc_reader_alive),
             Arc::clone(&entry.oc_config_stamp),
+            Arc::clone(&entry.turn_in_flight),
         ) {
             Ok((child, base_url)) => {
                 entry.child = Some(child);
@@ -363,6 +364,9 @@ pub(super) fn spawn_opencode_server(
     last_event_ms: Arc<AtomicU64>,
     reader_alive: Arc<AtomicBool>,
     config_stamp_cell: Arc<Mutex<Option<u64>>>,
+    // The chat's turn-in-flight flag: the stderr sink below uses it to act
+    // only while a turn is actually live.
+    in_flight: Arc<AtomicBool>,
 ) -> Result<(Child, String), String> {
     let port = opencode_free_port().ok_or("no free TCP port for opencode server")?;
     let base_url = format!("http://127.0.0.1:{port}");
@@ -418,10 +422,45 @@ pub(super) fn spawn_opencode_server(
     no_console_window(&mut cmd);
     let mut child = spawn_harness_child(&mut cmd)
         .map_err(|e| format!("failed to spawn opencode serve: {e}"))?;
-    // stderr drain (diagnosis): the tail is surfaced on the failure paths
-    // below; on a healthy server the thread simply lives until it exits.
+    // stderr drain (diagnosis + live quota detection): the tail is surfaced
+    // on the failure paths below; on a healthy server the sink additionally
+    // watches for a spent-allowance line MID-TURN — OpenCode routes provider
+    // refusals (auth/quota/unknown model) to its log stream and retries them
+    // internally, so without this the turn POST (and the chat spinner) would
+    // stay alive for up to its 30-minute timeout before reporting anything.
     let erx = match child.stderr.take() {
-        Some(stderr) => drain_stderr(stderr),
+        Some(stderr) => {
+            let app_sink = app.clone();
+            let sid_sink = sid.to_string();
+            let in_flight_sink = Arc::clone(&in_flight);
+            let abort_latch = Arc::new(AtomicBool::new(false));
+            drain_stderr_with(
+                stderr,
+                Some(Box::new(move |line: &str| {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty()
+                        || !in_flight_sink.load(Ordering::SeqCst)
+                        || !crate::chat::error_class::is_usage_limit(trimmed)
+                    {
+                        return;
+                    }
+                    // One abort per server lifetime suffices: the abort kills
+                    // this server, so no later turn can run on it and the
+                    // latch can never eat a future turn's detection.
+                    if abort_latch.swap(true, Ordering::SeqCst) {
+                        return;
+                    }
+                    app_sink
+                        .state::<crate::agent_sessions::AgentSessionState>()
+                        .0
+                        .abort_turn_with_error(
+                            &app_sink,
+                            &sid_sink,
+                            &format!("OpenCode: {}", super::tracker::truncate_output(trimmed)),
+                        );
+                })),
+            )
+        }
         // Unreachable — stderr is piped above — but an already-closed
         // channel still yields an empty tail on the recv paths instead of
         // a hang.
@@ -651,7 +690,7 @@ fn qualify_model_in(resp: &Value, model: &str) -> Option<String> {
 /// "statusCode":403,…}}`; successful turns carry `"error": null`). The POST
 /// resolves HTTP-200 even on this failure, so without this check a dead
 /// provider produced a "successful" turn with zero output.
-fn provider_error_message(info: &Value) -> Option<String> {
+pub(super) fn provider_error_message(info: &Value) -> Option<String> {
     let err = info.get("error")?;
     if err.is_null() {
         return None;
@@ -668,6 +707,23 @@ fn provider_error_message(info: &Value) -> Option<String> {
         Some(m) => format!("{name}: {m}"),
         None => name.to_string(),
     })
+}
+
+/// Human-readable message from ANY OpenCode error shape: the turn POST's
+/// `info` (`.error` → name + data.message), a per-turn stream error frame
+/// (`{"type":"error","error":{…}}`), and the server's `session.error` event
+/// (`{"properties":{"error":{…}}}`). Used by the per-turn handler and the
+/// SSE reader so every refusal reaches a user-visible surface.
+pub(super) fn opencode_error_text(v: &Value) -> Option<String> {
+    if let Some(props) = v.get("properties") {
+        if let Some(msg) = provider_error_message(props) {
+            return Some(msg);
+        }
+    }
+    if let Some(msg) = provider_error_message(v) {
+        return Some(msg);
+    }
+    v.get("message").and_then(|m| m.as_str()).map(|s| s.to_string())
 }
 
 /// POST one turn. Resolves when the TURN completes (the endpoint blocks until
@@ -847,6 +903,12 @@ pub(super) fn read_opencode_server_events(
         // across parts would duplicate the new part's final snapshot.
         let mut cur_text_part = String::new();
         let mut cur_reasoning_part = String::new();
+        // session.error abort latch + transient-throttle notice latch (see
+        // handle_opencode_sse_data): both are PER CONNECTION — the abort kills
+        // this server, and the notice latch resets whenever real output
+        // streams.
+        let mut session_aborted = false;
+        let mut rate_notice_sent = false;
         while let Some(chunk) = stream.next().await {
             let bytes = match chunk {
                 Ok(b) => b,
@@ -876,6 +938,8 @@ pub(super) fn read_opencode_server_events(
                         &mut part_kinds,
                         &mut cur_text_part,
                         &mut cur_reasoning_part,
+                        &mut session_aborted,
+                        &mut rate_notice_sent,
                     );
                 }
             }
@@ -910,6 +974,14 @@ pub(super) fn handle_opencode_sse_data(
     part_kinds: &mut HashMap<String, String>,
     cur_text_part: &mut String,
     cur_reasoning_part: &mut String,
+    // Per-connection abort latch for a `session.error` spent-allowance abort:
+    // the abort kills this server, so the reader is about to die with it and
+    // no cross-turn reset is needed.
+    session_aborted: &mut bool,
+    // Per-connection transient-throttle latch; reset by any non-error event
+    // below (an episode is over once anything else streams), so a NEW episode
+    // may announce itself again.
+    rate_notice_sent: &mut bool,
 ) {
     // Audit #90: bound the per-connection stream-state maps (see the cap at
     // the reader's declaration).
@@ -927,6 +999,51 @@ pub(super) fn handle_opencode_sse_data(
         return;
     };
     last_event_ms.store(now_ms_u64(), Ordering::Relaxed);
+    if v.get("type").and_then(|t| t.as_str()) != Some("session.error") {
+        *rate_notice_sent = false;
+    }
+
+    // session.error: the server's own error event (a provider refusal the
+    // turn can never recover from — free-tier quota, auth, unknown model).
+    // The turn POST may hang in the server's internal retry loop for its full
+    // 30-minute timeout, so this is the only timely signal. A spent allowance
+    // aborts the turn (kills the server; the POST then fails and its error
+    // branch stays quiet behind `cancelled`); transient throttling just shows
+    // a notice while the server retries.
+    if v.get("type").and_then(|t| t.as_str()) == Some("session.error") {
+        // One serve process per chat session: ignore other sessions' traffic.
+        if let Some(ev_sid) = v.pointer("/properties/sessionID").and_then(|s| s.as_str()) {
+            let want = session_cell.lock().ok().and_then(|g| g.clone());
+            if let Some(want) = want {
+                if want != ev_sid {
+                    return;
+                }
+            }
+        }
+        let msg = v
+            .pointer("/properties")
+            .and_then(opencode_error_text)
+            .unwrap_or_else(|| "OpenCode session error".to_string());
+        if crate::chat::error_class::is_usage_limit(&msg) {
+            if !*session_aborted {
+                *session_aborted = true;
+                if let Some(h) = app {
+                    h.state::<crate::agent_sessions::AgentSessionState>()
+                        .0
+                        .abort_turn_with_error(h, sid, &msg);
+                }
+            }
+        } else if crate::chat::error_class::is_transient_rate_limit(&msg) && !*rate_notice_sent {
+            *rate_notice_sent = true;
+            crate::chat::stream_events::emit_status_reason(
+                app,
+                sid,
+                "harness_rate_limit",
+                "OpenCode was rate limited and is retrying…",
+            );
+        }
+        return;
+    }
 
     // OpenCode's NATIVE `question` tool: the server parks the in-flight turn
     // on this request until the client POSTs an answer (or a reject) to
@@ -1122,7 +1239,7 @@ pub(super) fn handle_opencode_sse_data(
             let mut cache_read: Option<i64> = None;
             let mut cache_creation: Option<i64> = None;
             let mut cost: Option<f64> = None;
-            handle_opencode_event(
+            let _ = handle_opencode_event(
                 app,
                 sid,
                 &event,
@@ -1137,6 +1254,7 @@ pub(super) fn handle_opencode_sse_data(
                 last_reasoning,
                 &mut in_think,
                 tools,
+                &mut ErrorRepeat::default(),
             );
         }
         Some("tool") => {
@@ -1399,6 +1517,102 @@ mod tests {
         let ok: Value = serde_json::from_str(r#"{"error":null,"modelID":"m"}"#).unwrap();
         assert_eq!(provider_error_message(&ok), None);
         assert_eq!(provider_error_message(&serde_json::json!({"cost":0})), None);
+    }
+
+    /// The extraction helper covers all three error shapes OpenCode uses:
+    /// the turn POST's `info`, a per-turn stream error frame, and the
+    /// server's `session.error` event.
+    #[test]
+    fn opencode_error_text_covers_all_error_shapes() {
+        let frame =
+            serde_json::json!({"type":"error","error":{"name":"APIError","data":{"message":"boom"}}});
+        assert_eq!(opencode_error_text(&frame).as_deref(), Some("APIError: boom"));
+        let props =
+            serde_json::json!({"properties":{"error":{"name":"APIError","data":{"message":"boom"}}}});
+        assert_eq!(
+            opencode_error_text(&props).as_deref(),
+            Some("APIError: boom")
+        );
+        let msg_only = serde_json::json!({"message":"plain refusal"});
+        assert_eq!(
+            opencode_error_text(&msg_only).as_deref(),
+            Some("plain refusal")
+        );
+    }
+
+    /// A `session.error` spent-allowance refusal must abort the turn (the
+    /// latch flips — with a real AppHandle the abort kills the server and the
+    /// POST's own error branch stays quiet behind `cancelled`), while a
+    /// transient throttle only raises the once-per-episode notice latch, and
+    /// another session's traffic is ignored.
+    #[test]
+    fn session_error_usage_limit_aborts_and_transient_only_latches_notice() {
+        let session_cell = Arc::new(Mutex::new(Some("ses_1".to_string())));
+        let full_cell = Arc::new(Mutex::new(String::new()));
+        let think_cell = Arc::new(Mutex::new(false));
+        let quiet = Arc::new(AtomicU64::new(0));
+        let mut last_text = String::new();
+        let mut last_reasoning = String::new();
+        let mut tools = ToolTracker::new();
+        let mut states: HashMap<String, u8> = HashMap::new();
+        let mut roles: HashMap<String, String> = HashMap::new();
+        let mut part_kinds: HashMap<String, String> = HashMap::new();
+        let mut cur_text_part = String::new();
+        let mut cur_reasoning_part = String::new();
+        let mut aborted = false;
+        let mut rate_notice = false;
+
+        let mut feed = |data: &str, aborted: &mut bool, rate_notice: &mut bool| {
+            handle_opencode_sse_data(
+                None,
+                "s",
+                "http://127.0.0.1:1",
+                data,
+                &session_cell,
+                &full_cell,
+                &think_cell,
+                &quiet,
+                &mut last_text,
+                &mut last_reasoning,
+                &mut tools,
+                &mut states,
+                &mut roles,
+                &mut part_kinds,
+                &mut cur_text_part,
+                &mut cur_reasoning_part,
+                aborted,
+                rate_notice,
+            );
+        };
+
+        feed(
+            r#"{"type":"session.error","properties":{"sessionID":"ses_1","error":{"name":"APIError","data":{"message":"free usage limit reached for this model today"}}}}"#,
+            &mut aborted,
+            &mut rate_notice,
+        );
+        assert!(aborted, "a spent allowance must abort the turn");
+        assert!(!rate_notice, "a spent allowance is not a transient notice");
+
+        let mut aborted = false;
+        let mut rate_notice = false;
+        feed(
+            r#"{"type":"session.error","properties":{"sessionID":"ses_1","error":{"name":"APIError","data":{"message":"429 too many requests, retrying"}}}}"#,
+            &mut aborted,
+            &mut rate_notice,
+        );
+        assert!(!aborted, "a transient throttle must not end the turn");
+        assert!(rate_notice, "the transient notice latch must trip");
+
+        // Another session's error (one serve process can host the others'
+        // traffic) is ignored entirely.
+        let mut aborted = false;
+        let mut rate_notice = false;
+        feed(
+            r#"{"type":"session.error","properties":{"sessionID":"ses_other","error":{"name":"APIError","data":{"message":"free usage limit reached"}}}}"#,
+            &mut aborted,
+            &mut rate_notice,
+        );
+        assert!(!aborted && !rate_notice, "other sessions' errors are not ours");
     }
 
     /// MED-12: id-less tool parts (no `id` field) must get a STABLE fallback

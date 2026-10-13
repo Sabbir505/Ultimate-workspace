@@ -1066,7 +1066,16 @@ pub(super) fn read_claude_stream(
                     tools.finish_background(app, sid, &v);
                 }
             }
-            // system(init/hooks/status), user (tool results), rate_limit, …
+            // Rate-limit frames carry the CLI's own 5-hour/weekly window
+            // (status/reset, and utilization once upstream includes it) —
+            // recorded into the usage-window store the Cost dashboard and the
+            // composer warning notch read. Display-only: no turn behavior.
+            Some("rate_limit") => {
+                if let Some(app) = app {
+                    crate::chat::plan_usage::record_claude_rate_limit(app, &v);
+                }
+            }
+            // system(init/hooks/status), user (tool results), …
             // — not needed for rendering.
             _ => {}
         }

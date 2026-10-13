@@ -22,6 +22,12 @@ import { BranchDropdown } from "./BranchDropdown";
 import { useUiStore } from "../../state/ui";
 import { useSettingsStore } from "../../state/settings";
 import { useChatStore } from "../../state/chat";
+import {
+  usageResetSuffix,
+  usageTargetFor,
+  useUsageLimitsStore,
+  visibleAlertFor,
+} from "../../state/usageLimits";
 import { findPaneForSession } from "../../state/chat/paneTree";
 import { useProjectsStore } from "../../state/projects";
 import { useVoiceDictation } from "./useVoiceDictation";
@@ -343,6 +349,19 @@ export const ChatComposer = memo(function ChatComposer({
     const loop = effectiveSessionId ? s.loopState[effectiveSessionId] : undefined;
     return loop?.active ? loop : undefined;
   });
+
+  // Usage-limit warning notch: the session's provider/harness target from the
+  // same store the Cost dashboard's Usage & limits panel reads. Shown when a
+  // configured cap or a provider-reported window (Claude Code 5h/7d,
+  // CommandCode, OpenCode Go, rate-limit headers) crosses its warn threshold;
+  // dismiss hides it until the tier escalates or the window rolls (see
+  // visibleAlertFor).
+  const usageTarget = usageTargetFor({ provider, agent });
+  const usageAlert = useUsageLimitsStore((s) =>
+    usageTarget ? visibleAlertFor(s, usageTarget) : null,
+  );
+  const usageReset = usageAlert ? usageResetSuffix(usageAlert.resetsAt) : null;
+  const dismissUsageAlert = useUsageLimitsStore((s) => s.dismiss);
 
   // Cloud window resolution for the meter: the active model's PINNED window
   // is AUTHORITATIVE (the user's explicit choice — it may RAISE a model
@@ -1734,6 +1753,33 @@ export const ChatComposer = memo(function ChatComposer({
           pane's composer card. The pet lives in one pane at a time and
           randomly teleports between them (petHome = pane id or "main"). */}
       <PetStrip myHome={petHome ?? "main"} />
+      {/* Usage-limit warning notch: same fused top-seam geometry as the goal
+          notch, tinted by tier (amber at the warning threshold, red once the
+          limit is reached). In flow, so its height rides in composerDockHeight
+          and the transcript re-pins above it. */}
+      {usageAlert && (
+        <div
+          className={`composer-usage-notch composer-usage-notch-${usageAlert.tier}`}
+          title={usageAlert.message}
+          role="status"
+        >
+          <span className="composer-usage-icon" aria-hidden="true">
+            {usageAlert.tier === "crit" ? "⛔" : "⚠"}
+          </span>
+          <span className="composer-usage-text">
+            {usageAlert.message}
+            {usageReset ? ` · ${usageReset}` : ""}
+          </span>
+          <button
+            type="button"
+            className="composer-usage-dismiss"
+            aria-label="Dismiss the usage warning"
+            onClick={() => dismissUsageAlert(usageAlert)}
+          >
+            ×
+          </button>
+        </div>
+      )}
       {/* Active goal notch (see activeLoop): a fused tab on the card's top
           seam announcing the loop this session is pursuing — glyph +
           "Pursuing goal" + the goal text (one ellipsized line) + how long it

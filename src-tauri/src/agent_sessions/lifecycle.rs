@@ -174,12 +174,34 @@ pub(super) fn spawn_harness_child(cmd: &mut Command) -> std::io::Result<Child> {
 /// long. One helper instead of four copy-pasted spawn sites (claude /
 /// opencode server / per-turn CLIs / one-shot).
 pub(super) fn drain_stderr(stderr: std::process::ChildStderr) -> std::sync::mpsc::Receiver<String> {
+    drain_stderr_with(stderr, None)
+}
+
+/// [`drain_stderr`] with an optional per-line sink.
+///
+/// Per-turn chat spawns pass a sink so lines are seen AS THEY ARRIVE: harness
+/// CLIs route failures — free-tier quota, auth, unknown models — to their log
+/// stream (opencode's wrapper passes `--print-logs --log-level ERROR` for
+/// exactly this), and a CLI that retries such a failure forever never exits,
+/// so an EOF-only read can never surface the diagnosis mid-turn. Lines are
+/// decoded lossily through the shared capped reader ([`next_harness_line`]);
+/// the full text is still accumulated for the EOF-tail diagnostics.
+pub(super) fn drain_stderr_with(
+    stderr: std::process::ChildStderr,
+    mut sink: Option<Box<dyn FnMut(&str) + Send>>,
+) -> std::sync::mpsc::Receiver<String> {
     let (etx, erx) = std::sync::mpsc::channel::<String>();
     std::thread::spawn(move || {
+        let mut stderr = std::io::BufReader::new(stderr);
+        let mut raw: Vec<u8> = Vec::new();
         let mut buf = String::new();
-        let mut stderr = stderr;
-        use std::io::Read as _;
-        let _ = stderr.read_to_string(&mut buf);
+        while let Some(line) = crate::agent_sessions::next_harness_line(&mut stderr, &mut raw) {
+            if let Some(sink) = sink.as_mut() {
+                sink(&line);
+            }
+            buf.push_str(&line);
+            buf.push('\n');
+        }
         let _ = etx.send(buf);
     });
     erx
@@ -359,6 +381,42 @@ mod tests {
             .recv_timeout(Duration::from_secs(5))
             .expect("stderr tail delivered");
         assert!(tail.contains("boom"), "stderr tail: {tail}");
+    }
+
+    /// The sink contract: a per-turn chat spawn sees stderr lines AS THEY
+    /// ARRIVE (a CLI retrying a quota failure forever never closes the pipe,
+    /// so an EOF-only read never surfaces it), while the channel still gets
+    /// the full text for the EOF-tail diagnostics.
+    #[test]
+    fn drain_stderr_with_sink_sees_lines_and_still_collects_the_tail() {
+        let mut cmd = Command::new(if cfg!(windows) { "cmd.exe" } else { "sh" });
+        cmd.arg(if cfg!(windows) { "/C" } else { "-c" })
+            .arg("echo first 1>&2 && echo second 1>&2")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        no_console_window(&mut cmd);
+        let mut child = cmd.spawn().expect("spawn probe process");
+        let stderr = child.stderr.take().expect("stderr piped");
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let seen2 = Arc::clone(&seen);
+        let erx = drain_stderr_with(
+            stderr,
+            Some(Box::new(move |line: &str| {
+                seen2
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(line.trim().to_string());
+            })),
+        );
+        let _ = child.wait();
+        let tail = erx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("stderr tail delivered");
+        let lines = seen.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert!(lines.iter().any(|l| l.contains("first")), "lines: {lines:?}");
+        assert!(lines.iter().any(|l| l.contains("second")), "lines: {lines:?}");
+        assert!(tail.contains("first") && tail.contains("second"), "tail: {tail}");
     }
 
     /// THE crash-proof contract: closing the job handle kills the assigned

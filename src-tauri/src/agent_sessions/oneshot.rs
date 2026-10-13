@@ -320,6 +320,12 @@ pub fn run_one_shot(
             // Throwaway terminal-frame flag: one-shot turns are bounded by
             // `max_duration` below, not by the interactive turn watchdog.
             let terminal = AtomicBool::new(false);
+            // Abort bookkeeping is throwaway too: the quota/repeat/stall
+            // detectors ride the interactive chat spawn path (spawn_per_turn),
+            // not this bounded one.
+            let error_flag = AtomicBool::new(false);
+            let rate_notice = AtomicBool::new(false);
+            let activity = AtomicU64::new(0);
             read_per_turn_stream(
                 app2.as_ref(),
                 &db2,
@@ -335,6 +341,9 @@ pub fn run_one_shot(
                 1,
                 None,
                 Some("automation"),
+                &error_flag,
+                &rate_notice,
+                &activity,
             );
         }
     });
@@ -435,6 +444,13 @@ const PERMANENT_GENERATION_MARKERS: &[&str] = &[
     "invalid api key",
     "api key not valid",
     "authentication required",
+    // Free-tier/daily allowance exhaustion ("Free usage limit hit. Come back
+    // in X hours."): the same call retried later in the run (or the wiki's
+    // one retry) fails identically and just wastes minutes.
+    "usage limit",
+    "free usage",
+    "daily limit",
+    "come back in",
 ];
 
 /// Whether a generation reply/stderr names a permanently-failing condition

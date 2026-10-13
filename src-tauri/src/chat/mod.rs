@@ -29,6 +29,7 @@ pub mod partial_buf;
 pub mod pdfprint;
 pub mod permission;
 pub mod plan;
+pub mod plan_usage;
 pub mod prompts;
 pub mod proto;
 pub mod providers;
@@ -1908,6 +1909,7 @@ async fn run_turn_attempt(
             mgr,
             sid,
             app,
+            cand.provider_id.as_str(),
             research_mode,
             perf.clone(),
             headers_timeout,
@@ -1925,6 +1927,7 @@ async fn run_turn_attempt(
             mgr,
             sid,
             app,
+            cand.provider_id.as_str(),
             research_mode,
             cand_cache_marks,
             perf.clone(),
@@ -1943,6 +1946,7 @@ async fn run_turn_attempt(
             mgr,
             sid,
             app,
+            cand.provider_id.as_str(),
             research_mode,
             perf.clone(),
             headers_timeout,

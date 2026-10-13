@@ -903,10 +903,34 @@
   gap: 10px;
 }
 .cost-loading {
+  /* Full-height so the modal keeps the dashboard's size while the first
+     rollup loads (a one-line loader collapsed the panel, then it snapped
+     open when data landed). */
+  min-height: min(62vh, 560px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
   color: var(--text-dim);
   font-size: 13px;
-  padding: 24px 0;
-  text-align: center;
+}
+.cost-loading-spinner {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid color-mix(in srgb, var(--text-dim) 35%, transparent);
+  border-top-color: var(--text-dim);
+  animation: cost-spin 0.8s linear infinite;
+}
+@keyframes cost-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cost-loading-spinner {
+    animation: none;
+  }
 }
 /* The rollups wrapper replaced the fragment that used to hang directly off
    .view-body, so it has to reproduce that flex column itself — as a plain
@@ -1122,6 +1146,361 @@
   align-self: flex-start;
   font-size: 11px;
   color: var(--text-dim);
+}
+
+/* --- Usage & limits panel (commands/usage.rs + chat/plan_usage.rs) ---
+   Rolling per-provider/harness usage windows, provider/CLI-reported plan
+   limits, and user caps, as a grid of status-accented cards. The same store
+   drives the composer warning notch. */
+.usage-panel {
+  margin-top: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 6px);
+  padding: 12px 14px;
+  background: var(--glass-card);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.usage-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.usage-panel-title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  text-transform: uppercase;
+}
+.usage-panel-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.usage-panel-note {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-dim);
+  max-width: 78ch;
+}
+/* A failed meter read or provider refresh: the rows keep their last good
+   values, so without this the failure would read as "nothing to report". */
+.usage-panel-error {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--danger, #e5484d);
+}
+.usage-panel-empty {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 14px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  border: 1px dashed color-mix(in srgb, var(--border) 80%, transparent);
+  border-radius: 10px;
+}
+.usage-panel-empty-icon {
+  font-size: 18px;
+  opacity: 0.8;
+}
+
+/* Group header: label + a hairline rule that runs to the edge. */
+.usage-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+}
+.usage-group-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--text-dim);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.usage-group-rule {
+  flex: 1 1 auto;
+  height: 1px;
+  background: color-mix(in srgb, var(--border) 70%, transparent);
+}
+
+/* Cards: auto-fit grid; the card's left edge + tint carry the tone. */
+.usage-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(330px, 1fr));
+  gap: 10px;
+}
+.usage-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 11px 13px 12px;
+  border: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
+  border-radius: 12px;
+  background: var(--glass-card-2, var(--glass-card));
+  overflow: hidden;
+}
+.usage-card-warn {
+  border-color: color-mix(in srgb, var(--state-waiting, #f2c14e) 35%, var(--border));
+}
+.usage-card-crit {
+  border-color: color-mix(in srgb, var(--danger, #e5484d) 45%, var(--border));
+  background: color-mix(in srgb, var(--danger, #e5484d) 6%, var(--glass-card-2, var(--glass-card)));
+}
+.usage-card-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+.usage-card-label {
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.usage-card-action {
+  margin-left: auto;
+  font-size: 11px;
+  flex: none;
+}
+.usage-chip {
+  font-size: 10.5px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
+  color: var(--text-dim);
+  white-space: nowrap;
+  flex: none;
+}
+.usage-chip-money {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.usage-chip-warn {
+  color: var(--state-waiting, #f2c14e);
+  border-color: color-mix(in srgb, var(--state-waiting, #f2c14e) 45%, var(--border));
+}
+
+/* Account-wide period totals the source reported — a quiet line under the
+   head, distinct from the locally measured rolling columns below. */
+.usage-account-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  min-width: 0;
+}
+.usage-account-line > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.usage-account-basis {
+  flex: none;
+  font-size: 9.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  border: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
+  border-radius: 999px;
+  padding: 0 6px;
+}
+
+/* Rolling-window strip: four open columns split by hairlines — reads as an
+   instrument panel, not four more boxes. */
+.usage-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border-top: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+  padding: 6px 0;
+}
+.usage-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 0 9px;
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+}
+.usage-stat + .usage-stat {
+  border-left: 1px solid color-mix(in srgb, var(--border) 45%, transparent);
+}
+.usage-stat-window {
+  font-size: 9.5px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.usage-stat-tokens {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.usage-stat-cost {
+  font-size: 10.5px;
+  color: var(--text-dim);
+  min-height: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Meters: label/detail head, a track with the warn threshold ticked, and a
+   quiet foot with % used / reset. */
+.usage-meter {
+  --usage-accent: var(--text-dim);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.usage-meter-warn {
+  --usage-accent: var(--state-waiting, #f2c14e);
+}
+.usage-meter-crit {
+  --usage-accent: var(--danger, #e5484d);
+}
+.usage-meter-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  font-size: 11.5px;
+}
+.usage-meter-label {
+  color: var(--text);
+  font-weight: 550;
+  white-space: nowrap;
+}
+.usage-meter-detail {
+  margin-left: auto;
+  color: var(--usage-accent);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.usage-meter-crit .usage-meter-detail {
+  font-weight: 650;
+}
+.usage-meter-track {
+  position: relative;
+  height: 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--border) 65%, transparent);
+  overflow: hidden;
+}
+.usage-meter-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--usage-accent);
+  transition: width 0.35s ease;
+}
+.usage-meter-ok .usage-meter-fill {
+  background: color-mix(in srgb, var(--state-working, #4caf7d) 75%, var(--text-dim));
+}
+/* Threshold tick — a hairline at the warn %, so "where it turns amber" is
+   visible before it does. */
+.usage-meter-tick {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 1px;
+  background: color-mix(in srgb, var(--text) 45%, transparent);
+}
+.usage-meter-foot {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 10.5px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.usage-card-health {
+  font-size: 11.5px;
+  color: var(--danger, #e5484d);
+}
+
+/* Inline cap editor: an inset panel with a segmented window picker. */
+.usage-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 9px 10px;
+  border: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--surface-glass) 22%, transparent);
+}
+.usage-editor-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+.usage-editor-label {
+  flex: 0 0 52px;
+  font-size: 10.5px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.usage-seg {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.usage-seg button {
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 11px;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+.usage-seg button + button {
+  border-left: 1px solid var(--border);
+}
+.usage-seg button.is-active {
+  background: color-mix(in srgb, var(--accent, #c15f3c) 18%, transparent);
+  color: var(--text);
+}
+.usage-editor input {
+  width: 84px;
+  padding: 3px 7px;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--glass-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs, 4px);
+}
+.usage-editor-actions {
+  display: flex;
+  gap: 6px;
+}
+.usage-editor-actions .ghost {
+  font-size: 11px;
 }
 
 /* --- Self-improving artifacts panel (SELF_IMPROVING_ARTIFACTS.md) ---

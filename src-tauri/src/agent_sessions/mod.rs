@@ -1049,7 +1049,11 @@ impl AgentSessionManager {
         }
     }
 
-    pub fn cancel(&self, app: &AppHandle, chat_session_id: &str) -> Result<(), String> {
+    /// Shared teardown for `cancel` and `abort_turn_with_error`: mark the
+    /// turn cancelled, best-effort ACP cancel notification, kill the process
+    /// tree, release the turn, clear the opencode shared reply cells (B-6).
+    /// Returns whether a session entry existed.
+    fn teardown_turn(&self, chat_session_id: &str) -> bool {
         // E-6: poison recovery like `send` — the panic that poisoned the lock
         // is exactly when children most need to be killed, so teardown must
         // not silently no-op behind `if let Ok(...)`.
@@ -1060,57 +1064,65 @@ impl AgentSessionManager {
             let sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
             sessions.get(chat_session_id).cloned()
         };
-        if let Some(entry) = entry {
-            let mut entry = entry.lock().unwrap_or_else(|e| e.into_inner());
-            entry.cancelled.store(true, Ordering::SeqCst);
-            // ACP: best-effort graceful cancel — notify the agent which
-            // request is being cancelled, then kill the tree. The next send
-            // respawns a fresh process + session (ACP has no --resume), so a
-            // failed write here is irrelevant.
-            if entry.harness.starts_with("acp:") {
-                if let Ok(mut guard) = entry.stdin.lock() {
-                    if let Some(stdin) = guard.as_mut() {
-                        let rid = entry.acp_request_id.lock().ok().and_then(|g| *g);
-                        if let Some(rid) = rid {
-                            let line = crate::acp::encode_notification(
-                                "request/cancel",
-                                &json!({ "requestId": rid }),
-                            );
-                            let _ = write_acp_line(stdin, &line);
-                        }
+        let Some(entry) = entry else { return false };
+        let mut entry = entry.lock().unwrap_or_else(|e| e.into_inner());
+        entry.cancelled.store(true, Ordering::SeqCst);
+        // ACP: best-effort graceful cancel — notify the agent which
+        // request is being cancelled, then kill the tree. The next send
+        // respawns a fresh process + session (ACP has no --resume), so a
+        // failed write here is irrelevant.
+        if entry.harness.starts_with("acp:") {
+            if let Ok(mut guard) = entry.stdin.lock() {
+                if let Some(stdin) = guard.as_mut() {
+                    let rid = entry.acp_request_id.lock().ok().and_then(|g| *g);
+                    if let Some(rid) = rid {
+                        let line = crate::acp::encode_notification(
+                            "request/cancel",
+                            &json!({ "requestId": rid }),
+                        );
+                        let _ = write_acp_line(stdin, &line);
                     }
                 }
             }
-            if let Some(mut child) = entry.child.take() {
-                kill_child_tree(&mut child);
-            }
-            entry.turn_in_flight.store(false, Ordering::SeqCst);
-            // B-6: a cancelled opencode turn's partial reply lives on in the
-            // shared SSE buffer — it would otherwise be prefixed to the NEXT
-            // turn's persisted message (and survive restarts). The turn
-            // thread's cancelled branch clears the same cells; this is the
-            // backstop for the case where that thread already died with the
-            // server and never reached its branch.
-            entry
-                .oc_full
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clear();
-            *entry.oc_in_think.lock().unwrap_or_else(|e| e.into_inner()) = false;
         }
-        // A turn paused on a can_use_tool approval card must not outlive the
-        // cancel: dropping the pendings resolves the oneshot to a deny, the
-        // reader thread wakes and writes the deny control_response, and the
-        // card clears via chat:approval-resolved.
+        if let Some(mut child) = entry.child.take() {
+            kill_child_tree(&mut child);
+        }
+        entry.turn_in_flight.store(false, Ordering::SeqCst);
+        // B-6: a cancelled opencode turn's partial reply lives on in the
+        // shared SSE buffer — it would otherwise be prefixed to the NEXT
+        // turn's persisted message (and survive restarts). The turn
+        // thread's cancelled branch clears the same cells; this is the
+        // backstop for the case where that thread already died with the
+        // server and never reached its branch.
+        entry
+            .oc_full
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        *entry.oc_in_think.lock().unwrap_or_else(|e| e.into_inner()) = false;
+        true
+    }
+
+    /// Drop interactive pendings that must not outlive a cancelled/aborted
+    /// turn: an approval card (dropping the oneshot resolves it to a deny, the
+    /// reader thread wakes and writes the deny, and the card clears via
+    /// chat:approval-resolved) and a surfaced RELAY_ASK question (whose answer
+    /// would dispatch a follow-up turn on a session that is no longer
+    /// running).
+    fn drop_interactive_pendings(&self, app: &AppHandle, chat_session_id: &str) {
         if let Some(state) = app.try_state::<crate::ChatState>() {
             state.0.drop_pending_for_session(chat_session_id);
         }
-        // Same for a surfaced RELAY_ASK question: the answer would dispatch
-        // a follow-up turn on a session the user just cancelled.
         self.pending_asks
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(chat_session_id);
+    }
+
+    pub fn cancel(&self, app: &AppHandle, chat_session_id: &str) -> Result<(), String> {
+        self.teardown_turn(chat_session_id);
+        self.drop_interactive_pendings(app, chat_session_id);
         emit_done(
             Some(app),
             chat_session_id,
@@ -1125,6 +1137,19 @@ impl AgentSessionManager {
             None,
         );
         Ok(())
+    }
+
+    /// End the current turn WITH A VISIBLE ERROR instead of `chat:done` — used
+    /// when the turn can never recover (a free-model allowance spent mid-turn,
+    /// the repeat-error breaker, a silent hang). Same teardown as `cancel`,
+    /// so the killed CLI's own tails (the OpenCode POST failure, a dying
+    /// reader's EOF) stay quiet behind `cancelled` and cannot double-report:
+    /// the reader teardown skips `finish_turn` (no reply persist, no done) and
+    /// the POST error branch is gated on `!cancelled`.
+    pub fn abort_turn_with_error(&self, app: &AppHandle, chat_session_id: &str, message: &str) {
+        self.teardown_turn(chat_session_id);
+        self.drop_interactive_pendings(app, chat_session_id);
+        emit_error(Some(app), chat_session_id, message);
     }
 
     /// Best-effort LIVE application of a Claude Code permission-mode change to
@@ -2034,6 +2059,9 @@ mod tests {
         cache_read: Option<i64>,
         cache_creation: Option<i64>,
         cost: Option<f64>,
+        /// The abort message a handler returned (spent allowance / repeat
+        /// breaker) — None when the whole feed ran to completion.
+        abort: Option<String>,
     }
 
     /// Feed pi-lineage JSONL lines through handle_pi_event with app=None
@@ -2074,6 +2102,7 @@ mod tests {
             cache_read,
             cache_creation,
             cost,
+            abort: None,
         }
     }
 
@@ -2116,6 +2145,7 @@ mod tests {
             cache_read,
             cache_creation,
             cost: None,
+            abort: None,
         }
     }
 
@@ -2265,9 +2295,10 @@ mod tests {
         let mut in_think = false;
         let mut tools = ToolTracker::new();
         let mut seen = std::collections::HashSet::new();
+        let mut abort = None;
         for line in lines {
             let v = serde_json::from_str(line).expect("test line must be valid JSON");
-            handle_commandcode_event(
+            if let Some(msg) = handle_commandcode_event(
                 None,
                 "s",
                 &v,
@@ -2281,7 +2312,10 @@ mod tests {
                 &mut in_think,
                 &mut tools,
                 &mut seen,
-            );
+                &mut ErrorRepeat::default(),
+            ) {
+                abort = Some(msg);
+            }
         }
         UsageState {
             full,
@@ -2291,6 +2325,7 @@ mod tests {
             cache_read,
             cache_creation,
             cost: None,
+            abort,
         }
     }
 
@@ -2298,7 +2333,10 @@ mod tests {
     fn commandcode_result_line_binds_session_and_usage() {
         // Envelope shapes captured verbatim from a live `commandcode -p
         // --output-format json` run (the account was out of credits, so the
-        // error path is the recorded one).
+        // error path is the recorded one). An out-of-credits result line is
+        // now an ABORT — the reader emits chat:error and kills the retry loop
+        // instead of persisting the refusal as the model's reply — while
+        // usage still binds from the same line.
         let st = feed_cc(&[
             r#"{"type":"event","event":{"type":"run_start","sessionId":"88a3940f-2032-4a7a-b362-4fca46c4ea9b"}}"#,
             r#"{"type":"result","subtype":"error","sessionId":"88a3940f-2032-4a7a-b362-4fca46c4ea9b","usage":{"inputTokens":12,"outputTokens":5,"cacheReadTokens":0,"cacheWriteTokens":0},"durationMs":3970,"finalText":"","error":"Error: insufficient credits"}"#,
@@ -2315,7 +2353,16 @@ mod tests {
             "a reported zero is a true report, not absence"
         );
         assert_eq!(st.cache_creation, Some(0));
-        assert!(st.full.contains("insufficient credits"), "{}", st.full);
+        assert_eq!(
+            st.abort.as_deref(),
+            Some("Error: insufficient credits"),
+            "a spent allowance must abort the turn, not land as reply text"
+        );
+        assert!(
+            st.full.is_empty(),
+            "the refusal must not be persisted as the reply: {}",
+            st.full
+        );
     }
 
     /// The result line's camelCase cache counters must reach the
@@ -2466,7 +2513,7 @@ mod tests {
             r#"{"type":"step_finish","sessionID":"oc-1","part":{"tokens":{"input":11,"output":3,"cache":{"read":20000,"write":2500}},"cost":0.01}}"#,
         )
         .unwrap();
-        handle_opencode_event(
+        let _ = handle_opencode_event(
             None,
             "s",
             &v,
@@ -2481,6 +2528,7 @@ mod tests {
             &mut last_reasoning,
             &mut in_think,
             &mut tools,
+            &mut ErrorRepeat::default(),
         );
         assert_eq!(input, Some(11));
         assert_eq!(output, Some(3));
@@ -3191,7 +3239,7 @@ mod tests {
         let mut tools = ToolTracker::new();
         let ev = |t: &str| json!({ "type": "text", "part": { "text": t } });
         let mut feed = |v: &Value, full: &mut String, last: &mut String| {
-            handle_opencode_event(
+            let _ = handle_opencode_event(
                 None,
                 "s",
                 v,
@@ -3206,6 +3254,7 @@ mod tests {
                 &mut last_reasoning,
                 &mut in_think,
                 &mut tools,
+                &mut ErrorRepeat::default(),
             );
         };
         feed(&ev("Hello"), &mut full, &mut last);
@@ -3233,7 +3282,7 @@ mod tests {
                         last_text: &mut String,
                         last_reasoning: &mut String,
                         in_think: &mut bool| {
-            handle_opencode_event(
+            let _ = handle_opencode_event(
                 None,
                 "s",
                 v,
@@ -3248,6 +3297,7 @@ mod tests {
                 last_reasoning,
                 in_think,
                 &mut tools,
+                &mut ErrorRepeat::default(),
             );
         };
         // Reasoning snapshots stream as suffixes inside one <think> block.
@@ -3387,6 +3437,8 @@ mod tests {
         let mut part_kinds: HashMap<String, String> = HashMap::new();
         let mut cur_text_part = String::new();
         let mut cur_reasoning_part = String::new();
+        let mut session_aborted = false;
+        let mut rate_notice_sent = false;
         let mut feed = |data: &str,
                         last_text: &mut String,
                         last_reasoning: &mut String,
@@ -3413,6 +3465,8 @@ mod tests {
                 part_kinds,
                 cur_text_part,
                 cur_reasoning_part,
+                &mut session_aborted,
+                &mut rate_notice_sent,
             );
         };
 
@@ -3969,7 +4023,7 @@ mod tests {
         let frame = |inner: Value| json!({ "type": "event", "event": inner });
 
         // tool_running frame for a Task dispatch: spawns the panel entry.
-        handle_commandcode_event(
+        let _ = handle_commandcode_event(
             None,
             "s1",
             &frame(json!({
@@ -3992,13 +4046,14 @@ mod tests {
             &mut in_think,
             &mut tools,
             &mut seen,
+            &mut ErrorRepeat::default(),
         );
         assert!(full.contains("\"subId\""), "spawn marker: {full}");
         assert!(full.contains("\"kind\":\"subagent\""), "{full}");
         assert_eq!(tools.pending.len(), 1, "queued for its completion frame");
 
         // Completion frame: finalizes the entry via the FIFO slot.
-        handle_commandcode_event(
+        let _ = handle_commandcode_event(
             None,
             "s1",
             &frame(json!({
@@ -4017,6 +4072,7 @@ mod tests {
             &mut in_think,
             &mut tools,
             &mut seen,
+            &mut ErrorRepeat::default(),
         );
         assert!(tools.pending.is_empty(), "entry finalized");
     }
@@ -4033,7 +4089,7 @@ mod tests {
         let session_cell = Arc::new(Mutex::new(None));
         let (mut input, mut output, mut cr, mut cc) = (None, None, None, None);
         let mut in_think = false;
-        handle_commandcode_event(
+        let _ = handle_commandcode_event(
             None,
             "s1",
             &json!({ "type": "event", "event": {
@@ -4053,6 +4109,7 @@ mod tests {
             &mut in_think,
             &mut tools,
             &mut seen,
+            &mut ErrorRepeat::default(),
         );
         assert!(full.contains("\"subId\""), "{full}");
         assert!(tools.pending.is_empty(), "no slot for a self-contained part");
@@ -4070,7 +4127,7 @@ mod tests {
         let (mut input, mut output, mut cr, mut cc, mut cost) = (None, None, None, None, None);
         let (mut last_text, mut last_reasoning) = (String::new(), String::new());
         let mut in_think = false;
-        handle_opencode_event(
+        let _ = handle_opencode_event(
             None,
             "s1",
             &json!({
@@ -4099,6 +4156,7 @@ mod tests {
             &mut last_reasoning,
             &mut in_think,
             &mut tools,
+            &mut ErrorRepeat::default(),
         );
         assert!(full.contains("\"subId\""), "spawn marker: {full}");
         assert!(tools.pending.is_empty(), "entry finalized immediately");
@@ -4115,7 +4173,7 @@ mod tests {
         let (mut input, mut output, mut cr, mut cc, mut cost) = (None, None, None, None, None);
         let (mut last_text, mut last_reasoning) = (String::new(), String::new());
         let mut in_think = false;
-        handle_opencode_event(
+        let _ = handle_opencode_event(
             None,
             "s1",
             &json!({
@@ -4139,6 +4197,7 @@ mod tests {
             &mut last_reasoning,
             &mut in_think,
             &mut tools,
+            &mut ErrorRepeat::default(),
         );
         assert!(full.contains("\"subId\""), "{full}");
         assert_eq!(tools.pending.len(), 1, "queued until it completes or EOF");

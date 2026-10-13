@@ -28,6 +28,7 @@ mod secrets;
 mod settings;
 mod skills;
 mod source_ledger;
+mod usage;
 mod wiki;
 mod workspaces;
 
@@ -2150,6 +2151,11 @@ pub use secrets::{delete_secret_row, get_secret_blob, list_secret_keys, upsert_s
 pub use cost::{get_cost_events, insert_cost_event};
 pub use cost_v2::{
     get_cost_rollups_v2, read_rate_overrides, record_observed_pricing,
+};
+
+// usage (rolling per-provider/harness meters)
+pub use usage::{
+    compute_usage_meters, label_for, target_for, MeterWindows, UsageMeter, UsageTotals,
 };
 
 // chat

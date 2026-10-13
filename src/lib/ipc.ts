@@ -490,3 +490,4 @@ export * from "./ipc/hooks";
 export * from "./ipc/pricing";
 export * from "./ipc/subagents";
 export * from "./ipc/llmLogs";
+export * from "./ipc/usage";

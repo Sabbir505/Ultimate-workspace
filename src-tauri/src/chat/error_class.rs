@@ -1,4 +1,4 @@
-//! Context-overflow error classification.
+//! Context-overflow and spent-allowance error classification.
 //!
 //! A provider rejecting a request because it exceeds the model's context
 //! window is not "any 400": it is recoverable (compact the history and retry)
@@ -9,13 +9,27 @@
 //! `code = Some("context_overflow")` on `chat:error`. The frontend keys its
 //! overflow copy off that code.
 //!
+//! The same seam classifies a SPENT ALLOWANCE ("free usage limit hit, come
+//! back later", quota exhaustion, out-of-credit rejections) as
+//! `code = Some("usage_limit")`: no retry can fix it until the window resets
+//! or the model changes, so the banner gets switch-model copy. Harness
+//! readers also call [`is_usage_limit`] mid-turn — a free-model CLI that
+//! prints this and then retries forever must end its turn with the error
+//! instead of hanging Relay's spinner.
+//!
 //! Matching is deliberately fuzzy substring (lowercased): the strings arrive
-//! verbatim from five different providers and a remapped relay proxy, each
-//! with its own phrasing, and a stricter match would silently strand users
-//! on the raw banner.
+//! verbatim from five different providers, six harness CLIs, and a remapped
+//! relay proxy, each with its own phrasing, and a stricter match would
+//! silently strand users on the raw banner.
 
 /// `chat:error` code for "the request exceeded the model's context window".
 pub const CODE_CONTEXT_OVERFLOW: &str = "context_overflow";
+
+/// `chat:error` code for "the model's allowance is spent" — a free-tier daily
+/// limit, an exhausted quota, or an out-of-credit account. Retrying the same
+/// turn cannot succeed until the window resets or the user switches models,
+/// so the frontend shows switch-model copy instead of the raw refusal.
+pub const CODE_USAGE_LIMIT: &str = "usage_limit";
 
 /// Substrings (lowercased) that identify a context-overflow rejection across
 /// the providers Relay talks to:
@@ -40,12 +54,95 @@ const OVERFLOW_MARKERS: &[&str] = &[
     "http 413",
 ];
 
+/// Substrings (lowercased) that identify a SPENT allowance across the
+/// providers and harness CLIs Relay talks to. Every marker names EXHAUSTION,
+/// never the mere existence of a limit — a healthy status banner ("free usage
+/// limit: 3 remaining", "quota: 12/100") must not read as a spent allowance,
+/// or a mid-turn abort would kill a perfectly good turn. Deliberately
+/// excludes bare throttling phrasings ("rate limit", "429", "too many
+/// requests") too: those are transient and belong to
+/// [`is_transient_rate_limit`].
+///
+/// - CommandCode free tier: "Free usage limit hit. Come back in 3 hours."
+/// - OpenCode free models: "free usage limit reached", provider quota logs
+/// - Anthropic spend caps: "enforced_spend_limit_reached"
+/// - OpenRouter/OpenAI: "insufficient credits", "exceeded your current quota"
+/// - Generic harness stderr: "quota exceeded", "insufficient credits"
+const USAGE_LIMIT_MARKERS: &[&str] = &[
+    "usage limit hit",
+    "usage limit reached",
+    "usage limit exceeded",
+    "usage limit has been reached",
+    "hit your usage limit",
+    "reached your usage limit",
+    "exceeded your usage limit",
+    "usage_limit_exceeded",
+    "usage_limit_reached",
+    "free limit reached",
+    "daily limit reached",
+    "daily limit exceeded",
+    "weekly limit reached",
+    "monthly limit reached",
+    "quota exceeded",
+    "quota_exceeded",
+    "exceeded your current quota",
+    "insufficient_quota",
+    "insufficient credits",
+    "out of credits",
+    "not enough credits",
+    "payment required",
+    "spend limit reached",
+    "spend_limit",
+    "come back later",
+    "come back in",
+];
+
+/// Substrings (lowercased) that identify TRANSIENT throttling: the CLI or
+/// provider is retrying and the same turn can plausibly succeed on its own.
+/// Used by the harness readers to show a live status notice instead of ending
+/// the turn (and never by [`classify_error`] — these are not error-banner
+/// material on their own; the built-in chat already fails over on 429).
+const TRANSIENT_LIMIT_MARKERS: &[&str] = &[
+    "rate limit",
+    "rate-limit",
+    "429",
+    "too many requests",
+    "slow down",
+    "overloaded",
+    "capacity",
+];
+
+/// Whether `message` names a spent allowance (see [`USAGE_LIMIT_MARKERS`]).
+/// A context-overflow rejection that happens to say "limit" ("maximum context
+/// length reached") is NOT a spent allowance — overflow markers win so the
+/// two classifications can never cross.
+pub fn is_usage_limit(message: &str) -> bool {
+    let m = message.to_ascii_lowercase();
+    if OVERFLOW_MARKERS.iter().any(|k| m.contains(k)) {
+        return false;
+    }
+    USAGE_LIMIT_MARKERS.iter().any(|k| m.contains(k))
+}
+
+/// Whether `message` names transient throttling (see
+/// [`TRANSIENT_LIMIT_MARKERS`]). A spent allowance never reads as transient,
+/// even when the refusal also carries a 429 status (Anthropic spend caps).
+pub fn is_transient_rate_limit(message: &str) -> bool {
+    if is_usage_limit(message) {
+        return false;
+    }
+    let m = message.to_ascii_lowercase();
+    TRANSIENT_LIMIT_MARKERS.iter().any(|k| m.contains(k))
+}
+
 /// Classify a backend error string. Returns the `chat:error` code to emit,
 /// or `None` when the error has no special handling.
 pub fn classify_error(message: &str) -> Option<&'static str> {
     let m = message.to_ascii_lowercase();
     if OVERFLOW_MARKERS.iter().any(|k| m.contains(k)) {
         Some(CODE_CONTEXT_OVERFLOW)
+    } else if is_usage_limit(message) {
+        Some(CODE_USAGE_LIMIT)
     } else {
         None
     }
@@ -227,6 +324,81 @@ mod tests {
         assert_eq!(classify_error("summarize returned 500: internal"), None);
         // "maximum" alone (not the context-length phrase) must not match.
         assert_eq!(classify_error("max_tokens must be at most 8192"), None);
+    }
+
+    #[test]
+    fn classifies_spent_allowance_phrasings() {
+        // CommandCode free tier (the reported case).
+        assert_eq!(
+            classify_error("Free usage limit hit. Come back in 3 hours."),
+            Some(CODE_USAGE_LIMIT)
+        );
+        // OpenCode free-model provider refusal / log line.
+        assert_eq!(
+            classify_error(
+                "APIError: free usage limit reached — the daily allowance for this model is spent"
+            ),
+            Some(CODE_USAGE_LIMIT)
+        );
+        assert_eq!(
+            classify_error("HTTP 429: exceeded your current quota, please check your plan"),
+            Some(CODE_USAGE_LIMIT)
+        );
+        assert_eq!(
+            classify_error("HTTP 402: insufficient credits"),
+            Some(CODE_USAGE_LIMIT)
+        );
+        assert_eq!(
+            classify_error("HTTP 429: enforced_spend_limit_reached for org"),
+            Some(CODE_USAGE_LIMIT)
+        );
+        assert_eq!(
+            classify_error("quota exceeded: retry after the window resets"),
+            Some(CODE_USAGE_LIMIT)
+        );
+        // An overflow rejection that also says "limit" must stay overflow.
+        assert_eq!(
+            classify_error("maximum context length reached: please reduce the length of the messages"),
+            Some(CODE_CONTEXT_OVERFLOW)
+        );
+    }
+
+    #[test]
+    fn transient_throttling_is_not_a_spent_allowance() {
+        // The pre-existing contract: a bare 429 is not classified as a
+        // special code (the built-in chat fails over on it instead).
+        assert_eq!(classify_error("HTTP 429: rate limit exceeded"), None);
+        assert!(!is_usage_limit("HTTP 429: rate limit exceeded"));
+        assert!(is_transient_rate_limit("HTTP 429: rate limit exceeded"));
+        assert!(is_transient_rate_limit("too many requests, slow down"));
+        assert!(is_transient_rate_limit("provider overloaded, retrying"));
+        // A spent allowance never reads as transient, even with a 429 status.
+        assert!(!is_transient_rate_limit(
+            "HTTP 429: free usage limit reached"
+        ));
+        assert!(!is_transient_rate_limit("HTTP 402: insufficient credits"));
+        // Overflow text is neither.
+        assert!(!is_transient_rate_limit(
+            "maximum context length reached: reduce the length of the messages"
+        ));
+        assert!(!is_transient_rate_limit(""));
+    }
+
+    /// The mid-turn detectors ABORT a live turn on these markers, so a healthy
+    /// status banner that merely names the limit must never classify — only
+    /// exhaustion does.
+    #[test]
+    fn merely_naming_a_limit_is_not_exhaustion() {
+        assert!(!is_usage_limit(
+            "Free usage limit: 37 of 100 requests remaining today"
+        ));
+        assert!(!is_usage_limit("usage limit: 12/100"));
+        assert!(!is_usage_limit("quota: 12/100 used"));
+        assert!(!is_usage_limit("credit balance: $5.00"));
+        assert_eq!(
+            classify_error("Free usage limit: 37 of 100 requests remaining today"),
+            None
+        );
     }
 
     fn kind_of(msg: &str) -> Option<FailureKind> {

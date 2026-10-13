@@ -333,6 +333,9 @@ async fn openai_stream_round<R: tauri::Runtime>(
     client: &reqwest::Client,
     url: &str,
     api_key: &str,
+    // The provider label for usage-window bookkeeping (`chat:<provider>`) —
+    // the response's rate-limit headers are recorded against it.
+    provider: &str,
     body: &Value,
     app: &AppHandle<R>,
     sid: &str,
@@ -372,6 +375,10 @@ async fn openai_stream_round<R: tauri::Runtime>(
     })?
     .map_err(|e| format!("request failed: {e}"))?;
     let status = resp.status();
+    // Rate-limit headers (remaining/reset) feed the usage meter; recorded even
+    // on non-2xx — a 429's headers matter most. Internally throttled, and a
+    // no-op when the endpoint sends none.
+    crate::chat::plan_usage::record_headers(app, provider, resp.headers());
     cap.set_status(status.as_u16() as i64);
     if !status.is_success() {
         let b = resp.text().await.unwrap_or_default();
@@ -692,6 +699,8 @@ async fn anthropic_stream_round<R: tauri::Runtime>(
     client: &reqwest::Client,
     url: &str,
     api_key: &str,
+    // Usage-window bookkeeping label — see the OpenAI round.
+    provider: &str,
     body: &Value,
     app: &AppHandle<R>,
     sid: &str,
@@ -726,6 +735,7 @@ async fn anthropic_stream_round<R: tauri::Runtime>(
     })?
     .map_err(|e| format!("request failed: {e}"))?;
     let status = resp.status();
+    crate::chat::plan_usage::record_headers(app, provider, resp.headers());
     cap.set_status(status.as_u16() as i64);
     if !status.is_success() {
         let b = resp.text().await.unwrap_or_default();
@@ -1363,6 +1373,8 @@ pub(crate) async fn run_openai_tool_loop(
     mgr: &Arc<ChatManager>,
     sid: &str,
     app: &AppHandle,
+    // Provider label for usage-window bookkeeping (`chat:<provider>`).
+    provider: &str,
     research_mode: bool,
     // Anthropic-style cache marks on the OpenAI wire format — set ONLY for
     // OpenRouter requests whose model is `anthropic/*` (the call site gates
@@ -1484,10 +1496,10 @@ pub(crate) async fn run_openai_tool_loop(
         // round, or the already-streamed text would be duplicated.
         let full_len_before = full.len();
         let (message, round_usage) =
-            match openai_stream_round::<tauri::Wry>(client, &url, api_key, &body, app, sid, &mut full, &ping, headers_timeout).await {
+            match openai_stream_round::<tauri::Wry>(client, &url, api_key, provider, &body, app, sid, &mut full, &ping, headers_timeout).await {
                 Err(e) if cache::is_cache_rejection(&e) && full.len() == full_len_before => {
                     cache::strip_cache_control(&mut body);
-                    openai_stream_round::<tauri::Wry>(client, &url, api_key, &body, app, sid, &mut full, &ping, headers_timeout).await?
+                    openai_stream_round::<tauri::Wry>(client, &url, api_key, provider, &body, app, sid, &mut full, &ping, headers_timeout).await?
                 }
                 other => other?,
             };
@@ -1943,6 +1955,8 @@ async fn responses_stream_round<R: tauri::Runtime>(
     client: &reqwest::Client,
     url: &str,
     api_key: &str,
+    // Usage-window bookkeeping label — see the OpenAI round.
+    provider: &str,
     body: &Value,
     app: &AppHandle<R>,
     sid: &str,
@@ -1970,6 +1984,7 @@ async fn responses_stream_round<R: tauri::Runtime>(
     })?
     .map_err(|e| format!("request failed: {e}"))?;
     let status = resp.status();
+    crate::chat::plan_usage::record_headers(app, provider, resp.headers());
     cap.set_status(status.as_u16() as i64);
     if !status.is_success() {
         let b = resp.text().await.unwrap_or_default();
@@ -2155,6 +2170,8 @@ pub(crate) async fn run_openai_responses_tool_loop(
     mgr: &Arc<ChatManager>,
     sid: &str,
     app: &AppHandle,
+    // Provider label for usage-window bookkeeping (`chat:<provider>`).
+    provider: &str,
     research_mode: bool,
     perf: crate::chat::turn_perf::TurnPerf,
     headers_timeout: std::time::Duration,
@@ -2196,6 +2213,7 @@ pub(crate) async fn run_openai_responses_tool_loop(
             client,
             &url,
             api_key,
+            provider,
             &body,
             app,
             sid,
@@ -2361,6 +2379,8 @@ pub(crate) async fn run_anthropic_tool_loop(
     mgr: &Arc<ChatManager>,
     sid: &str,
     app: &AppHandle,
+    // Provider label for usage-window bookkeeping (`chat:<provider>`).
+    provider: &str,
     research_mode: bool,
     perf: crate::chat::turn_perf::TurnPerf,
     // Time-to-headers bound for each round (reconnect::headers_timeout).
@@ -2412,11 +2432,11 @@ pub(crate) async fn run_anthropic_tool_loop(
         // those words must not re-run the round and duplicate the text.
         let full_len_before = full.len();
         let (content, round_usage) =
-            match anthropic_stream_round::<tauri::Wry>(client, &url, api_key, &body, app, sid, &mut full, &ping, headers_timeout).await {
+            match anthropic_stream_round::<tauri::Wry>(client, &url, api_key, provider, &body, app, sid, &mut full, &ping, headers_timeout).await {
                 Err(e) if cache::is_cache_rejection(&e) && full.len() == full_len_before => {
                     cache::strip_cache_control(&mut body);
                     anthropic_stream_round::<tauri::Wry>(
-                        client, &url, api_key, &body, app, sid, &mut full, &ping,
+                        client, &url, api_key, provider, &body, app, sid, &mut full, &ping,
                         headers_timeout,
                     )
                     .await?
@@ -2723,7 +2743,7 @@ async fn openai_round_accumulates_split_tool_call_deltas() {
     let mut full = String::new();
 
     let (message, _) = openai_stream_round(
-        &client, &url, "key", &body, &app, "sid-pin", &mut full, &crate::chat::reconnect::PingTarget::new(&client, &url, "key", false),
+        &client, &url, "key", "openai_compatible", &body, &app, "sid-pin", &mut full, &crate::chat::reconnect::PingTarget::new(&client, &url, "key", false),
         std::time::Duration::from_secs(60),
     )
     .await
@@ -2757,7 +2777,7 @@ async fn openai_round_captures_reported_cost_from_usage_chunk() {
     let mut full = String::new();
 
     let (_, usage) = openai_stream_round(
-        &client, &url, "key", &body, &app, "sid-cost", &mut full, &crate::chat::reconnect::PingTarget::new(&client, &url, "key", false),
+        &client, &url, "key", "openai_compatible", &body, &app, "sid-cost", &mut full, &crate::chat::reconnect::PingTarget::new(&client, &url, "key", false),
         std::time::Duration::from_secs(60),
     )
     .await
@@ -2787,7 +2807,7 @@ async fn openai_round_index_clamp_drops_hostile_far_indices() {
     let mut full = String::new();
 
     let (message, _) = openai_stream_round(
-        &client, &url, "key", &body, &app, "sid", &mut full, &crate::chat::reconnect::PingTarget::new(&client, &url, "key", false),
+        &client, &url, "key", "openai_compatible", &body, &app, "sid", &mut full, &crate::chat::reconnect::PingTarget::new(&client, &url, "key", false),
         std::time::Duration::from_secs(60),
     )
     .await
@@ -2827,7 +2847,7 @@ async fn anthropic_round_echoes_server_tool_blocks_verbatim() {
     let mut full = String::new();
 
     let (content, _) = anthropic_stream_round(
-        &client, &url, "key", &body, &app, "sid-srvsearch", &mut full,
+        &client, &url, "key", "anthropic", &body, &app, "sid-srvsearch", &mut full,
         &crate::chat::reconnect::PingTarget::new(&client, &url, "key", false),
         std::time::Duration::from_secs(60),
     )
@@ -2875,7 +2895,7 @@ async fn anthropic_round_accumulates_text_and_tool_input_json() {
     let mut full = String::new();
 
     let (blocks, _) = anthropic_stream_round(
-        &client, &url, "key", &body, &app, "sid-pin", &mut full, &crate::chat::reconnect::PingTarget::new(&client, &url, "key", false),
+        &client, &url, "key", "anthropic", &body, &app, "sid-pin", &mut full, &crate::chat::reconnect::PingTarget::new(&client, &url, "key", false),
         std::time::Duration::from_secs(60),
     )
     .await
@@ -2922,7 +2942,7 @@ async fn responses_round_accumulates_text_calls_and_usage() {
     let mut full = String::new();
 
     let (text, calls, usage) = responses_stream_round(
-        &client, &url, "key", &body, &app, "sid-responses", &mut full,
+        &client, &url, "key", "openai_responses", &body, &app, "sid-responses", &mut full,
         &crate::chat::reconnect::PingTarget::new(&client, &url, "key", false),
         std::time::Duration::from_secs(60),
     )
@@ -3123,7 +3143,7 @@ async fn responses_round_fails_on_mid_stream_error_event() {
     let mut full = String::new();
 
     let err = responses_stream_round(
-        &client, &url, "key", &body, &app, "sid-responses-err", &mut full,
+        &client, &url, "key", "openai_responses", &body, &app, "sid-responses-err", &mut full,
         &crate::chat::reconnect::PingTarget::new(&client, &url, "key", false),
         std::time::Duration::from_secs(60),
     )

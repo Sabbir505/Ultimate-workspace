@@ -137,15 +137,14 @@ export function useCostRollups(rangeDays: Range) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rangeDays]);
 
-  const refresh = () => {
-    void fetchInto(rangeDays)
-      .then(() => {
-        /* applied via the cache listener */
-      })
-      .catch((e) => {
-        if (!cancelledRef.current) setError(String(e));
-      });
-  };
+  // Returns the in-flight fetch so a caller that must know when the figures
+  // landed (the dashboard's ↻ Refresh, which awaits it alongside the price and
+  // plan-window fetches) can await it; existing fire-and-forget callers are
+  // unaffected.
+  const refresh = (): Promise<void> =>
+    fetchInto(rangeDays).catch((e) => {
+      if (!cancelledRef.current) setError(String(e));
+    });
 
   return { rollups, loading, stale, error, refresh };
 }

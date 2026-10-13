@@ -700,6 +700,39 @@
   color: var(--text-dim);
   max-width: max-content;
 }
+
+/* In-transcript turn-error banner (chat:error). The div + class existed from
+   the start but had no styles; the classified codes (context_overflow,
+   usage_limit) carry real recovery copy now, so the banner renders as a
+   warn-tinted panel rather than bare text. */
+.chat-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 8px 2px 2px;
+  padding: 8px 12px;
+  font-size: 13px;
+  color: var(--danger, #e5484d);
+  background: color-mix(in srgb, var(--danger, #e5484d) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger, #e5484d) 40%, transparent);
+  border-radius: var(--radius-sm);
+  max-width: 720px;
+}
+.chat-error-icon {
+  flex: none;
+  line-height: 1.35;
+}
+.chat-error-text {
+  min-width: 0;
+  line-height: 1.4;
+}
+.chat-error-detail {
+  display: block;
+  margin-top: 3px;
+  font-size: 12px;
+  opacity: 0.75;
+  word-break: break-word;
+}
 .model-effort-empty {
   padding: 8px 10px;
   font-size: 12px;

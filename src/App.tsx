@@ -56,6 +56,7 @@ import { useTtsAutoRead, useTtsStreamRead } from "./hooks/useTtsAutoRead";
 import { VoiceLoopController } from "./hooks/useVoiceLoop";
 import { useAutomationEvents } from "./hooks/useAutomationEvents";
 import { useBudgetEvents } from "./hooks/useBudgetEvents";
+import { useUsageLimitEvents } from "./hooks/useUsageLimitEvents";
 import { useMemoryEvents } from "./hooks/useMemoryEvents";
 import { useBrowserMcpEvents } from "./hooks/useBrowserMcpEvents";
 import { useGitStatusPolling } from "./hooks/useGitStatusPolling";
@@ -257,6 +258,7 @@ export default function App() {
   useTtsStreamRead();
   useAutomationEvents();
   useBudgetEvents();
+  useUsageLimitEvents();
   useMemoryEvents();
   usePaneMemory();
   useModelDownloadEvents();

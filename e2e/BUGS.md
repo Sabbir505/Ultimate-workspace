@@ -21,6 +21,19 @@ errors out — no per-turn timeout). `opencode/ling-3.1-flash-free` replies with
 billing/quota notice instead of an answer. **`opencode/fledge-alpha-free`
 responds in ~10s and is the suite's default free model now.**
 
+**Resolved 2026-10-13 (desktop):** the silent-stall class now ends with a visible
+error instead of hanging. The per-turn readers detect spent free-model allowances
+(free-tier/quota phrasings) on JSON error frames, plain-text stdout lines, and a
+live stderr sink — OpenCode routes auth/quota/unknown-model failures to its log
+stream while retrying them forever — end the turn with a classified `chat:error`
+(`usage_limit`, switch-model copy in the banner) and kill the CLI's retry loop so
+later sends are accepted again. A repeated identical error frame (3×) and 15
+minutes of total stdout/stderr silence are also turn-ending
+(`SILENT_TURN_TIMEOUT`), and the OpenCode server path aborts through the
+`session.error` event / turn POST body (`abort_turn_with_error`). So
+`ling-3.1-flash-free`'s billing/quota notice now surfaces as the turn's error
+instead of sitting invisible, and `mimo-v2.6-flash-free`'s wedge has a bound.
+
 Device: Tecno **PJX110** (Android 16), app in **Expo Go**, connected over USB
 (`adb reverse tcp:8081` + `tcp:50672`) to the desktop relay (debug build,
 `relay.exe`, loopback 127.0.0.1:50672). Suite: `e2e/` (see README.md).

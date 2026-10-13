@@ -385,6 +385,17 @@ Commands:
 - `check_budgets() -> ()` — re-evaluates budgets (emits `budget:alert` when breached).
 - `list_hidden_cost_projects() -> string[]` / `hide_cost_project(projectId)` / `unhide_cost_project(projectId)` — dashboard visibility.
 
+## Usage & limits
+
+Commands:
+- `get_usage_meters() -> UsageMeterPayload[]` — per-target (`chat:<provider>` | bare harness id) rolling 1h/24h/7d/30d usage + configured caps + provider/CLI-reported plan windows. Local GGUF targets are excluded.
+- `list_usage_limits() -> UsageLimitConfig[]` / `set_usage_limit(target, window, capUsd?, capTokens?, capRequests?, thresholdPct?)` / `remove_usage_limit(target, window)` — per-target rolling-window caps (settings key `usage.config`; `window` ∈ `hour|day|week|month`).
+- `check_usage_limits() -> UsageLimitAlert[]` — the CURRENT warn/crit alert set; emits `usage:limit-alert` only on tier escalations (once per tier per rolling window, dedup state in `usage.alert.state`).
+- `refresh_usage_windows(force?) -> UsageRefreshReport` — pulls the plan sources (CommandCode `/alpha/*` via `~/.commandcode/auth.json`, OpenCode Go `/zen/go/v1/usage`, OpenRouter credits). `force` defaults to true (the dashboard's explicit ↻ Refresh); the dashboard's OPEN passes false to respect the backend's 10-minute throttle.
+
+Events:
+- `usage:limit-alert` — `{ target, label, tier: "warn"|"crit", window, windowLabel, usedPct, usedUsd?, capUsd?, usedTokens?, capTokens?, usedRequests?, capRequests?, resetsAt?, message }` (notification center + composer notch).
+
 ## STT / dictation
 
 Commands:

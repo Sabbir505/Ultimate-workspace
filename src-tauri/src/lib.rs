@@ -601,10 +601,13 @@ pub fn run() {
                 });
             }
 
-            // Budget alert timer (commands/budget.rs): the frontend re-checks
-            // after cost events, but a backend cadence keeps threshold alerts
-            // firing when no chat window is open to drive the IPC call.
-            // Advisory-only: alerts never abort a running turn.
+            // Budget + usage-limit alert timer (commands/budget.rs,
+            // commands/usage.rs): the frontend re-checks after cost events,
+            // but a backend cadence keeps threshold alerts firing when no chat
+            // window is open to drive the IPC call. Advisory-only: alerts
+            // never abort a running turn. The usage tick also refreshes the
+            // provider plan sources (CommandCode/OpenCode Go/OpenRouter),
+            // internally throttled so it is at most once per 10 minutes.
             {
                 let app_handle = app.handle().clone();
                 let db_state = DbState(Arc::clone(&shared_db));
@@ -616,6 +619,12 @@ pub fn run() {
                             Arc::clone(&db_state.0),
                         )
                         .await;
+                        commands::usage::run_usage_limit_checks(
+                            app_handle.clone(),
+                            Arc::clone(&db_state.0),
+                        )
+                        .await;
+                        let _ = crate::chat::plan_usage::refresh(&app_handle, false).await;
                         tokio::time::sleep(std::time::Duration::from_secs(5 * 60)).await;
                     }
                 });
@@ -1064,6 +1073,12 @@ pub fn run() {
             commands::budget::list_hidden_cost_projects,
             commands::budget::hide_cost_project,
             commands::budget::unhide_cost_project,
+            commands::usage::list_usage_limits,
+            commands::usage::set_usage_limit,
+            commands::usage::remove_usage_limit,
+            commands::usage::get_usage_meters,
+            commands::usage::check_usage_limits,
+            commands::usage::refresh_usage_windows,
             commands::improve_cmds::list_improve_artifacts,
             commands::improve_cmds::list_improve_versions,
             commands::improve_cmds::set_improve_channel,

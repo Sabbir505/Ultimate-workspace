@@ -51,6 +51,116 @@ impl PerTurn {
 const TURN_WATCHDOG_GRACE: Duration = Duration::from_secs(5);
 const TURN_WATCHDOG_POLL: Duration = Duration::from_millis(250);
 
+/// How long a per-turn CLI may be TOTALLY mute — no stdout line, no stderr
+/// line — before the silent-hang watchdog ends the turn with an error.
+///
+/// The completion watchdog above only arms after a terminal frame; a CLI
+/// wedged in a silent retry (or hung on a hidden prompt) never prints one,
+/// never exits, and used to leave the turn in flight forever (e2e BUG-11).
+/// 15 minutes is deliberately generous: a legitimately long tool call (a big
+/// build) emits no events between its start and result frames, and killing
+/// that would be worse than waiting. A retry loop that DOES log is handled
+/// sooner by the quota/repeat detectors — this is the last-resort net for
+/// complete silence.
+const SILENT_TURN_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const SILENT_WATCHDOG_POLL: Duration = Duration::from_secs(5);
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Kill the current per-turn child (generation-gated) so a CLI retrying a
+/// terminal failure can't outlive the aborted turn. No-op without an
+/// AppHandle (one-shot/automation runs have no session registry).
+fn kill_child_for_abort(app: Option<&AppHandle>, sid: &str, my_generation: u64) {
+    let Some(h) = app else { return };
+    let killed = h
+        .state::<crate::agent_sessions::AgentSessionState>()
+        .0
+        .kill_child_if_generation(sid, my_generation);
+    if killed {
+        crate::relay_eprintln!(
+            "[agent_sessions] {sid}: aborted turn — killed the CLI tree so its retry loop cannot linger"
+        );
+    }
+}
+
+/// One mid-turn status notice for a transient throttle (429 etc.), at most
+/// once per turn: the CLI is retrying and may still succeed, so the turn is
+/// NOT aborted — the pill just tells the user why nothing is arriving.
+fn note_transient_rate_limit(
+    app: Option<&AppHandle>,
+    sid: &str,
+    kind: PerTurn,
+    rate_notice_sent: &AtomicBool,
+) {
+    if rate_notice_sent.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    crate::chat::stream_events::emit_status_reason(
+        app,
+        sid,
+        "harness_rate_limit",
+        format!("{} was rate limited and is retrying…", kind.display()),
+    );
+}
+
+/// One stderr line from a per-turn CLI, seen live by the drain sink (see
+/// `drain_stderr_with`). Harness CLIs route failures to their log stream —
+/// opencode's wrapper passes `--print-logs --log-level ERROR` for exactly
+/// this — and a free-model quota refusal makes the CLI retry forever (no
+/// terminal frame, no exit), so this sink is how that state becomes a
+/// visible error card instead of an endless spinner.
+///
+/// Windows note: the `cmd.exe /C` wrapper prefixes some lines ("'foo' is not
+/// recognized…") — the markers are specific enough that wrapper noise never
+/// matches.
+#[allow(clippy::too_many_arguments)]
+fn handle_harness_stderr_line(
+    app: Option<&AppHandle>,
+    sid: &str,
+    kind: PerTurn,
+    my_generation: u64,
+    line: &str,
+    in_flight: &AtomicBool,
+    cancelled: &AtomicBool,
+    error_reported: &AtomicBool,
+    rate_notice_sent: &AtomicBool,
+) {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    // Act only while THIS turn is live — a late line from a finished or
+    // superseded turn must not surface an error (or kill) over the next one.
+    if !in_flight.load(Ordering::SeqCst)
+        || cancelled.load(Ordering::SeqCst)
+        || error_reported.load(Ordering::SeqCst)
+    {
+        return;
+    }
+    if crate::chat::error_class::is_usage_limit(trimmed) {
+        if error_reported.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        emit_error(
+            app,
+            sid,
+            &format!(
+                "{}: {}",
+                kind.display(),
+                super::tracker::truncate_output(trimmed)
+            ),
+        );
+        kill_child_for_abort(app, sid, my_generation);
+    } else if crate::chat::error_class::is_transient_rate_limit(trimmed) {
+        note_transient_rate_limit(app, sid, kind, rate_notice_sent);
+    }
+}
+
 /// Whether this JSONL frame is the harness's semantically-terminal frame —
 /// the CLI's contract that the turn is complete and the process has nothing
 /// left to do. The reader ends a turn ONLY at process EOF, so a CLI that
@@ -454,11 +564,11 @@ End your reply with the plan and wait for the user's approval.]"
     }
 
     let stdout = child.stdout.take().ok_or("failed to capture CLI stdout")?;
-    // stderr drain: collected into a channel the reader consumes only when a
-    // turn produced no output (the pipe closes at process exit, so the recv
-    // below never waits long on that path).
+    // stderr is taken here (the pipe must be drained from the moment the
+    // process starts), but the drain pump is started below — after the
+    // per-turn liveness/error flags exist — so its line sink can surface a
+    // mid-turn quota/limit failure (see `drain_stderr_with`).
     let stderr = child.stderr.take().ok_or("failed to capture CLI stderr")?;
-    let erx = drain_stderr(stderr);
     entry.turn_in_flight.store(true, Ordering::SeqCst);
     // Take-and-kill the previous child before overwriting the slot (audit
     // H21): every other adapter does exactly this (`acp.rs` /
@@ -510,11 +620,53 @@ End your reply with the plan and wait for the user's approval.]"
     let my_generation = entry.proc_generation.fetch_add(1, Ordering::SeqCst) + 1;
     let proc_generation = Arc::clone(&entry.proc_generation);
 
+    // Per-turn abort bookkeeping (quota/limit detection, repeat breaker,
+    // silent-hang watchdog). Fresh per turn like `cancelled` (E-5 rationale):
+    // a reader or stderr sink from a superseded turn must never clobber this
+    // turn's state.
+    let error_reported = Arc::new(AtomicBool::new(false));
+    let rate_notice_sent = Arc::new(AtomicBool::new(false));
+    // Millis timestamp of the last stdout/stderr line — the silent-hang
+    // watchdog trips when the CLI goes fully mute.
+    let last_activity = Arc::new(AtomicU64::new(now_ms()));
+    // Live stderr sink: failures that never produce a terminal frame (a
+    // free-model quota refusal the CLI retries forever) become visible here,
+    // mid-turn, instead of waiting for an EOF that never comes.
+    let erx = {
+        let error_sink = Arc::clone(&error_reported);
+        let rate_sink = Arc::clone(&rate_notice_sent);
+        let activity_sink = Arc::clone(&last_activity);
+        let in_flight_sink = Arc::clone(&entry.turn_in_flight);
+        let cancelled_sink = Arc::clone(&cancelled);
+        let app_sink = app.clone();
+        let sid_sink = sid.to_string();
+        drain_stderr_with(
+            stderr,
+            Some(Box::new(move |line: &str| {
+                activity_sink.store(now_ms(), Ordering::Relaxed);
+                handle_harness_stderr_line(
+                    Some(&app_sink),
+                    &sid_sink,
+                    kind,
+                    my_generation,
+                    line,
+                    &in_flight_sink,
+                    &cancelled_sink,
+                    &error_sink,
+                    &rate_sink,
+                );
+            })),
+        )
+    };
+
     let app2 = app.clone();
     let db2 = DbState(Arc::clone(&db.0));
     let sid2 = sid.to_string();
     let in_flight2 = Arc::clone(&entry.turn_in_flight);
     let session_cell = Arc::clone(&entry.cli_session_id);
+    let error_reader = Arc::clone(&error_reported);
+    let rate_reader = Arc::clone(&rate_notice_sent);
+    let activity_reader = Arc::clone(&last_activity);
     std::thread::spawn(move || {
         let watches = watches_job.join().unwrap_or_default();
         read_per_turn_stream(
@@ -532,6 +684,9 @@ End your reply with the plan and wait for the user's approval.]"
             my_generation,
             Some(erx),
             None,
+            &error_reader,
+            &rate_reader,
+            &activity_reader,
         );
     });
 
@@ -593,6 +748,54 @@ End your reply with the plan and wait for the user's approval.]"
             }
         });
     }
+
+    // Silent-hang watchdog (e2e BUG-11 class): a CLI that never prints a
+    // terminal frame and goes completely mute — no stdout line, no stderr
+    // line — is wedged (a hidden prompt, a retry with all logging disabled),
+    // and the completion watchdog above never arms for it. After
+    // SILENT_TURN_TIMEOUT the turn ends with a visible error instead of an
+    // endless spinner: the abort flag is set, the error emitted, and the
+    // child tree killed so the reader's EOF teardown runs the normal abort
+    // cleanup. Both the reader and the stderr sink keep `last_activity`
+    // fresh, so any sign of life (a frame, a log line) resets the clock.
+    {
+        let app4 = app.clone();
+        let sid4 = sid.to_string();
+        let in_flight4 = Arc::clone(&entry.turn_in_flight);
+        let gen4 = Arc::clone(&entry.proc_generation);
+        let cancelled4 = Arc::clone(&cancelled);
+        let error4 = Arc::clone(&error_reported);
+        let activity4 = Arc::clone(&last_activity);
+        std::thread::spawn(move || loop {
+            std::thread::sleep(SILENT_WATCHDOG_POLL);
+            if cancelled4.load(Ordering::SeqCst)
+                || gen4.load(Ordering::SeqCst) != my_generation
+                || !in_flight4.load(Ordering::SeqCst)
+                || error4.load(Ordering::SeqCst)
+            {
+                return;
+            }
+            let idle = now_ms().saturating_sub(activity4.load(Ordering::Relaxed));
+            if idle < SILENT_TURN_TIMEOUT.as_millis() as u64 {
+                continue;
+            }
+            if error4.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            emit_error(
+                Some(&app4),
+                &sid4,
+                &format!(
+                    "{} produced no output for {} minutes — stopping the turn so it can't hang here forever. \
+Retry the message, or pick a different model.",
+                    kind.display(),
+                    SILENT_TURN_TIMEOUT.as_secs() / 60
+                ),
+            );
+            kill_child_for_abort(Some(&app4), &sid4, my_generation);
+            return;
+        });
+    }
     Ok(())
 }
 
@@ -621,6 +824,15 @@ pub(super) fn read_per_turn_stream(
     // `Some("automation")` for one-shot scheduler runs — rides chat:done so
     // the frontend can skip its generic turn-complete toast. None otherwise.
     source: Option<&str>,
+    // Abort bookkeeping shared with the spawn's stderr sink and watchdogs:
+    // set when this turn ends with an emitted error (spent allowance, repeat
+    // breaker, silent hang) — the post-loop teardown then skips `finish_turn`
+    // entirely (no reply persist, no chat:done; mirrors claude's error path).
+    error_reported: &AtomicBool,
+    rate_notice_sent: &AtomicBool,
+    // Millis timestamp of the last stdout/stderr line (the patient half of
+    // the silent-hang watchdog; both readers keep it fresh).
+    last_activity: &AtomicU64,
 ) {
     let mut full = String::new();
     // Crash-flush accumulator (see PartialFlush): keeps a seconds-stale
@@ -666,30 +878,53 @@ pub(super) fn read_per_turn_stream(
     // the turn mid-stream).
     let mut reader = BufReader::new(stdout);
     let mut raw: Vec<u8> = Vec::new();
+    // Consecutive-identical-error breaker for the frame handlers.
+    let mut repeats = ErrorRepeat::default();
+    // Set when the reader itself classified a frame/line as unrecoverable
+    // (spent allowance, the repeat breaker tripping): emit the error, kill
+    // the CLI's retry loop, and fall into the shared abort teardown below.
+    let mut abort_msg: Option<String> = None;
     while let Some(line) = crate::agent_sessions::next_harness_line(&mut reader, &mut raw) {
         let line: &str = &line;
         if line.trim().is_empty() {
             continue;
         }
+        // Any line — even one we can't parse — is a sign of life for the
+        // silent-hang watchdog.
+        last_activity.store(now_ms(), Ordering::Relaxed);
         let Ok(v) = serde_json::from_str::<Value>(&line) else {
+            // A plain-text stdout line: some CLIs print refusals outside
+            // their JSON stream, so quota detection must not depend on the
+            // frame shape. Last chance before the line is dropped.
+            let trimmed = line.trim();
+            if crate::chat::error_class::is_usage_limit(trimmed) {
+                abort_msg = Some(trimmed.to_string());
+                break;
+            }
+            if crate::chat::error_class::is_transient_rate_limit(trimmed) {
+                note_transient_rate_limit(app, sid, kind, rate_notice_sent);
+            }
             continue;
         };
-        match kind {
-            PerTurn::Kimi => handle_kimi_event(
-                app,
-                sid,
-                &v,
-                &mut full,
-                session_cell,
-                &mut input,
-                &mut output,
-                &mut cache_read,
-                &mut cache_creation,
-                &mut last_text,
-                &mut last_reasoning,
-                &mut in_think,
-                &mut tools,
-            ),
+        let handler_abort = match kind {
+            PerTurn::Kimi => {
+                handle_kimi_event(
+                    app,
+                    sid,
+                    &v,
+                    &mut full,
+                    session_cell,
+                    &mut input,
+                    &mut output,
+                    &mut cache_read,
+                    &mut cache_creation,
+                    &mut last_text,
+                    &mut last_reasoning,
+                    &mut in_think,
+                    &mut tools,
+                );
+                None
+            }
             PerTurn::OpenCode => handle_opencode_event(
                 app,
                 sid,
@@ -705,22 +940,26 @@ pub(super) fn read_per_turn_stream(
                 &mut last_reasoning,
                 &mut in_think,
                 &mut tools,
+                &mut repeats,
             ),
             // Pi and Omp share the pi-lineage JSON event protocol.
-            PerTurn::Pi | PerTurn::Omp => handle_pi_event(
-                app,
-                sid,
-                &v,
-                &mut full,
-                session_cell,
-                &mut input,
-                &mut output,
-                &mut cache_read,
-                &mut cache_creation,
-                &mut cost,
-                &mut in_think,
-                &mut tools,
-            ),
+            PerTurn::Pi | PerTurn::Omp => {
+                handle_pi_event(
+                    app,
+                    sid,
+                    &v,
+                    &mut full,
+                    session_cell,
+                    &mut input,
+                    &mut output,
+                    &mut cache_read,
+                    &mut cache_creation,
+                    &mut cost,
+                    &mut in_think,
+                    &mut tools,
+                );
+                None
+            }
             PerTurn::CommandCode => handle_commandcode_event(
                 app,
                 sid,
@@ -735,7 +974,14 @@ pub(super) fn read_per_turn_stream(
                 &mut in_think,
                 &mut tools,
                 &mut seen_tools,
+                &mut repeats,
             ),
+        };
+        // The handler classified this frame as unrecoverable — end the turn
+        // with the error instead of waiting on a CLI that keeps retrying.
+        if let Some(msg) = handler_abort {
+            abort_msg = Some(msg);
+            break;
         }
         // Arm the completion watchdog when the harness declares the turn
         // semantically over — the process still has to exit (or be killed
@@ -744,6 +990,15 @@ pub(super) fn read_per_turn_stream(
             terminal_seen.store(true, Ordering::SeqCst);
         }
         partial.maybe_flush(db, sid, &full);
+    }
+    // Reader-side abort (frame handler / plain-text line): emit the error
+    // once and kill the CLI tree so its retry loop dies with the turn. The
+    // shared abort teardown below does the rest.
+    if let Some(msg) = abort_msg {
+        if !error_reported.swap(true, Ordering::SeqCst) {
+            emit_error(app, sid, &msg);
+        }
+        kill_child_for_abort(app, sid, my_generation);
     }
     // Process exit with subagent dispatches still queued: their completion
     // frames never arrived — finalize the panel entries so they don't spin
@@ -759,6 +1014,24 @@ pub(super) fn read_per_turn_stream(
         full.push_str("</think>");
         emit_token(app, sid, "</think>");
         in_think = false;
+    }
+    // Abort teardown (spent allowance / repeat breaker / silent hang): the
+    // error was already emitted by whoever detected it (frame handler,
+    // stderr sink, watchdog) — discard the partial (the frontend persists
+    // what the user watched), release the turn, and skip `finish_turn`
+    // entirely: an errored turn must not persist a reply or emit chat:done
+    // (mirrors claude's error path). The captured CLI session id is still
+    // persisted so a retry resumes the same conversation, and the
+    // no-output fallback below is skipped — the error is already reported,
+    // not "produced no output".
+    if error_reported.load(Ordering::SeqCst) {
+        persist_cli_session_id(db, kind.harness_id(), sid, session_cell);
+        partial.discard(db);
+        crate::chat::turn_perf::unregister(sid);
+        if should_clear_in_flight(proc_generation.load(Ordering::SeqCst), my_generation) {
+            in_flight.store(false, Ordering::SeqCst);
+        }
+        return;
     }
     // Process exit closes the turn. Persist any captured CLI session id so
     // the next turn (even after cancel or an app restart) resumes the same
@@ -1010,5 +1283,66 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner())
             .insert("wd-empty".to_string(), entry);
         assert!(!mgr.kill_child_if_generation("wd-empty", 3));
+    }
+
+    /// The stderr sink's decision table: a spent-allowance line flips the
+    /// abort flag (with a real AppHandle the caller then emits the error and
+    /// kills the retry loop), transient throttling only raises the notice
+    /// latch, and neither fires once the turn is over.
+    #[test]
+    fn stderr_sink_classifies_quota_and_transient_lines() {
+        let in_flight = AtomicBool::new(true);
+        let cancelled = AtomicBool::new(false);
+        let error_reported = AtomicBool::new(false);
+        let rate_notice = AtomicBool::new(false);
+
+        handle_harness_stderr_line(
+            None,
+            "s",
+            PerTurn::CommandCode,
+            1,
+            "ERROR provider: Free usage limit hit. Come back in 4 hours.",
+            &in_flight,
+            &cancelled,
+            &error_reported,
+            &rate_notice,
+        );
+        assert!(error_reported.load(Ordering::SeqCst));
+        assert!(!rate_notice.load(Ordering::SeqCst));
+
+        // Transient: notice latch only, no abort.
+        let error_reported = AtomicBool::new(false);
+        let rate_notice = AtomicBool::new(false);
+        handle_harness_stderr_line(
+            None,
+            "s",
+            PerTurn::OpenCode,
+            1,
+            "level=ERROR service=provider 429 too many requests — retrying",
+            &in_flight,
+            &cancelled,
+            &error_reported,
+            &rate_notice,
+        );
+        assert!(!error_reported.load(Ordering::SeqCst));
+        assert!(rate_notice.load(Ordering::SeqCst));
+
+        // A late line from a turn that already ended is ignored.
+        let ended = AtomicBool::new(false);
+        let error_reported = AtomicBool::new(false);
+        let rate_notice = AtomicBool::new(false);
+        handle_harness_stderr_line(
+            None,
+            "s",
+            PerTurn::CommandCode,
+            1,
+            "Free usage limit hit. Come back in 4 hours.",
+            &ended,
+            &cancelled,
+            &error_reported,
+            &rate_notice,
+        );
+        assert!(!error_reported.load(Ordering::SeqCst));
+        assert!(!rate_notice.load(Ordering::SeqCst));
     }
 }

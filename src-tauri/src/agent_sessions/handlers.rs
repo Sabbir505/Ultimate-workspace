@@ -10,6 +10,43 @@ use super::tracker::{
     extract_result_text, is_subagent_tool_name, tool_meta_generic, tool_meta_kimi, ToolTracker,
 };
 use super::{emit_token, usage_i64};
+use crate::chat::error_class;
+
+/// Consecutive-identical-error tracker for the frame handlers. A CLI whose
+/// internal retry loop keeps re-emitting the SAME error frame (unknown model,
+/// auth, a refused provider call) is making no progress: the turn would wait
+/// on a process that never exits and never prints a terminal frame. After
+/// [`ERROR_REPEAT_LIMIT`] consecutive repeats the handler aborts the turn with
+/// that error instead of spinning forever. Any non-error frame (a delta, a
+/// tool call, a usage report) counts as progress and resets the count.
+pub(super) const ERROR_REPEAT_LIMIT: u32 = 3;
+
+#[derive(Default)]
+pub(super) struct ErrorRepeat {
+    last: String,
+    count: u32,
+}
+
+impl ErrorRepeat {
+    /// Record one error frame. True when the same message has now repeated
+    /// [`ERROR_REPEAT_LIMIT`] times in a row — the caller aborts the turn.
+    pub(super) fn note_error(&mut self, msg: &str) -> bool {
+        if self.last == msg {
+            self.count += 1;
+        } else {
+            self.last.clear();
+            self.last.push_str(msg);
+            self.count = 1;
+        }
+        self.count >= ERROR_REPEAT_LIMIT
+    }
+
+    /// The stream made real progress (text/reasoning/tool/usage frame).
+    pub(super) fn note_progress(&mut self) {
+        self.last.clear();
+        self.count = 0;
+    }
+}
 /// Kimi stream-json: `{"role":"assistant","content":…}` messages, tool events
 /// (see tool_marker_kimi), and a `session.resume_hint` meta line carrying the
 /// resume id. (Verified against v0.31.1 output.)
@@ -336,6 +373,11 @@ pub(super) fn emit_todowrite_steps(app: Option<&AppHandle>, sid: &str, name: &st
 
 /// OpenCode `--format json` events. (Shapes verified against `opencode run`
 /// and the `opencode serve` SSE stream — both normalize onto these shapes.)
+///
+/// Returns `Some(msg)` when the frame reports a condition the turn can never
+/// recover from (spent allowance, or the same error repeating) — the reader
+/// aborts the turn with that message instead of waiting on a CLI that will
+/// retry forever.
 pub(super) fn handle_opencode_event(
     app: Option<&AppHandle>,
     sid: &str,
@@ -351,8 +393,35 @@ pub(super) fn handle_opencode_event(
     last_reasoning: &mut String,
     in_think: &mut bool,
     tools: &mut ToolTracker,
-) {
-    match v.get("type").and_then(|t| t.as_str()) {
+    repeats: &mut ErrorRepeat,
+) -> Option<String> {
+    // Any non-error frame is progress — reset the repeat breaker before the
+    // match consults it.
+    let frame_type = v.get("type").and_then(|t| t.as_str());
+    if frame_type != Some("error") {
+        repeats.note_progress();
+    }
+    match frame_type {
+        // {"type":"error",…} — provider refusal (auth / quota / unknown
+        // model). Previously ignored entirely, so a free model's exhausted
+        // allowance sat invisible while the CLI retried forever. A spent
+        // allowance (or an error the CLI keeps repeating) aborts the turn;
+        // anything else lands in the transcript so the user can see why the
+        // CLI is stuck.
+        Some("error") => {
+            let msg = super::opencode::opencode_error_text(v)
+                .unwrap_or_else(|| "OpenCode reported an error".to_string());
+            close_open_think(app, sid, full, in_think);
+            if error_class::is_usage_limit(&msg) || repeats.note_error(&msg) {
+                return Some(msg);
+            }
+            // Consecutive duplicate frames are one error, not N — the first
+            // is already in the transcript.
+            if !full.ends_with(&msg) {
+                full.push_str(&msg);
+                emit_token(app, sid, &msg);
+            }
+        }
         // {"type":"text","part":{"text":…}} — assistant text chunk. In `run`
         // mode opencode buffers deltas internally and fires one event per
         // completed text part with the FULL snapshot of that part's text, so
@@ -507,6 +576,7 @@ pub(super) fn handle_opencode_event(
             }
         }
     }
+    None
 }
 
 /// pi-lineage `--mode json` events (pi and omp — omp is a pi fork with the
@@ -711,6 +781,11 @@ pub(super) fn strip_usage_trailer(text: &str) -> String {
 /// markers that finalText never contains — diffing against `full` failed the
 /// prefix check after any thinking/tool turn and re-appended the whole reply
 /// (the doubled assistant bubble).
+///
+/// Returns `Some(msg)` when the frame reports a condition the turn can never
+/// recover from (a spent free-tier allowance, or the same error repeating) —
+/// the reader aborts the turn with that message instead of waiting on a CLI
+/// that retries forever.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn handle_commandcode_event(
     app: Option<&AppHandle>,
@@ -726,7 +801,8 @@ pub(super) fn handle_commandcode_event(
     in_think: &mut bool,
     tools: &mut ToolTracker,
     seen_tools: &mut std::collections::HashSet<String>,
-) {
+    repeats: &mut ErrorRepeat,
+) -> Option<String> {
     // Capture the CLI session id from any frame that carries one.
     if let Some(id) = v.get("sessionId").and_then(|s| s.as_str()) {
         if let Ok(mut g) = session_cell.lock() {
@@ -737,7 +813,9 @@ pub(super) fn handle_commandcode_event(
     }
     match v.get("type").and_then(|t| t.as_str()) {
         Some("event") => {
-            let Some(inner) = v.get("event") else { return };
+            let Some(inner) = v.get("event") else {
+                return None;
+            };
             let ty = inner.get("type").and_then(|t| t.as_str()).unwrap_or("");
             match ty {
                 "run_error" => {
@@ -748,10 +826,28 @@ pub(super) fn handle_commandcode_event(
                         .pointer("/error/message")
                         .and_then(|m| m.as_str())
                         .unwrap_or("the CLI reported an error");
-                    full.push_str(msg);
-                    emit_token(app, sid, msg);
+                    // A spent allowance (free-tier daily limit, quota) can
+                    // never succeed by retrying — the CLI retries it forever
+                    // with no terminal frame, which used to hang the turn
+                    // invisibly. Abort with the error instead.
+                    if error_class::is_usage_limit(msg) {
+                        return Some(msg.to_string());
+                    }
+                    // The same error frame repeating is the same wedge with a
+                    // different cause (auth, unknown model): abort once the
+                    // retry loop is unmistakable.
+                    if repeats.note_error(msg) {
+                        return Some(msg.to_string());
+                    }
+                    // Consecutive duplicate frames are one error, not N — the
+                    // first is already in the transcript.
+                    if !full.ends_with(msg) {
+                        full.push_str(msg);
+                        emit_token(app, sid, msg);
+                    }
                 }
                 "run_end" => {
+                    repeats.note_progress();
                     if let Some(u) = inner.pointer("/result/usage") {
                         merge_round_usage(
                             sid,
@@ -767,6 +863,7 @@ pub(super) fn handle_commandcode_event(
                     }
                 }
                 "model_request_start" => {
+                    repeats.note_progress();
                     // The request went out to the provider — open the
                     // generation window HERE. Without this the window only
                     // opens at the first delta (microseconds before the first
@@ -774,6 +871,7 @@ pub(super) fn handle_commandcode_event(
                     crate::chat::turn_perf::begin_active_gen(sid);
                 }
                 _ => {
+                    repeats.note_progress();
                     // Tool frames: every variant carries toolCallId+toolName.
                     // `tool_running`-style frames open the step's card once
                     // (deduped by call id); a later frame that carries the
@@ -801,7 +899,7 @@ pub(super) fn handle_commandcode_event(
                                 full.push_str(&marker);
                                 emit_token(app, sid, &marker);
                             }
-                            return;
+                            return None;
                         }
                         if seen_tools.insert(call_id.to_string()) {
                             let inp = inner
@@ -878,7 +976,7 @@ pub(super) fn handle_commandcode_event(
                             full.push_str(&marker);
                             emit_token(app, sid, &marker);
                         }
-                        return;
+                        return None;
                     }
                     // Streaming deltas (liberal match — see doc comment).
                     if let Some(delta) = inner.get("delta").and_then(|d| d.as_str()) {
@@ -907,6 +1005,7 @@ pub(super) fn handle_commandcode_event(
             }
         }
         Some("result") => {
+            repeats.note_progress();
             // Usage is authoritative here (the docs: totals on the result
             // line). camelCase — commandcode, unlike claude, doesn't use
             // snake_case usage fields.
@@ -925,13 +1024,22 @@ pub(super) fn handle_commandcode_event(
             }
             if v.get("subtype").and_then(|s| s.as_str()) == Some("error") {
                 if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
-                    if !err.trim().is_empty() && !full.contains(err) {
-                        // Same trap as the other error arms: reasoning left
-                        // open at a terminal error hides the error text inside
-                        // a "Thinking…" block that never resolves.
-                        close_open_think(app, sid, full, in_think);
-                        full.push_str(err);
-                        emit_token(app, sid, err);
+                    if !err.trim().is_empty() {
+                        // A spent allowance on the terminal line is the same
+                        // wedge as a run_error: abort with the error so the
+                        // chat gets a banner, not an error persisted as if it
+                        // were the model's reply.
+                        if error_class::is_usage_limit(err) {
+                            return Some(err.to_string());
+                        }
+                        if !full.contains(err) {
+                            // Same trap as the other error arms: reasoning left
+                            // open at a terminal error hides the error text inside
+                            // a "Thinking…" block that never resolves.
+                            close_open_think(app, sid, full, in_think);
+                            full.push_str(err);
+                            emit_token(app, sid, err);
+                        }
                     }
                 }
             }
@@ -965,6 +1073,7 @@ pub(super) fn handle_commandcode_event(
         }
         _ => {}
     }
+    None
 }
 
 #[cfg(test)]
@@ -1062,5 +1171,192 @@ mod tests {
         assert!(!in_think, "the error must close the reasoning block");
         // The diagnosis lands OUTSIDE the block, so the transcript can render it.
         assert!(full.contains("</think>429 rate limit exceeded"), "got: {full}");
+    }
+
+    /// The reported bug class: a free model's exhausted allowance arrived as
+    /// a `run_error` frame and was appended to the reply like normal text —
+    /// while the CLI retried forever and the turn never ended. It must now
+    /// abort the turn with the message instead of polluting the transcript.
+    #[test]
+    fn commandcode_usage_limit_aborts_and_is_not_appended() {
+        let mut full = String::new();
+        let mut text_streamed = String::new();
+        let session_cell = Arc::new(Mutex::new(None));
+        let mut input = None;
+        let mut output = None;
+        let mut cache_read = None;
+        let mut cache_creation = None;
+        let mut in_think = false;
+        let mut tools = ToolTracker::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut repeats = ErrorRepeat::default();
+
+        let out = handle_commandcode_event(
+            None,
+            "test-cc-quota",
+            &serde_json::json!({
+                "type": "event",
+                "event": {
+                    "type": "run_error",
+                    "error": { "message": "Free usage limit hit. Come back in 3 hours." }
+                }
+            }),
+            &mut full,
+            &mut text_streamed,
+            &session_cell,
+            &mut input,
+            &mut output,
+            &mut cache_read,
+            &mut cache_creation,
+            &mut in_think,
+            &mut tools,
+            &mut seen,
+            &mut repeats,
+        );
+
+        assert_eq!(
+            out.as_deref(),
+            Some("Free usage limit hit. Come back in 3 hours.")
+        );
+        assert!(
+            full.is_empty(),
+            "the quota error must not be persisted as reply text: {full}"
+        );
+    }
+
+    /// Non-quota errors still land in the transcript (visibility), repeat
+    /// frames are not duplicated, and the third identical frame trips the
+    /// breaker — a retry loop the CLI never exits on its own.
+    #[test]
+    fn commandcode_repeat_breaker_aborts_on_third_identical_error() {
+        let mut full = String::new();
+        let mut text_streamed = String::new();
+        let session_cell = Arc::new(Mutex::new(None));
+        let mut input = None;
+        let mut output = None;
+        let mut cache_read = None;
+        let mut cache_creation = None;
+        let mut in_think = false;
+        let mut tools = ToolTracker::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut repeats = ErrorRepeat::default();
+        let frame = serde_json::json!({
+            "type": "event",
+            "event": {
+                "type": "run_error",
+                "error": { "message": "model not found: foo" }
+            }
+        });
+
+        for _ in 0..2 {
+            let out = handle_commandcode_event(
+                None,
+                "test-cc-repeat",
+                &frame,
+                &mut full,
+                &mut text_streamed,
+                &session_cell,
+                &mut input,
+                &mut output,
+                &mut cache_read,
+                &mut cache_creation,
+                &mut in_think,
+                &mut tools,
+                &mut seen,
+                &mut repeats,
+            );
+            assert!(out.is_none(), "the first repeats must not abort");
+        }
+        assert_eq!(
+            full.matches("model not found: foo").count(),
+            1,
+            "duplicate error frames must not be appended N times: {full}"
+        );
+
+        let out = handle_commandcode_event(
+            None,
+            "test-cc-repeat",
+            &frame,
+            &mut full,
+            &mut text_streamed,
+            &session_cell,
+            &mut input,
+            &mut output,
+            &mut cache_read,
+            &mut cache_creation,
+            &mut in_think,
+            &mut tools,
+            &mut seen,
+            &mut repeats,
+        );
+        assert_eq!(out.as_deref(), Some("model not found: foo"));
+    }
+
+    /// OpenCode's error frames were ignored entirely — a free-model refusal
+    /// sat invisible while the CLI (which retries forever) never exited. A
+    /// spent allowance aborts; any other error is surfaced in the transcript
+    /// with the thinking block closed first.
+    #[test]
+    fn opencode_error_frames_abort_on_usage_limit_and_surface_otherwise() {
+        let session_cell = Arc::new(Mutex::new(None));
+        let mut input = None;
+        let mut output = None;
+        let mut cache_read = None;
+        let mut cache_creation = None;
+        let mut cost = None;
+        let mut last_text = String::new();
+        let mut last_reasoning = String::new();
+        let mut tools = ToolTracker::new();
+        let mut repeats = ErrorRepeat::default();
+
+        let mut full = String::new();
+        let mut in_think = false;
+        let out = handle_opencode_event(
+            None,
+            "test-oc-quota",
+            &serde_json::json!({
+                "type": "error",
+                "error": { "name": "APIError", "data": { "message": "free usage limit reached" } }
+            }),
+            &mut full,
+            &session_cell,
+            &mut input,
+            &mut output,
+            &mut cache_read,
+            &mut cache_creation,
+            &mut cost,
+            &mut last_text,
+            &mut last_reasoning,
+            &mut in_think,
+            &mut tools,
+            &mut repeats,
+        );
+        assert_eq!(out.as_deref(), Some("APIError: free usage limit reached"));
+
+        let mut full = String::from(" thinkingweighing options");
+        let mut in_think = true;
+        let out = handle_opencode_event(
+            None,
+            "test-oc-other",
+            &serde_json::json!({
+                "type": "error",
+                "error": { "name": "APIError", "data": { "message": "unknown model foo" } }
+            }),
+            &mut full,
+            &session_cell,
+            &mut input,
+            &mut output,
+            &mut cache_read,
+            &mut cache_creation,
+            &mut cost,
+            &mut last_text,
+            &mut last_reasoning,
+            &mut in_think,
+            &mut tools,
+            &mut repeats,
+        );
+        assert!(out.is_none());
+        assert!(!in_think, "the error must close the reasoning block");
+        assert!(full.contains("</think>APIError: unknown model foo"), "got: {full}");
     }
 }

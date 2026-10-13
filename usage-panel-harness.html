@@ -1,0 +1,18 @@
+<!doctype html>
+<!-- Dev-only harness (not part of the app build): the Usage & limits panel
+     with representative meter data — API provider with a rate-limit header
+     window, CommandCode GOAT caps + plan windows, Claude Code 5h/7d windows,
+     a free CLI with local usage only, OpenRouter credits. Serve `npx vite`
+     and open /usage-panel-harness.html — the floating switcher toggles
+     normal vs pressure (warn/crit) and flips the theme. -->
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Usage &amp; limits panel harness</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/dev/usagePanelHarness.tsx"></script>
+  </body>
+</html>

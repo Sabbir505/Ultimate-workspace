@@ -11,7 +11,7 @@ The backend registers **425 commands** (`src-tauri/src/lib.rs` `invoke_handler`;
 
 ```ts
 type HarnessId = 'claude_code' | 'kimi_code' | 'opencode' | 'pi' | 'omp' | 'commandcode';
-type ChatProviderId = 'anthropic' | 'openai' | 'openrouter' | 'anthropic_compatible' | 'openai_compatible' | 'local_gguf';
+type ChatProviderId = 'anthropic' | 'openai' | 'openai_chat' | 'openai_responses' | 'openrouter' | 'anthropic_compatible' | 'openai_compatible' | 'local_gguf';
 type PaneState = 'idle' | 'working' | 'waiting' | 'diff_ready';
 type HarnessIdSource = 'output' | 'disk_probe' | 'disk_probe_ambiguous'; // how `sessions.harness_session_id` was recovered; mirrors `HarnessIdSource::as_str` in Rust
 type ChatAgent = 'builtin' | 'local' | `harness:${HarnessId}` | `acp:${string}`; // no single TS alias exists — these are the stored `chat_sessions.agent` values
@@ -311,6 +311,7 @@ Commands:
 - `delete_chat_message(chatSessionId: string, messageId: number) -> ()` — deletes a single message from a chat session.
 - `update_chat_session_title(chatSessionId: string, title: string) -> ()`
 - `generate_chat_title(chatSessionId: string) -> string | null` — auto-generates a 3–6 word title from the conversation history via the LLM; returns `null` if generation fails (no API key configured, empty transcript, or API error).
+- `generate_chat_suggestion(chatSessionId: string) -> string | null` — **composer predictions**: a suggested next user message for the session, fired (fire-and-forget) by the renderer after a turn completes in the session the user is viewing. Default model = the session's own provider/model (auto sessions resolve through the router, like `/create`); the `composer.predictionsModel` setting (`"provider::model"`, the `chat.subagentModel` pick syntax) can point it at a harness CLI engine, an API provider, or `local_gguf`. Returns `null` — silently, never an error — when the feature is off (`composer.predictions === "false"`), no family can serve the call (no API key / no live local sidecar / harness CLI failure), the transcript has no assistant reply, or generation fails/comes back empty. The suggestion is ephemeral: never persisted to `chat_messages`, cleared by the renderer on send/cancel/error. See `chat/suggestion.rs` and `docs/architecture/COMPOSER_PREDICTIONS.md`.
 - `set_chat_session_starred(chatSessionId: string, starred: boolean) -> ()`
 - `set_chat_session_unread(chatSessionId: string, unread: boolean) -> ()`
 - `get_chat_messages(chatSessionId: string) -> ChatMessageRecord[]` (chronological by id)
@@ -534,7 +535,7 @@ Commands:
 - `fetch_model_file_sizes(modelId: string) -> ...` — pre-download size estimate.
 - `get_gpu_vram() -> ...` / `detect_gpu_power() -> ...` — GPU probing (NVML/DXGI) for fit checks.
 
-Providers: `anthropic`, `openai`, `openrouter`, `anthropic_compatible`, `openai_compatible`, `local_gguf`.
+Providers: `anthropic`, `openai`, `openai_chat` (explicit Chat Completions API kind), `openai_responses` (OpenAI Responses API `/v1/responses`), `openrouter`, `anthropic_compatible`, `openai_compatible`, `local_gguf`. The two API-style kinds require an explicit base URL — they have no default endpoint.
 
 ## Mobile Relay (desktop ↔ mobile companion app WebSocket bridge)
 

@@ -330,6 +330,19 @@ export const ChatComposer = memo(function ChatComposer({
   const editQueuedMessage = useChatStore((s) => s.editQueuedMessage);
   const moveQueuedMessage = useChatStore((s) => s.moveQueuedMessage);
   const setCwdOverride = useChatStore((s) => s.setCwdOverride);
+  // Active goal (/goal · /loop — loopsSlice): while THIS composer's session
+  // pursues a goal, a fused notch rides on the card's top seam announcing it
+  // (goal text + a self-ticking timer). The whole LoopState is selected — its
+  // reference is stable while the entry is unchanged, so unrelated store
+  // writes don't re-render the composer. Read per-session (loopState is keyed
+  // by chat session id) so a split pane shows only its own session's goal,
+  // and switching sessions away does not hide it — `active` only flips on
+  // complete/blocked/stop, while switching merely pauses advancement, which
+  // must keep the notch up.
+  const activeLoop = useChatStore((s) => {
+    const loop = effectiveSessionId ? s.loopState[effectiveSessionId] : undefined;
+    return loop?.active ? loop : undefined;
+  });
 
   // Cloud window resolution for the meter: the active model's PINNED window
   // is AUTHORITATIVE (the user's explicit choice — it may RAISE a model
@@ -1713,6 +1726,39 @@ export const ChatComposer = memo(function ChatComposer({
           pane's composer card. The pet lives in one pane at a time and
           randomly teleports between them (petHome = pane id or "main"). */}
       <PetStrip myHome={petHome ?? "main"} />
+      {/* Active goal notch (see activeLoop): a fused tab on the card's top
+          seam announcing the loop this session is pursuing — glyph +
+          "Pursuing goal" + the goal text (one ellipsized line) + how long it
+          has been running. In flow above the card, so its height rides in
+          composerDockHeight and the transcript re-pins above it. */}
+      {activeLoop && (
+        <div className="composer-goal-notch" title={activeLoop.goal}>
+          {/* Same concentric-circle goal glyph the GitToolsSidebar's goal card
+              uses — one glyph for /goal everywhere. */}
+          <svg
+            className="composer-goal-icon"
+            width={15}
+            height={15}
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={1.7}
+            aria-hidden="true"
+          >
+            <circle cx="12" cy="12" r="9" />
+            <circle cx="12" cy="12" r="4.5" />
+            <circle cx="12" cy="12" r="1" fill="currentColor" stroke="none" />
+          </svg>
+          {/* One shine for both lines: the wrapper is the shining box, so the
+              live band starts at the title and ends with the goal text (see
+              .composer-goal-shine). */}
+          <span className="composer-goal-shine">
+            <span className="composer-goal-label">Pursuing goal</span>
+            <span className="composer-goal-text">{activeLoop.goal}</span>
+          </span>
+          <GoalNotchTimer startedAt={activeLoop.startedAt} />
+        </div>
+      )}
       <div
         className={`chat-composer-card${modeGlowClass}${filesDragOver ? " is-drop-target" : ""}`}
         onDragOver={composerDragOver}

@@ -254,6 +254,104 @@
     transition: none;
   }
 }
+
+/* Active goal notch (/goal · /loop) — a fused tab on the card's top seam
+   while the session pursues a goal: glyph + "Pursuing goal" + goal text.
+   Same liquid glass as the card (square bottom, no bottom border). The -1px
+   bottom seal slides the card up so its top border tucks under this notch;
+   the 18px side margins leave that border visible on both sides, so the
+   seam reads continuous across the card's rounded corners and the notch's
+   walls. In flow (not absolute), so composerDockHeight measures it and the
+   transcript re-pins above it. */
+.composer-goal-notch {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  height: 31px;
+  padding: 0 14px;
+  margin: 0 18px -1px;
+  position: relative;
+  z-index: 1;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-bottom: none;
+  border-radius: 12px 12px 0 0;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 45%, transparent),
+    color-mix(in srgb, var(--surface-glass) 25%, transparent)
+  );
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  box-shadow: var(--glass-rim);
+  font-size: 13px;
+  white-space: nowrap;
+}
+/* Light theme: the same bump the composer card gets, so both stay matched. */
+:root[data-theme="light"] .composer-goal-notch {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 55%, transparent),
+    color-mix(in srgb, var(--surface-glass) 38%, transparent)
+  );
+}
+.composer-goal-icon {
+  flex: none;
+  color: var(--text-dim);
+}
+/* ONE light for the whole row: this wrapper is the live "title shine" chat.css
+   paints on the thinking label and running tool rows (chat-title-shine),
+   clipped to its text — label and goal text share a single 300% band, so the
+   sweep starts at the title and ends with the text instead of two per-element
+   glints. The notch only exists while the loop runs, so it is always live.
+   It paints as a child of the notch, i.e. over the glass. Baseline (no
+   animation / reduced motion) parks the band past the text, leaving flat
+   --text-dim text. */
+.composer-goal-shine {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex: 1 1 auto;
+  min-width: 0;
+  background-image: linear-gradient(
+    90deg,
+    var(--text-dim) 0%,
+    var(--text-dim) 44%,
+    var(--text) 50%,
+    var(--text-dim) 56%,
+    var(--text-dim) 100%
+  );
+  background-size: 300% 100%;
+  background-repeat: no-repeat;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  animation: chat-title-shine 1.6s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .composer-goal-shine {
+    animation: none;
+  }
+}
+.composer-goal-label {
+  flex: none;
+  font-weight: 600;
+}
+.composer-goal-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.composer-goal-timer {
+  /* Fixed min width + tabular digits: "9s" → "10s" → "1m 05s" never nudges
+     the goal text (same treatment as the sidebar goal card's timer). */
+  flex: none;
+  min-width: 42px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+}
 .chat-composer-textarea,
 .chat-composer-textarea:focus {
   border: none;

@@ -515,3 +515,23 @@ export function ThinkingToggle({
     </button>
   );
 }
+
+/** Wall-clock timer for the active-goal notch ("4m 12s"). Ticks on its OWN
+ *  1s interval so the memoized composer never re-renders just to move the
+ *  clock (same format, fixed width + tabular digits as the sidebar goal
+ *  card's timer — digit-count changes must not nudge the goal text). */
+export function GoalNotchTimer({ startedAt }: { startedAt: number }) {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const iv = window.setInterval(() => setTick((n) => n + 1), 1000);
+    return () => window.clearInterval(iv);
+  }, []);
+  const elapsed = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+  return (
+    <span className="composer-goal-timer" title="Time on this goal">
+      {elapsed < 60
+        ? `${elapsed}s`
+        : `${Math.floor(elapsed / 60)}m ${String(elapsed % 60).padStart(2, "0")}s`}
+    </span>
+  );
+}

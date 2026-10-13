@@ -7,10 +7,13 @@ vi.mock("../lib/ipc", () => ({
   safeListen: vi.fn().mockResolvedValue(() => {}),
 }));
 
-import { useCostRollups } from "../hooks/useCostRollups";
+import { useCostRollups, __resetCostRollupCacheForTests } from "../hooks/useCostRollups";
 
 describe("useCostRollups", () => {
   beforeEach(() => {
+    // The module cache outlives mounts on purpose (that's the reopen-without-
+    // spinner fix) — empty it so each test sees genuine first-open semantics.
+    __resetCostRollupCacheForTests();
     getCostRollupsMock.mockReset();
     getCostRollupsMock.mockResolvedValue(null);
   });

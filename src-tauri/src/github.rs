@@ -6,9 +6,12 @@
 //! requests `repo` scope at authorize time, which covers pulls + reviews +
 //! check reads + issues — then a Personal Access Token from the OS keychain
 //! (`Settings → Pull Requests` field) for users who don't want the OAuth
-//! dance. The hosted GitHub MCP server is intentionally NOT used here: the
-//! panel needs typed, paginated REST shapes (files with patches, review
-//! submission), not MCP tool-call round-trips.
+//! dance. A stored PAT also backs up a connector token GitHub has stopped
+//! honoring (revoked app access): a rejected credential is retried once
+//! against it before the panel reports failure. The hosted GitHub MCP server
+//! is intentionally NOT used here: the panel needs typed, paginated REST
+//! shapes (files with patches, review submission), not MCP tool-call
+//! round-trips.
 //!
 //! All commands resolve the repo identity from the project's `origin` remote
 //! (SSH and HTTPS forms both parse). A project without a GitHub remote — or
@@ -68,13 +71,13 @@ fn split_owner_repo(path: &str) -> Option<(String, String)> {
     Some((owner.to_string(), repo.to_string()))
 }
 
-/// Resolve (owner, repo, token) for a project, or a friendly error naming
+/// Resolve (owner, repo, auth) for a project, or a friendly error naming
 /// which prerequisite is missing (drives the panel's empty states).
 async fn resolve_repo(
     app: &AppHandle,
     db: &DbState,
     project_id: &str,
-) -> Result<(String, String, String), String> {
+) -> Result<(String, String, GitHubAuth), String> {
     let project_path = {
         let conn = db.0.lock();
         db::get_project(&conn, project_id)
@@ -92,40 +95,65 @@ async fn resolve_repo(
     .ok_or_else(|| "this project has no git remote".to_string())?;
     let (owner, repo) = parse_github_remote(&remote)
         .ok_or_else(|| format!("remote `{remote}` is not a GitHub repository"))?;
-    let token = resolve_github_token(app, db, project_id).await?;
-    Ok((owner, repo, token))
+    let auth = resolve_github_auth(app, db).await?;
+    Ok((owner, repo, auth))
 }
 
-/// GitHub token resolution (§4.4.6 PAT fallback): OAuth connector first, then
+/// Resolved GitHub credentials. `token` is what requests authenticate with —
+/// the connector's OAuth token when one resolves, else the PAT. `pat` carries
+/// the stored Personal Access Token when it is DIFFERENT from `token`, i.e.
+/// when it exists as a genuine fallback for `send_authed` to retry with.
+struct GitHubAuth {
+    token: String,
+    pat: Option<String>,
+    /// True when `token` came from the connector — only those can be
+    /// re-minted on a 401 (`reauth_after_rejection`).
+    from_connector: bool,
+    app: AppHandle,
+}
+
+/// GitHub auth resolution (§4.4.6 PAT fallback): OAuth connector first, then
 /// a Personal Access Token stored in the OS keychain (Settings → Pull
 /// Requests field). Covers EVERY panel command — issues, reviews, checks,
 /// PR CRUD — because it sits in the shared `resolve_repo` choke point.
-async fn resolve_github_token(
-    app: &AppHandle,
-    db: &DbState,
-    project_id: &str,
-) -> Result<String, String> {
-    if let Ok(token) = crate::connectors::oauth::ensure_valid_access_token(app, "github").await {
-        if !token.is_empty() {
-            return Ok(token);
-        }
+///
+/// The PAT is still read when the connector token wins, and kept as a
+/// fallback: GitHub returning 401 for a connector token (the user revoked
+/// the OAuth app on github.com, or the grant was invalidated server-side)
+/// is indistinguishable from "expired" until a request fails, and the panel
+/// used to be wedged on "reconnect the connector" forever even with a
+/// working PAT sitting in Settings → Pull Requests.
+async fn resolve_github_auth(app: &AppHandle, db: &DbState) -> Result<GitHubAuth, String> {
+    let connector_token = crate::connectors::oauth::ensure_valid_access_token(app, "github")
+        .await
+        .ok()
+        .filter(|t| !t.is_empty());
+    let pat = load_pat(db).await;
+    if let Some(token) = connector_token {
+        // A PAT equal to the connector token is not a fallback.
+        let pat = pat.filter(|p| *p != token);
+        return Ok(GitHubAuth { token, pat, from_connector: true, app: app.clone() });
     }
-    // OAuth missing/expired/unusable → PAT from the keychain. Read under a
-    // short lock (spawn_blocking: keyring calls can block on IPC).
+    // OAuth missing/expired/unusable → PAT from the keychain.
+    if let Some(pat) = pat {
+        return Ok(GitHubAuth { token: pat, pat: None, from_connector: false, app: app.clone() });
+    }
+    Err("GitHub is not connected — connect the connector in Settings → Connectors,          or paste a Personal Access Token in Settings → Pull Requests"
+        .to_string())
+}
+
+/// Read the PAT from the OS keychain (spawn_blocking: keyring calls can
+/// block on IPC).
+async fn load_pat(db: &DbState) -> Option<String> {
     let db2 = std::sync::Arc::clone(&db.0);
-    let project = project_id.to_string();
-    let pat = tauri::async_runtime::spawn_blocking(move || {
+    tauri::async_runtime::spawn_blocking(move || {
         let conn = db2.lock();
         crate::secrets::platform_load(&conn, PAT_NAMESPACE, PAT_KEY)
     })
     .await
-    .map_err(|e| format!("keychain read failed: {e}"))?
-    .filter(|t| !t.trim().is_empty());
-    if let Some(pat) = pat {
-        return Ok(pat);
-    }
-    Err("GitHub is not connected — connect the connector in Settings → Connectors,          or paste a Personal Access Token in Settings → Pull Requests"
-        .to_string())
+    .ok()
+    .flatten()
+    .filter(|t| !t.trim().is_empty())
 }
 
 /// Keychain namespace/key for the GitHub PAT (HF-token pattern).
@@ -219,18 +247,115 @@ fn git_config_proxy() -> Option<String> {
         .clone()
 }
 
+/// Send one GitHub API request authenticated as the resolved credentials.
+///
+/// A 401 — the one status that unambiguously means "this credential is dead"
+/// (a 403 may be a rate limit or a SAML gate, both retryable without
+/// touching auth) — is handled in two steps: a connector token is re-minted
+/// first (the stored refresh token can produce a fresh one, and GitHub's
+/// token responses carry no `expires_in`, so a revoked-but-never-expired
+/// access token would otherwise be served forever), then the stored PAT is
+/// tried as a last resort. The retry is safe for writes too — GitHub
+/// rejects a 401 before executing anything.
+async fn send_authed(
+    auth: &GitHubAuth,
+    action: &str,
+    build: impl Fn(&str) -> Result<reqwest::RequestBuilder, String>,
+) -> Result<reqwest::Response, String> {
+    let resp = build(&auth.token)?
+        .send()
+        .await
+        .map_err(|e| format!("GitHub {action} failed: {e}"))?;
+    if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+        if auth.from_connector {
+            if let Ok(fresh) = crate::connectors::oauth::reauth_after_rejection(
+                &auth.app,
+                "github",
+                &auth.token,
+            )
+            .await
+            {
+                let retried = build(&fresh)?
+                    .send()
+                    .await
+                    .map_err(|e| format!("GitHub {action} failed: {e}"))?;
+                // A fresh token failing again means something other than a
+                // stale grant — fall through to the PAT before giving up.
+                if retried.status() != reqwest::StatusCode::UNAUTHORIZED {
+                    return Ok(retried);
+                }
+            }
+        }
+        if let Some(pat) = auth.pat.as_deref() {
+            let retried = build(pat)?
+                .send()
+                .await
+                .map_err(|e| format!("GitHub {action} failed: {e}"))?;
+            return Ok(retried);
+        }
+    }
+    Ok(resp)
+}
+
+/// Header value as a trimmed string, when present and ASCII.
+fn header_str(resp: &reqwest::Response, name: &str) -> Option<String> {
+    resp.headers()
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 /// Map a GitHub error response to a friendly string. 422s on create carry
 /// structured `errors[]` we translate (existing PR, missing head ref).
+///
+/// 401/403 are NOT one failure, and telling every one of them "reconnect the
+/// GitHub connector" sends users to fix the wrong thing: GitHub answers 403
+/// for an exhausted rate limit (the token is fine — wait), for org SAML
+/// enforcement (the token needs an SSO authorization click), and for a
+/// fine-grained PAT that can't see the repo (the grant is too narrow). Only
+/// the leftover cases are actually a credential problem, so the rate-limit
+/// headers and the response body pick the advice.
 async fn gh_error(resp: reqwest::Response, action: &str) -> String {
-    let status = resp.status();
+    let status = resp.status().as_u16();
+    let remaining = header_str(&resp, "x-ratelimit-remaining");
+    // Ceil to minutes until the quota resets; None when the header is absent
+    // or already in the past.
+    let reset_minutes = header_str(&resp, "x-ratelimit-reset")
+        .and_then(|s| s.parse::<i64>().ok())
+        .map(|reset| (reset - db::now_ts() + 59) / 60)
+        .filter(|m| *m > 0);
+    let scopes = header_str(&resp, "x-oauth-scopes");
     let body = resp.text().await.unwrap_or_default();
-    let parsed: Option<Value> = serde_json::from_str(&body).ok();
+    gh_error_message(
+        status,
+        remaining.as_deref(),
+        reset_minutes,
+        scopes.as_deref(),
+        &body,
+        action,
+    )
+}
+
+/// The status/headers/body → advice translation, pure so every branch is
+/// unit-testable without a network.
+fn gh_error_message(
+    status: u16,
+    ratelimit_remaining: Option<&str>,
+    ratelimit_reset_minutes: Option<i64>,
+    oauth_scopes: Option<&str>,
+    body: &str,
+    action: &str,
+) -> String {
+    let parsed: Option<Value> = serde_json::from_str(body).ok();
     let message = parsed
         .as_ref()
         .and_then(|v| v.get("message"))
         .and_then(|m| m.as_str())
         .unwrap_or("");
-    if status.as_u16() == 422 {
+    let lower = message.to_lowercase();
+
+    if status == 422 {
         let errors = parsed
             .as_ref()
             .and_then(|v| v.get("errors"))
@@ -253,13 +378,51 @@ async fn gh_error(resp: reqwest::Response, action: &str) -> String {
         }
         return format!("GitHub rejected the {action}: {message}");
     }
-    if status.as_u16() == 404 {
+    if status == 404 {
         return format!("Not found — is the branch pushed to GitHub? ({action})");
     }
-    if status.as_u16() == 401 || status.as_u16() == 403 {
-        return "GitHub token rejected or missing scope — reconnect the GitHub connector".to_string();
+    if status == 401 || status == 403 {
+        // Rate limit: `x-ratelimit-remaining: 0`, or a body that says so
+        // (secondary limits don't always carry the header).
+        if ratelimit_remaining == Some("0") || lower.contains("rate limit") {
+            return match ratelimit_reset_minutes {
+                Some(m) => format!(
+                    "GitHub API rate limit reached — the {action} works again in about {m} minutes. This is GitHub's quota, not the token: nothing to reconnect."
+                ),
+                None => format!(
+                    "GitHub API rate limit reached — the {action} will work once the quota resets (usually within the hour). This is GitHub's quota, not the token: nothing to reconnect."
+                ),
+            };
+        }
+        // Org SAML enforcement: the token is valid, the org just hasn't
+        // authorized this OAuth app for SSO.
+        if lower.contains("saml") {
+            return format!(
+                "GitHub requires SSO authorization for this token ({action}) — open the repository on github.com, click Authorize next to the OAuth app (GitHub → Settings → Applications → Authorized OAuth Apps), then retry."
+            );
+        }
+        // A fine-grained PAT whose grant doesn't reach this repo.
+        if lower.contains("personal access token") || lower.contains("resource not accessible") {
+            return format!(
+                "This Personal Access Token cannot access the repository ({action}) — a fine-grained PAT needs Pull requests: Read and write plus Contents: Read granted for it, or replace it in Settings → Pull Requests."
+            );
+        }
+        // What's left on 401/403 is a credential problem. Name both remedies
+        // — the connector token and the PAT are independent.
+        let said = if message.is_empty() {
+            String::new()
+        } else {
+            format!(" GitHub said: {message}")
+        };
+        return format!(
+            "GitHub rejected the token ({status}) — reconnect the GitHub connector in Settings → Connectors, or update the Personal Access Token in Settings → Pull Requests.{said}"
+        );
     }
-    format!("GitHub {action} failed ({status}): {message}")
+    let scopes_hint = match oauth_scopes {
+        Some(s) => format!(" (token scopes: {s})"),
+        None => String::new(),
+    };
+    format!("GitHub {action} failed ({status}): {message}{scopes_hint}")
 }
 
 fn map_pr_summary(v: &Value) -> PullRequestSummary {
@@ -271,6 +434,7 @@ fn map_pr_summary(v: &Value) -> PullRequestSummary {
         head_branch: v["head"]["ref"].as_str().unwrap_or("").to_string(),
         base_branch: v["base"]["ref"].as_str().unwrap_or("").to_string(),
         draft: v["draft"].as_bool().unwrap_or(false),
+        merged: v["merged_at"].as_str().is_some(),
         state: v["state"].as_str().unwrap_or("open").to_string(),
         html_url: v["html_url"].as_str().unwrap_or("").to_string(),
         created_at: v["created_at"].as_str().unwrap_or("").to_string(),
@@ -286,14 +450,14 @@ pub async fn github_list_prs(
     db: State<'_, DbState>,
     app: AppHandle,
 ) -> CmdResult<Vec<PullRequestSummary>> {
-    let (owner, repo, token) = resolve_repo(&app, &db, &project_id).await?;
+    let (owner, repo, auth) = resolve_repo(&app, &db, &project_id).await?;
     let state = state.as_deref().unwrap_or("open");
-    let resp = client(&token)?
-        .get(format!("{API}/repos/{owner}/{repo}/pulls"))
-        .query(&[("state", state), ("per_page", "50"), ("sort", "updated"), ("direction", "desc")])
-        .send()
-        .await
-        .map_err(|e| format!("GitHub list PRs failed: {e}"))?;
+    let resp = send_authed(&auth, "list PRs", |t| {
+        Ok(client(t)?
+            .get(format!("{API}/repos/{owner}/{repo}/pulls"))
+            .query(&[("state", state), ("per_page", "50"), ("sort", "updated"), ("direction", "desc")]))
+    })
+    .await?;
     if !resp.status().is_success() {
         return Err(gh_error(resp, "list").await);
     }
@@ -316,19 +480,19 @@ pub async fn github_create_pr(
     if title.trim().is_empty() {
         return Err("title is required".to_string());
     }
-    let (owner, repo, token) = resolve_repo(&app, &db, &project_id).await?;
-    let resp = client(&token)?
-        .post(format!("{API}/repos/{owner}/{repo}/pulls"))
-        .json(&json!({
-            "title": title,
-            "body": body,
-            "head": head,
-            "base": base,
-            "draft": draft,
-        }))
-        .send()
-        .await
-        .map_err(|e| format!("GitHub create PR failed: {e}"))?;
+    let (owner, repo, auth) = resolve_repo(&app, &db, &project_id).await?;
+    let resp = send_authed(&auth, "create PR", |t| {
+        Ok(client(t)?
+            .post(format!("{API}/repos/{owner}/{repo}/pulls"))
+            .json(&json!({
+                "title": title,
+                "body": body,
+                "head": head,
+                "base": base,
+                "draft": draft,
+            })))
+    })
+    .await?;
     if !resp.status().is_success() {
         return Err(gh_error(resp, "create").await);
     }
@@ -344,12 +508,11 @@ pub async fn github_get_pr(
     db: State<'_, DbState>,
     app: AppHandle,
 ) -> CmdResult<PullRequestDetail> {
-    let (owner, repo, token) = resolve_repo(&app, &db, &project_id).await?;
-    let resp = client(&token)?
-        .get(format!("{API}/repos/{owner}/{repo}/pulls/{number}"))
-        .send()
-        .await
-        .map_err(|e| format!("GitHub get PR failed: {e}"))?;
+    let (owner, repo, auth) = resolve_repo(&app, &db, &project_id).await?;
+    let resp = send_authed(&auth, "get PR", |t| {
+        Ok(client(t)?.get(format!("{API}/repos/{owner}/{repo}/pulls/{number}")))
+    })
+    .await?;
     if !resp.status().is_success() {
         return Err(gh_error(resp, "get").await);
     }
@@ -374,17 +537,16 @@ pub async fn github_pr_files(
     db: State<'_, DbState>,
     app: AppHandle,
 ) -> CmdResult<Vec<PullRequestFile>> {
-    let (owner, repo, token) = resolve_repo(&app, &db, &project_id).await?;
-    let http = client(&token)?;
+    let (owner, repo, auth) = resolve_repo(&app, &db, &project_id).await?;
     let mut out: Vec<PullRequestFile> = Vec::new();
     let mut page = 1u32;
     loop {
-        let resp = http
-            .get(format!("{API}/repos/{owner}/{repo}/pulls/{number}/files"))
-            .query(&[("per_page", PER_PAGE.to_string()), ("page", page.to_string())])
-            .send()
-            .await
-            .map_err(|e| format!("GitHub PR files failed: {e}"))?;
+        let resp = send_authed(&auth, "PR files", |t| {
+            Ok(client(t)?
+                .get(format!("{API}/repos/{owner}/{repo}/pulls/{number}/files"))
+                .query(&[("per_page", PER_PAGE.to_string()), ("page", page.to_string())]))
+        })
+        .await?;
         if !resp.status().is_success() {
             return Err(gh_error(resp, "files").await);
         }
@@ -427,13 +589,13 @@ pub async fn github_submit_review(
     if event != "APPROVE" && body.trim().is_empty() {
         return Err("a body is required for comment/request-changes reviews".to_string());
     }
-    let (owner, repo, token) = resolve_repo(&app, &db, &project_id).await?;
-    let resp = client(&token)?
-        .post(format!("{API}/repos/{owner}/{repo}/pulls/{number}/reviews"))
-        .json(&json!({ "event": event, "body": body }))
-        .send()
-        .await
-        .map_err(|e| format!("GitHub submit review failed: {e}"))?;
+    let (owner, repo, auth) = resolve_repo(&app, &db, &project_id).await?;
+    let resp = send_authed(&auth, "submit review", |t| {
+        Ok(client(t)?
+            .post(format!("{API}/repos/{owner}/{repo}/pulls/{number}/reviews"))
+            .json(&json!({ "event": event, "body": body })))
+    })
+    .await?;
     if !resp.status().is_success() {
         return Err(gh_error(resp, "review").await);
     }
@@ -450,15 +612,13 @@ pub async fn github_pr_checks(
     db: State<'_, DbState>,
     app: AppHandle,
 ) -> CmdResult<PullRequestChecks> {
-    let (owner, repo, token) = resolve_repo(&app, &db, &project_id).await?;
-    let http = client(&token)?;
+    let (owner, repo, auth) = resolve_repo(&app, &db, &project_id).await?;
 
     // Head SHA for the PR.
-    let resp = http
-        .get(format!("{API}/repos/{owner}/{repo}/pulls/{number}"))
-        .send()
-        .await
-        .map_err(|e| format!("GitHub get PR failed: {e}"))?;
+    let resp = send_authed(&auth, "get PR", |t| {
+        Ok(client(t)?.get(format!("{API}/repos/{owner}/{repo}/pulls/{number}")))
+    })
+    .await?;
     if !resp.status().is_success() {
         return Err(gh_error(resp, "get").await);
     }
@@ -469,12 +629,12 @@ pub async fn github_pr_checks(
     }
 
     // Check runs (Checks API). Any run present → rollup from conclusions.
-    let resp = http
-        .get(format!("{API}/repos/{owner}/{repo}/commits/{sha}/check-runs"))
-        .query(&[("per_page", "100")])
-        .send()
-        .await
-        .map_err(|e| format!("GitHub check-runs failed: {e}"))?;
+    let resp = send_authed(&auth, "check-runs", |t| {
+        Ok(client(t)?
+            .get(format!("{API}/repos/{owner}/{repo}/commits/{sha}/check-runs"))
+            .query(&[("per_page", "100")]))
+    })
+    .await?;
     if resp.status().is_success() {
         let v: Value = resp.json().await.map_err(|e| e.to_string())?;
         let runs = v["check_runs"].as_array().cloned().unwrap_or_default();
@@ -509,11 +669,10 @@ pub async fn github_pr_checks(
     }
 
     // Legacy commit Status API fallback (older CI integrations).
-    let resp = http
-        .get(format!("{API}/repos/{owner}/{repo}/commits/{sha}/status"))
-        .send()
-        .await
-        .map_err(|e| format!("GitHub status failed: {e}"))?;
+    let resp = send_authed(&auth, "status", |t| {
+        Ok(client(t)?.get(format!("{API}/repos/{owner}/{repo}/commits/{sha}/status")))
+    })
+    .await?;
     if !resp.status().is_success() {
         return Ok(PullRequestChecks { state: "none".into(), total: 0, failing: 0, pending: 0 });
     }
@@ -633,6 +792,7 @@ Diff (truncated):
         system,
         &user,
         768,
+        None,
     )
     .await?
     else {
@@ -714,19 +874,19 @@ pub async fn github_list_issues(
     db: State<'_, DbState>,
     app: AppHandle,
 ) -> CmdResult<Vec<GitHubIssueSummary>> {
-    let (owner, repo, token) = resolve_repo(&app, &db, &project_id).await?;
+    let (owner, repo, auth) = resolve_repo(&app, &db, &project_id).await?;
     let state = state.as_deref().unwrap_or("open");
-    let resp = client(&token)?
-        .get(format!("{API}/repos/{owner}/{repo}/issues"))
-        .query(&[
-            ("state", state),
-            ("per_page", "50"),
-            ("sort", "updated"),
-            ("direction", "desc"),
-        ])
-        .send()
-        .await
-        .map_err(|e| format!("GitHub list issues failed: {e}"))?;
+    let resp = send_authed(&auth, "list issues", |t| {
+        Ok(client(t)?
+            .get(format!("{API}/repos/{owner}/{repo}/issues"))
+            .query(&[
+                ("state", state),
+                ("per_page", "50"),
+                ("sort", "updated"),
+                ("direction", "desc"),
+            ]))
+    })
+    .await?;
     if !resp.status().is_success() {
         return Err(gh_error(resp, "list").await);
     }
@@ -746,12 +906,11 @@ pub async fn github_get_issue(
     db: State<'_, DbState>,
     app: AppHandle,
 ) -> CmdResult<GitHubIssueDetail> {
-    let (owner, repo, token) = resolve_repo(&app, &db, &project_id).await?;
-    let resp = client(&token)?
-        .get(format!("{API}/repos/{owner}/{repo}/issues/{number}"))
-        .send()
-        .await
-        .map_err(|e| format!("GitHub get issue failed: {e}"))?;
+    let (owner, repo, auth) = resolve_repo(&app, &db, &project_id).await?;
+    let resp = send_authed(&auth, "get issue", |t| {
+        Ok(client(t)?.get(format!("{API}/repos/{owner}/{repo}/issues/{number}")))
+    })
+    .await?;
     if !resp.status().is_success() {
         return Err(gh_error(resp, "get").await);
     }
@@ -776,17 +935,15 @@ pub async fn github_create_issue(
     if title.trim().is_empty() {
         return Err("title is required".to_string());
     }
-    let (owner, repo, token) = resolve_repo(&app, &db, &project_id).await?;
+    let (owner, repo, auth) = resolve_repo(&app, &db, &project_id).await?;
     let mut payload = json!({ "title": title, "body": body });
     if let Some(labels) = labels.filter(|l| !l.is_empty()) {
         payload["labels"] = json!(labels);
     }
-    let resp = client(&token)?
-        .post(format!("{API}/repos/{owner}/{repo}/issues"))
-        .json(&payload)
-        .send()
-        .await
-        .map_err(|e| format!("GitHub create issue failed: {e}"))?;
+    let resp = send_authed(&auth, "create issue", |t| {
+        Ok(client(t)?.post(format!("{API}/repos/{owner}/{repo}/issues")).json(&payload))
+    })
+    .await?;
     if !resp.status().is_success() {
         return Err(gh_error(resp, "create").await);
     }
@@ -806,13 +963,13 @@ pub async fn github_add_issue_comment(
     if body.trim().is_empty() {
         return Err("comment body is required".to_string());
     }
-    let (owner, repo, token) = resolve_repo(&app, &db, &project_id).await?;
-    let resp = client(&token)?
-        .post(format!("{API}/repos/{owner}/{repo}/issues/{number}/comments"))
-        .json(&json!({ "body": body }))
-        .send()
-        .await
-        .map_err(|e| format!("GitHub add comment failed: {e}"))?;
+    let (owner, repo, auth) = resolve_repo(&app, &db, &project_id).await?;
+    let resp = send_authed(&auth, "add comment", |t| {
+        Ok(client(t)?
+            .post(format!("{API}/repos/{owner}/{repo}/issues/{number}/comments"))
+            .json(&json!({ "body": body })))
+    })
+    .await?;
     if !resp.status().is_success() {
         return Err(gh_error(resp, "comment").await);
     }
@@ -838,13 +995,13 @@ pub async fn github_set_issue_state(
         "open" | "closed" => state,
         other => return Err(format!("unknown issue state: {other}")),
     };
-    let (owner, repo, token) = resolve_repo(&app, &db, &project_id).await?;
-    let resp = client(&token)?
-        .patch(format!("{API}/repos/{owner}/{repo}/issues/{number}"))
-        .json(&json!({ "state": state }))
-        .send()
-        .await
-        .map_err(|e| format!("GitHub set issue state failed: {e}"))?;
+    let (owner, repo, auth) = resolve_repo(&app, &db, &project_id).await?;
+    let resp = send_authed(&auth, "set issue state", |t| {
+        Ok(client(t)?
+            .patch(format!("{API}/repos/{owner}/{repo}/issues/{number}"))
+            .json(&json!({ "state": state })))
+    })
+    .await?;
     if !resp.status().is_success() {
         return Err(gh_error(resp, "update").await);
     }
@@ -860,21 +1017,21 @@ pub async fn github_list_issue_comments(
     db: State<'_, DbState>,
     app: AppHandle,
 ) -> CmdResult<Vec<GitHubIssueComment>> {
-    let (owner, repo, token) = resolve_repo(&app, &db, &project_id).await?;
+    let (owner, repo, auth) = resolve_repo(&app, &db, &project_id).await?;
     // NEWEST first (audit M: issue-comments ordering): GitHub's default for
     // this endpoint is ascending, so page 1 was the OLDEST 50 — issues with
     // more than 50 comments never showed their recent ones. Reversed after
     // the fetch so callers keep rendering oldest-first.
-    let resp = client(&token)?
-        .get(format!("{API}/repos/{owner}/{repo}/issues/{number}/comments"))
-        .query(&[
-            ("per_page", "50"),
-            ("sort", "created"),
-            ("direction", "desc"),
-        ])
-        .send()
-        .await
-        .map_err(|e| format!("GitHub list comments failed: {e}"))?;
+    let resp = send_authed(&auth, "list comments", |t| {
+        Ok(client(t)?
+            .get(format!("{API}/repos/{owner}/{repo}/issues/{number}/comments"))
+            .query(&[
+                ("per_page", "50"),
+                ("sort", "created"),
+                ("direction", "desc"),
+            ]))
+    })
+    .await?;
     if !resp.status().is_success() {
         return Err(gh_error(resp, "comments").await);
     }
@@ -920,8 +1077,118 @@ async fn github_issues_live() {
 
 #[cfg(test)]
 mod tests {
-    use super::{map_issue_summary, parse_github_remote};
+    use super::{gh_error_message, map_issue_summary, parse_github_remote};
     use serde_json::json;
+
+    #[test]
+    fn http_403_rate_limit_is_not_a_token_problem() {
+        // x-ratelimit-remaining: 0 with a body that says nothing about auth.
+        let msg = gh_error_message(
+            403,
+            Some("0"),
+            Some(12),
+            None,
+            r#"{"message":"API rate limit exceeded for user ID 1."}"#,
+            "list",
+        );
+        assert!(msg.contains("rate limit"), "got: {msg}");
+        assert!(msg.contains("12 minutes"), "got: {msg}");
+        assert!(
+            !msg.contains("GitHub rejected the token"),
+            "must not blame the credential: {msg}"
+        );
+    }
+
+    #[test]
+    fn http_403_secondary_rate_limit_without_header() {
+        let msg = gh_error_message(
+            403,
+            None,
+            None,
+            None,
+            r#"{"message":"You have exceeded a secondary rate limit."}"#,
+            "list",
+        );
+        assert!(msg.contains("rate limit"), "got: {msg}");
+        assert!(
+            !msg.contains("GitHub rejected the token"),
+            "must not blame the credential: {msg}"
+        );
+    }
+
+    #[test]
+    fn http_403_saml_enforcement_names_the_sso_fix() {
+        let msg = gh_error_message(
+            403,
+            None,
+            None,
+            None,
+            r#"{"message":"Resource protected by organization SAML enforcement."}"#,
+            "list",
+        );
+        assert!(msg.contains("SSO"), "got: {msg}");
+        assert!(!msg.contains("Personal Access Token"), "got: {msg}");
+    }
+
+    #[test]
+    fn http_403_fine_grained_pat_without_repo_access() {
+        let msg = gh_error_message(
+            403,
+            None,
+            None,
+            None,
+            r#"{"message":"Resource not accessible by personal access token"}"#,
+            "create",
+        );
+        assert!(msg.contains("Personal Access Token"), "got: {msg}");
+        assert!(msg.contains("create"), "got: {msg}");
+        assert!(!msg.contains("reconnect"), "the PAT is the problem, not the connector: {msg}");
+    }
+
+    #[test]
+    fn http_401_names_both_remedies_and_the_api_message() {
+        let msg = gh_error_message(
+            401,
+            None,
+            None,
+            None,
+            r#"{"message":"Bad credentials"}"#,
+            "list",
+        );
+        assert!(msg.contains("Bad credentials"), "got: {msg}");
+        assert!(msg.contains("Connectors"), "got: {msg}");
+        assert!(msg.contains("Pull Requests"), "got: {msg}");
+    }
+
+    #[test]
+    fn http_401_without_a_body_still_advises() {
+        let msg = gh_error_message(401, None, None, None, "not json", "list");
+        assert!(!msg.contains("GitHub said:"), "no phantom body quote: {msg}");
+        assert!(msg.contains("Connectors"), "got: {msg}");
+    }
+
+    #[test]
+    fn other_statuses_report_the_message_and_scopes() {
+        let msg = gh_error_message(500, None, None, Some("repo,read:org"), r#"{"message":"boom"}"#, "list");
+        assert_eq!(msg, "GitHub list failed (500): boom (token scopes: repo,read:org)");
+        let no_scopes = gh_error_message(500, None, None, None, r#"{"message":"boom"}"#, "list");
+        assert_eq!(no_scopes, "GitHub list failed (500): boom");
+    }
+
+    #[test]
+    fn not_found_and_422_mappings_unchanged() {
+        let nf = gh_error_message(404, None, None, None, "", "list");
+        assert_eq!(nf, "Not found — is the branch pushed to GitHub? (list)");
+        let dup = gh_error_message(
+            422,
+            None,
+            None,
+            None,
+            r#"{"message":"Validation Failed","errors":[{"message":"A pull request already exists for owner:branch."}]}"#,
+            "create",
+        );
+        assert_eq!(dup, "A pull request for this branch already exists");
+    }
 
     #[test]
     fn issue_mapper_extracts_labels_and_skips_prs() {

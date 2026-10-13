@@ -1346,6 +1346,50 @@ pub async fn ensure_valid_access_token(
     }
 }
 
+/// Re-mint a connector token the VENDOR rejected even though our bookkeeping
+/// still considered it valid. `ensure_valid_access_token` only refreshes once
+/// the stored `expires_at` has passed, and GitHub's token response carries no
+/// `expires_in` at all (see the form-encoded fixture in the tests below) — so
+/// `expires_at` stays NULL, `current_access_token` reports the token as
+/// eternally fresh, and a revoked or server-side-invalidated access token is
+/// served forever: every API call answers 401 "Bad credentials" while the
+/// Settings card still shows the connector connected. This forces the
+/// refresh unconditionally.
+///
+/// When the refresh token is ALSO dead the grant is gone for good, so the
+/// stored tokens + credential row are deleted exactly like `Disconnect` does
+/// — the card then honestly shows "not connected" and one reconnect fixes
+/// what would otherwise be an endless 401 loop.
+pub async fn reauth_after_rejection(
+    app: &AppHandle,
+    connector_id: &str,
+    rejected_token: &str,
+) -> Result<String, String> {
+    let connector = connector_by_id(connector_id)
+        .ok_or_else(|| format!("unknown connector `{connector_id}`"))?;
+    match refresh_access_token(app, connector).await {
+        Ok(token) => Ok(token),
+        Err(e) => {
+            // Forget the dead grant — but only if it is still the one the
+            // API rejected. GitHub rotates its refresh token on every
+            // refresh, so when two commands 401 at once the losing racer
+            // must not delete the token the winner just stored.
+            let db = std::sync::Arc::clone(&app.state::<crate::DbState>().0);
+            let conn = db.lock();
+            let stored = secrets::get_connector_token(&conn, connector.id, "access_token");
+            if stored.as_deref() == Some(rejected_token) {
+                let _ = secrets::delete_connector_tokens(&conn, connector.id);
+                if let Err(e) = db::delete_connector_credential_row(&conn, connector.id) {
+                    crate::relay_eprintln!(
+                        "warning: credential row delete for {connector_id} after rejection failed: {e}"
+                    );
+                }
+            }
+            Err(format!("{e} — reconnect the connector"))
+        }
+    }
+}
+
 /// Headless variant for the `relay-automation` binary: same semantics as
 /// `ensure_valid_access_token` but takes the raw DB handle so no Tauri
 /// runtime is required. Used by automation failure emails.

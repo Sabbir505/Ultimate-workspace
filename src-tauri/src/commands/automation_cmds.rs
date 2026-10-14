@@ -63,6 +63,17 @@ pub(crate) fn validate_input(
     if let Some(t) = input.trigger_type.as_deref() {
         input.trigger_type = Some(automation_triggers::TriggerSpec::normalize_type(Some(t)));
     }
+    // Chat placement policy: "per_run" (a fresh chat session per run — the
+    // create default) | "shared" (one run-log chat for every run). Normalized
+    // here so the form and the chat tool store the same vocabulary.
+    if let Some(m) = input.chat_mode.as_deref() {
+        input.chat_mode = Some(crate::db::normalize_chat_mode(m).ok_or_else(|| {
+            format!(
+                "chat_mode must be \"per_run\" (a new chat per run) or \"shared\" \
+                 (one chat for every run), got \"{m}\""
+            )
+        })?);
+    }
     automation_triggers::settle_webhook_secret(input, existing);
     let trigger_type = input
         .trigger_type

@@ -695,6 +695,7 @@ mod tests {
             origin: None,
             trigger_type,
             trigger_config,
+            chat_mode: None,
         }
     }
 
@@ -854,6 +855,7 @@ mod tests {
             origin: "user".into(),
             trigger_type: "webhook".into(),
             trigger_config: created.trigger_config.clone().unwrap(),
+            chat_mode: "per_run".into(),
             last_trigger_state: None,
             last_event_run_at: None,
         });
@@ -905,6 +907,7 @@ mod tests {
             origin: "user".into(),
             trigger_type: "webhook".into(),
             trigger_config: config,
+            chat_mode: "per_run".into(),
             last_trigger_state: None,
             last_event_run_at: None,
         }

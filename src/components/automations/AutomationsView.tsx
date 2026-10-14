@@ -52,6 +52,7 @@ import {
 } from "../../lib/ipc";
 import { useAutomationsStore } from "../../state/automations";
 import { ToolbarHeader } from "../common/ToolbarHeader";
+import { GlassSelect } from "../common/GlassSelect";
 import { useSubagentStore } from "../../state/subagents";
 import { useProjectsStore } from "../../state/projects";
 import { useSettingsStore } from "../../state/settings";
@@ -64,11 +65,15 @@ import {
   AUTOMATION_STATE_META,
   automationState,
   buildAutomationRunPrompt,
+  CHAT_MODE_OPTIONS,
+  chatModeLabel,
   friendlyRunError,
   harnessNeedsInstall,
+  isChatMode,
   isFailureStatus,
   STOPPED_STATUS,
   type AutomationStateKey,
+  type ChatMode,
 } from "./shared";
 
 /** Packaged automation templates (§4.2.7): compact chips that prefill the
@@ -178,11 +183,21 @@ function triggerSummary(a: Automation): string {
   }
 }
 
-function agentGroupLabel(group: string): string {
-  if (group === "harness") return "CLI Agents";
-  if (group === "api") return "Cloud APIs";
-  return "Local";
-}
+/** Flat engine options for the Agent picker, grouped by family in the
+ *  original order. Subagents are prepended in the component (they come from
+ *  the store). GlassSelect has no optgroups, so each row carries its group as
+ *  a hint — the way the language picker carries its grouping. */
+const ENGINE_SELECT_OPTIONS: { value: string; label: string; hint: string }[] = [
+  ...AGENT_OPTIONS.filter((a) => a.group === "harness").map((a) => ({ value: a.id, label: a.label, hint: "CLI Agent" })),
+  ...AGENT_OPTIONS.filter((a) => a.group === "api").map((a) => ({ value: a.id, label: a.label, hint: "Cloud API" })),
+  ...AGENT_OPTIONS.filter((a) => a.group === "local").map((a) => ({ value: a.id, label: a.label, hint: "Local model" })),
+];
+
+const FREQ_OPTIONS: { value: Freq; label: string }[] = [
+  { value: "daily", label: "Every day" },
+  { value: "weekdays", label: "Weekdays" },
+  { value: "weekly", label: "Weekly" },
+];
 
 const WEEKDAYS: { dow: string; label: string }[] = [
   { dow: "1", label: "Monday" },
@@ -982,6 +997,7 @@ function AutomationDetail({
             : (AGENT_OPTIONS.find((a) => a.id === automation.harness)?.label ?? automation.harness)}</span>
           {automation.model && <><span>·</span><span>{automation.model}</span></>}
           {automation.cwd && <><span>·</span><span className="automation-detail-cwd" title={automation.cwd}>{automation.cwd.split(/[/\\]/).pop()}</span></>}
+          <><span>·</span><span>{chatModeLabel(automation.chatMode)}</span></>
         </div>
       </div>
 
@@ -1029,7 +1045,7 @@ function AutomationDetail({
           <button
             onClick={() => void handleOpenRunLog(automation.chatSessionId!)}
             className="automations-btn ghost"
-            title="Open run log"
+            title={automation.chatMode === "shared" ? "Open run log" : "Open latest run's chat"}
           >
             <ExternalLink size={14} strokeWidth={1.8} />
           </button>
@@ -1200,6 +1216,14 @@ function AutomationForm({
   }, [subagentLoaded, loadSubagent]);
   const [model, setModel] = useState(automation?.model ?? "");
   const [cwd, setCwd] = useState(automation?.cwd ?? "");
+  // Chat placement policy — where each run's transcript is logged. New
+  // automations default to a fresh chat per run (the backend's default too);
+  // an unknown stored value falls back to it rather than silently saving a
+  // policy the runner would misread.
+  const storedChatMode = automation?.chatMode ?? "per_run";
+  const [chatMode, setChatMode] = useState<ChatMode>(
+    isChatMode(storedChatMode) ? storedChatMode : "per_run",
+  );
   // Trigger engine + its per-type fields, loaded from the stored row on edit.
   // Switching type keeps every other field's value intact.
   const storedTriggerType = automation?.triggerType ?? "cron";
@@ -1433,6 +1457,7 @@ function AutomationForm({
       enabled: automation?.enabled ?? true,
       triggerType,
       triggerConfig: triggerConfigJson,
+      chatMode,
     };
     setSaving(true);
     setError(null);
@@ -1497,35 +1522,19 @@ function AutomationForm({
         <div className="automation-form-row">
           <div className="automation-form-field">
             <label>Agent</label>
-            <select
+            <GlassSelect<string>
+              ariaLabel="Agent"
               value={agentId}
-              onChange={(e) => { setAgentId(e.target.value); setModel(""); }}
-            >
-              {subagentAgents.length > 0 && (
-                <optgroup label="Subagent">
-                  {subagentAgents.map((c) => (
-                    <option key={c.id} value={`agent:${c.id}`}>
-                      {c.name}{c.builtin ? "" : " (subagent)"}
-                    </option>
-                  ))}
-                </optgroup>
-              )}
-              <optgroup label="CLI Agents">
-                {AGENT_OPTIONS.filter((a) => a.group === "harness").map((a) => (
-                  <option key={a.id} value={a.id}>{a.label}</option>
-                ))}
-              </optgroup>
-              <optgroup label="Cloud APIs">
-                {AGENT_OPTIONS.filter((a) => a.group === "api").map((a) => (
-                  <option key={a.id} value={a.id}>{a.label}</option>
-                ))}
-              </optgroup>
-              <optgroup label="Local">
-                {AGENT_OPTIONS.filter((a) => a.group === "local").map((a) => (
-                  <option key={a.id} value={a.id}>{a.label}</option>
-                ))}
-              </optgroup>
-            </select>
+              options={[
+                ...subagentAgents.map((c) => ({
+                  value: `agent:${c.id}`,
+                  label: `${c.name}${c.builtin ? "" : " (subagent)"}`,
+                  hint: "Subagent",
+                })),
+                ...ENGINE_SELECT_OPTIONS,
+              ]}
+              onChange={(v) => { setAgentId(v); setModel(""); }}
+            />
           </div>
           <div className="automation-form-field">
             <label>Model <span className="automation-form-optional">{isSubagent ? "(from subagent)" : "(optional)"}</span></label>
@@ -1534,17 +1543,17 @@ function AutomationForm({
                 placeholder="Subagent's model (leave empty to use it)" />
             ) : availableModels.length > 0 ? (
               // A stale saved model (no longer in the fetched list) must not
-              // sit in state while the select shows the blank default — the
+              // sit in state while the picker shows the blank default — the
               // submit would then send a nonexistent model id.
-              <select
+              <GlassSelect<string>
+                ariaLabel="Model"
                 value={availableModels.some((m) => m.id === model) ? model : ""}
-                onChange={(e) => setModel(e.target.value)}
-              >
-                <option value="">{isHarness ? "Harness default" : isLocal ? "Auto-detect" : "Provider default"}</option>
-                {availableModels.map((m) => (
-                  <option key={m.id} value={m.id}>{m.label}</option>
-                ))}
-              </select>
+                options={[
+                  { value: "", label: isHarness ? "Harness default" : isLocal ? "Auto-detect" : "Provider default" },
+                  ...availableModels.map((m) => ({ value: m.id, label: m.label })),
+                ]}
+                onChange={(v) => setModel(v)}
+              />
             ) : (
               <input
                 value={model}
@@ -1558,60 +1567,83 @@ function AutomationForm({
 
         <div className="automation-form-field">
           <label>Project folder</label>
-          <select value={cwd} onChange={(e) => setCwd(e.target.value)}>
-            <option value="">None (project-less)</option>
-            {projects.map((p) => (
-              <option key={p.id} value={p.path}>{p.name}</option>
-            ))}
-          </select>
+          <GlassSelect<string>
+            ariaLabel="Project folder"
+            value={cwd}
+            options={[
+              { value: "", label: "None (project-less)" },
+              ...projects.map((p) => ({ value: p.path, label: p.name })),
+            ]}
+            onChange={(v) => setCwd(v)}
+          />
         </div>
 
         <div className="automation-form-field">
+          <label>Chats</label>
+          <GlassSelect<ChatMode>
+            ariaLabel="Chats"
+            value={chatMode}
+            options={CHAT_MODE_OPTIONS}
+            onChange={(v) => setChatMode(v)}
+          />
+        </div>
+        <p className="automation-form-hint">
+          {chatMode === "shared"
+            ? "Every run appends to one chat named after this automation — later runs see (and pay for) the earlier transcripts."
+            : "Each run gets a fresh chat, so nothing carries over between runs — transcripts stay short and cheap. Past runs stay reachable from the run history."}
+        </p>
+
+        <div className="automation-form-field">
           <label>Trigger</label>
-          <select
-            aria-label="Trigger type"
+          <GlassSelect<TriggerType>
+            ariaLabel="Trigger type"
             value={triggerType}
-            onChange={(e) => setTriggerType(e.target.value as TriggerType)}
-          >
-            {TRIGGER_OPTIONS.map((t) => (
-              <option key={t.value} value={t.value}>{t.label}</option>
-            ))}
-          </select>
+            options={TRIGGER_OPTIONS}
+            onChange={(v) => setTriggerType(v)}
+          />
         </div>
 
         {triggerType === "cron" && (
           <>
             <div className="automation-form-field">
               <label>Schedule</label>
-              <select value={scheduleChoice} onChange={(e) => setScheduleChoice(e.target.value)}>
-                {SCHEDULE_PRESETS.map((p) => (
-                  <option key={p.cron} value={p.cron}>{p.label}</option>
-                ))}
-                {keepOriginalCron && (
-                  <option value={automation!.schedule}>Current: {automation!.schedule}</option>
-                )}
-                <option value="custom">Custom…</option>
-              </select>
+              <GlassSelect<string>
+                ariaLabel="Schedule"
+                value={scheduleChoice}
+                options={[
+                  ...SCHEDULE_PRESETS.map((p) => ({ value: p.cron, label: p.label })),
+                  // An unrepresentable stored cron keeps its own entry —
+                  // falling back to "custom" would silently rewrite the
+                  // schedule on save.
+                  ...(keepOriginalCron
+                    ? [{ value: automation!.schedule, label: `Current: ${automation!.schedule}` }]
+                    : []),
+                  { value: "custom", label: "Custom…" },
+                ]}
+                onChange={(v) => setScheduleChoice(v)}
+              />
             </div>
 
             {scheduleChoice === "custom" && (
               <div className="automation-form-row automation-form-row-3">
                 <div className="automation-form-field">
                   <label>Frequency</label>
-                  <select value={freq} onChange={(e) => setFreq(e.target.value as Freq)}>
-                    <option value="daily">Every day</option>
-                    <option value="weekdays">Weekdays</option>
-                    <option value="weekly">Weekly</option>
-                  </select>
+                  <GlassSelect<Freq>
+                    ariaLabel="Frequency"
+                    value={freq}
+                    options={FREQ_OPTIONS}
+                    onChange={(v) => setFreq(v)}
+                  />
                 </div>
                 {freq === "weekly" && (
                   <div className="automation-form-field">
                     <label>Day</label>
-                    <select value={weekday} onChange={(e) => setWeekday(e.target.value)}>
-                      {WEEKDAYS.map((w) => (
-                        <option key={w.dow} value={w.dow}>{w.label}</option>
-                      ))}
-                    </select>
+                    <GlassSelect<string>
+                      ariaLabel="Day"
+                      value={weekday}
+                      options={WEEKDAYS.map((w) => ({ value: w.dow, label: w.label }))}
+                      onChange={(v) => setWeekday(v)}
+                    />
                   </div>
                 )}
                 <div className="automation-form-field">
@@ -1766,8 +1798,10 @@ function AutomationForm({
 
         <p className="automation-form-hint warning">
           Automations run unattended with full-auto permissions. They fire while
-          Relay is open — or anytime once "Run while closed" is on. Results
-          land in a dedicated chat named after this automation.
+          Relay is open — or anytime once "Run while closed" is on.{" "}
+          {chatMode === "shared"
+            ? "Results land in one shared chat named after this automation."
+            : "Results land in a new chat for each run."}
         </p>
         {error && <p className="automation-form-error">{error}</p>}
       </div>

@@ -2,10 +2,12 @@
 //!
 //! One row per automation: a stored prompt + harness/model/cwd + a 5-field
 //! cron schedule. Runs are forced to `full_auto` permission (unattended turns
-//! can't answer prompts) and are logged into the automation's own chat
-//! session (`chat_session_id`) so transcripts/diffs/cost show up in the
-//! normal chat UI. The scheduler lives in crate::automations; the headless
-//! runner binary (bin/relay_automation.rs) reads these same rows.
+//! can't answer prompts) and are logged into a chat session so
+//! transcripts/diffs/cost show up in the normal chat UI: by default a FRESH
+//! session per run (`chat_mode = "per_run"`), or one shared run-log session
+//! per automation ("shared", bound as `chat_session_id`). The scheduler lives
+//! in crate::automations; the headless runner binary
+//! (bin/relay_automation.rs) reads these same rows.
 
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
@@ -32,7 +34,10 @@ pub struct Automation {
     pub last_run_at: Option<i64>,
     /// "ok" (launched) | "skipped" (previous run still going) | error text.
     pub last_status: Option<String>,
-    /// Chat session used as the run log; created lazily on first run.
+    /// Chat session of the most recent run — the run log. Bound on first run
+    /// and REBOUND on every run in "per_run" mode (where it points at the
+    /// newest run's session); in "shared" mode it is the one session every
+    /// run appends to. See `chat_mode`.
     pub chat_session_id: Option<String>,
     pub created_at: i64,
     /// "user" (Automations view form) or "agent" (chat create_automation
@@ -52,6 +57,11 @@ pub struct Automation {
     /// gmail = {label?}.
     #[serde(default)]
     pub trigger_config: String,
+    /// Where runs log their transcripts: "per_run" (the default for new
+    /// rows — a fresh chat session per run) or "shared" (one run-log chat
+    /// per automation). See `CHAT_MODE_PER_RUN` / `CHAT_MODE_SHARED`.
+    #[serde(default = "default_chat_mode")]
+    pub chat_mode: String,
     /// Trigger engine dedupe state — last seen git SHA, the epoch of the
     /// last fs-triggered fire, or the last Gmail historyId (see
     /// crate::automation_triggers). NULL until the first evaluation.
@@ -71,6 +81,31 @@ fn default_origin() -> String {
 
 fn default_trigger_type() -> String {
     "cron".to_string()
+}
+
+fn default_chat_mode() -> String {
+    CHAT_MODE_PER_RUN.to_string()
+}
+
+/// Chat placement policy: every run gets its OWN chat session. The default —
+/// an unattended turn that re-reads the previous run's transcript pays for it
+/// in tokens and can drift onto stale state, so transcripts start empty.
+pub const CHAT_MODE_PER_RUN: &str = "per_run";
+
+/// Chat placement policy: one shared run-log chat per automation — every run
+/// appends to the same transcript (the pre-per-run behavior; rows migrated
+/// from before the column existed keep it).
+pub const CHAT_MODE_SHARED: &str = "shared";
+
+/// Parse a chat placement policy. Tolerant of case and the hyphen spelling
+/// ("per-run"); anything else returns None so callers reject instead of
+/// silently storing a value the runner would read as per_run.
+pub fn normalize_chat_mode(v: &str) -> Option<String> {
+    match v.trim().to_ascii_lowercase().as_str() {
+        "per_run" | "per-run" | "perrun" => Some(CHAT_MODE_PER_RUN.to_string()),
+        "shared" => Some(CHAT_MODE_SHARED.to_string()),
+        _ => None,
+    }
 }
 
 /// One past (or in-flight) run of an automation. Used by the Automations
@@ -117,6 +152,11 @@ pub struct AutomationInput {
     /// JSON trigger payload. None keeps the stored value on update.
     #[serde(default)]
     pub trigger_config: Option<String>,
+    /// Chat placement policy: "per_run" (a fresh chat session per run — the
+    /// create default) or "shared" (one run-log chat for every run). None
+    /// keeps the stored value on update.
+    #[serde(default)]
+    pub chat_mode: Option<String>,
 }
 
 fn map_automation(row: &Row) -> rusqlite::Result<Automation> {
@@ -138,19 +178,22 @@ fn map_automation(row: &Row) -> rusqlite::Result<Automation> {
             .get("trigger_type")
             .unwrap_or_else(|_| default_trigger_type()),
         trigger_config: row.get("trigger_config").unwrap_or_else(|_| "{}".into()),
+        chat_mode: row
+            .get("chat_mode")
+            .unwrap_or_else(|_| default_chat_mode()),
         last_trigger_state: row.get("last_trigger_state").unwrap_or(None),
         last_event_run_at: row.get("last_event_run_at").unwrap_or(None),
     })
 }
 
 const COLUMNS: &str =
-    "id, name, prompt, harness, model, cwd, schedule, enabled, last_run_at, last_status, chat_session_id, created_at, origin, trigger_type, trigger_config, last_trigger_state, last_event_run_at";
+    "id, name, prompt, harness, model, cwd, schedule, enabled, last_run_at, last_status, chat_session_id, created_at, origin, trigger_type, trigger_config, chat_mode, last_trigger_state, last_event_run_at";
 
 pub fn create_automation(conn: &Connection, input: &AutomationInput) -> DbResult<Automation> {
     let id = new_id();
     conn.execute(
-        "INSERT INTO automations (id, name, prompt, harness, model, cwd, schedule, enabled, created_at, origin, trigger_type, trigger_config)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        "INSERT INTO automations (id, name, prompt, harness, model, cwd, schedule, enabled, created_at, origin, trigger_type, trigger_config, chat_mode)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             id,
             input.name,
@@ -164,6 +207,7 @@ pub fn create_automation(conn: &Connection, input: &AutomationInput) -> DbResult
             input.origin.as_deref().unwrap_or("user"),
             input.trigger_type.as_deref().filter(|t| !t.is_empty()).unwrap_or("cron"),
             input.trigger_config.as_deref().unwrap_or("{}"),
+            input.chat_mode.as_deref().filter(|m| !m.is_empty()).unwrap_or(CHAT_MODE_PER_RUN),
         ],
     )?;
     get_automation(conn, &id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)
@@ -176,7 +220,8 @@ pub fn update_automation(
 ) -> DbResult<()> {
     conn.execute(
         "UPDATE automations SET name = ?2, prompt = ?3, harness = ?4, model = ?5, cwd = ?6, schedule = ?7,
-           trigger_type = COALESCE(?8, trigger_type), trigger_config = COALESCE(?9, trigger_config)
+           trigger_type = COALESCE(?8, trigger_type), trigger_config = COALESCE(?9, trigger_config),
+           chat_mode = COALESCE(?10, chat_mode)
          WHERE id = ?1",
         params![
             automation_id,
@@ -190,6 +235,7 @@ pub fn update_automation(
             // partial-update merge relies on this); Some overwrites.
             input.trigger_type,
             input.trigger_config,
+            input.chat_mode,
         ],
     )?;
     Ok(())
@@ -293,7 +339,9 @@ pub fn set_automation_trigger_state(
 /// Used when the stored session vanished (deleted by the user, swept as an
 /// empty chat) and the runner creates a fresh one — writing immediately, not
 /// waiting for finalize's record_run, keeps the pointer from dangling across
-/// a crash mid-run.
+/// a crash mid-run. In "per_run" mode this runs on EVERY run (the pointer is
+/// re-pointed at the newest run's session); in "shared" mode only when the
+/// one shared session had to be recreated.
 pub fn set_automation_chat_session(
     conn: &Connection,
     automation_id: &str,
@@ -597,6 +645,7 @@ mod tests {
                 origin: None,
                 trigger_type: None,
                 trigger_config: None,
+                chat_mode: None,
             },
         )
         .unwrap();
@@ -845,6 +894,7 @@ mod tests {
             origin: None,
             trigger_type: None,
             trigger_config: None,
+            chat_mode: None,
         }
     }
 
@@ -856,16 +906,33 @@ mod tests {
         let a = create_automation(&conn, &input("nightly")).unwrap();
         assert!(a.enabled);
         assert_eq!(a.schedule, "2 9 * * 1-5");
+        assert_eq!(
+            a.chat_mode,
+            CHAT_MODE_PER_RUN,
+            "a new automation defaults to a fresh chat per run"
+        );
         assert_eq!(list_automations(&conn).unwrap().len(), 1);
 
         let mut edited = input("nightly-2");
         edited.schedule = "*/30 * * * *".into();
         edited.model = Some("opus".into());
+        edited.chat_mode = Some(CHAT_MODE_SHARED.to_string());
         update_automation(&conn, &a.id, &edited).unwrap();
         let reloaded = get_automation(&conn, &a.id).unwrap().unwrap();
         assert_eq!(reloaded.name, "nightly-2");
         assert_eq!(reloaded.schedule, "*/30 * * * *");
         assert_eq!(reloaded.model, "opus");
+        assert_eq!(reloaded.chat_mode, CHAT_MODE_SHARED);
+
+        // An update that omits chat_mode keeps the stored policy (the chat
+        // tool's partial merge relies on this).
+        let mut bare = input("nightly-3");
+        bare.schedule = "0 4 * * *".into();
+        update_automation(&conn, &a.id, &bare).unwrap();
+        assert_eq!(
+            get_automation(&conn, &a.id).unwrap().unwrap().chat_mode,
+            CHAT_MODE_SHARED
+        );
 
         set_automation_enabled(&conn, &a.id, false).unwrap();
         assert!(!get_automation(&conn, &a.id).unwrap().unwrap().enabled);
@@ -883,5 +950,14 @@ mod tests {
 
         delete_automation(&conn, &a.id).unwrap();
         assert!(list_automations(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn chat_mode_normalization_accepts_both_policies_only() {
+        assert_eq!(normalize_chat_mode("per_run").as_deref(), Some(CHAT_MODE_PER_RUN));
+        assert_eq!(normalize_chat_mode(" per-run ").as_deref(), Some(CHAT_MODE_PER_RUN));
+        assert_eq!(normalize_chat_mode("SHARED").as_deref(), Some(CHAT_MODE_SHARED));
+        assert_eq!(normalize_chat_mode(""), None);
+        assert_eq!(normalize_chat_mode("one-chat"), None);
     }
 }

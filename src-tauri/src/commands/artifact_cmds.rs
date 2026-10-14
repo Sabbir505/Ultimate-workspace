@@ -506,6 +506,9 @@ pub async fn update_artifact_cmd(
                             origin: None,
                             trigger_type: None,
                             trigger_config: None,
+                            // The spec has no chat preference — keep the
+                            // stored policy (None = COALESCE).
+                            chat_mode: None,
                         };
                         update_automation(&conn, &artifact_id, &merged)
                             .map_err(|e| e.to_string())?;

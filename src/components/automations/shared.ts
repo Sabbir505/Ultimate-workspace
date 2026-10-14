@@ -37,6 +37,28 @@ export function buildAutomationRunPrompt(spec: AutomationPromptSpec): string {
  *  outcome, not a failure (no failure banner, no failure toast/email). */
 export const STOPPED_STATUS = "stopped";
 
+// ---- Chat placement policy (mirrors the backend's chat_mode column) ----
+
+/** Where an automation's runs are logged: a fresh chat session per run (the
+ *  default — nothing carries over between runs) or one shared chat for every
+ *  run. */
+export type ChatMode = "per_run" | "shared";
+
+export const CHAT_MODE_OPTIONS: { value: ChatMode; label: string }[] = [
+  { value: "per_run", label: "New chat per run" },
+  { value: "shared", label: "One chat for all runs" },
+];
+
+export function isChatMode(v: string): v is ChatMode {
+  return CHAT_MODE_OPTIONS.some((c) => c.value === v);
+}
+
+/** Short label for the detail card's meta row. Unknown values read as the
+ *  default (per_run), matching the backend's fallback. */
+export function chatModeLabel(mode: string | undefined): string {
+  return mode === "shared" ? "one shared chat" : "new chat per run";
+}
+
 /** A failure is any status that isn't one of the sentinel values —
  *  everything else is raw error text recorded by the runner. */
 export function isFailureStatus(status: string | null | undefined): boolean {

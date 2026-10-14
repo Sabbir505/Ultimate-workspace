@@ -4,8 +4,10 @@
 //! One tokio task ticks every 30s while the app runs; each due automation is
 //! launched on its own std thread (the turn itself is blocking process I/O).
 //! Runs force `full_auto` permission because unattended turns can't answer
-//! prompts, and every turn is logged into the automation's own chat session
-//! so transcripts show up in the normal chat UI.
+//! prompts, and every turn is logged into a chat session so transcripts show
+//! up in the normal chat UI — by default a FRESH session per run
+//! (`chat_mode = "per_run"`), or one shared run log per automation
+//! (`"shared"`); the Automations form picks per automation.
 //!
 //! Two deliberate policies:
 //! - **Overlap → skip.** If the previous run is still going the tick records
@@ -408,6 +410,9 @@ pub fn run_blocking_with_source(
 /// Everything a run needs that must happen BEFORE the process is spawned:
 /// both overlap guards and the run-log chat-session binding.
 struct PreparedRun {
+    /// Chat session this run is logged into — a FRESH session per run in
+    /// "per_run" mode (the default), or the automation's one shared run log
+    /// in "shared" mode.
     chat_session_id: String,
     /// Cross-process lock file (covers app-scheduler vs Task Scheduler
     /// double-fire); deleted in `finalize`. None for in-memory DBs (tests).
@@ -566,26 +571,39 @@ fn prepare_run_inner(db: &Arc<Mutex<Connection>>, automation: &Automation, sourc
         }
     }
 
-    // Bind (once) the chat session that doubles as this automation's run log.
-    // The stored pointer is re-validated on every run: if the session row is
-    // gone (user deleted the run-log chat, or the empty-session sweeper took
-    // it before its first message), reusing the dead id would fail the turn
-    // with "FOREIGN KEY constraint failed" on chat_messages — recreate a
-    // fresh session and rebind it immediately instead.
+    // Bind the chat session this run is logged into. Two policies
+    // (`Automation.chat_mode`):
+    //
+    //   "shared" — ONE session per automation, re-validated and reused on
+    //     every run. The pre-per-run behavior; rows migrated from before the
+    //     column existed keep it, so nothing about how they run changes.
+    //
+    //   "per_run" — the default for new automations: a FRESH session per run.
+    //     Each transcript starts empty, so a run never inherits a previous
+    //     run's context (an unattended turn that re-reads the whole old
+    //     transcript pays for it in tokens and can drift onto stale state).
+    //     The row's pointer is re-pointed at the newest session so "Open run
+    //     log", the empty-session sweeper and the FK guards keep working.
+    let per_run = automation.chat_mode != crate::db::CHAT_MODE_SHARED;
     let chat_session_id = {
         let conn = db.lock();
-        let stored_alive = match &automation.chat_session_id {
-            Some(id) => match get_chat_session(&conn, id) {
-                Ok(Some(_)) => true,
-                Ok(None) => false,
-                Err(e) => {
-                    let msg = e.to_string();
-                    drop(conn);
-                    release_guards(&automation.id, &lock_path);
-                    return Err(msg);
-                }
-            },
-            None => false,
+        // In per_run mode there is nothing to reuse — always create below.
+        let stored_alive = if per_run {
+            false
+        } else {
+            match &automation.chat_session_id {
+                Some(id) => match get_chat_session(&conn, id) {
+                    Ok(Some(_)) => true,
+                    Ok(None) => false,
+                    Err(e) => {
+                        let msg = e.to_string();
+                        drop(conn);
+                        release_guards(&automation.id, &lock_path);
+                        return Err(msg);
+                    }
+                },
+                None => false,
+            }
         };
         if stored_alive {
             let cs_id = automation.chat_session_id.clone().unwrap();
@@ -610,7 +628,7 @@ fn prepare_run_inner(db: &Arc<Mutex<Connection>>, automation: &Automation, sourc
             }
             cs_id
         } else {
-            if automation.chat_session_id.is_some() {
+            if automation.chat_session_id.is_some() && !per_run {
                 crate::relay_eprintln!(
                     "[automations] run-log chat session {:?} of {} is gone — recreating it",
                     automation.chat_session_id, automation.id
@@ -635,12 +653,26 @@ fn prepare_run_inner(db: &Arc<Mutex<Connection>>, automation: &Automation, sourc
                 .map(|(a, _, _, _)| a.clone())
                 .unwrap_or_else(|| format!("harness:{}", automation.harness));
             let _ = update_chat_session_agent(&conn, &cs.id, Some(&agent));
-            let _ = update_chat_session_title(&conn, &cs.id, &format!("⚙ {}", automation.name));
+            // Per-run sessions all share the automation's name, so they carry
+            // a timestamp suffix — otherwise the chat list shows dozens of
+            // identically-named "⚙ Nightly test fix" rows.
+            let title = if per_run {
+                format!(
+                    "⚙ {} · {}",
+                    automation.name,
+                    chrono::Local::now().format("%Y-%m-%d %H:%M")
+                )
+            } else {
+                format!("⚙ {}", automation.name)
+            };
+            let _ = update_chat_session_title(&conn, &cs.id, &title);
             if let Some((_, _, _, def_id)) = &vocab {
                 let _ = crate::db::set_chat_session_agent_def(&conn, &cs.id, Some(def_id));
             }
             // Rebind NOW rather than at finalize: a crash between here and
             // finalize must not leave the row pointing at the dead session.
+            // In per_run mode this re-points the row at the newest run's
+            // session; in shared mode it only fires on first run.
             let _ = set_automation_chat_session(&conn, &automation.id, Some(&cs.id));
             cs.id
         }
@@ -1303,6 +1335,7 @@ mod tests {
             origin: "user".to_string(),
             trigger_type: "cron".to_string(),
             trigger_config: "{}".to_string(),
+            chat_mode: "per_run".to_string(),
             last_trigger_state: None,
             last_event_run_at: None,
         };
@@ -1365,6 +1398,9 @@ mod tests {
                     origin: None,
                     trigger_type: None,
                     trigger_config: None,
+                    // Shared mode is the case under test: the stored pointer
+                    // is the ONE run log and must be re-validated.
+                    chat_mode: Some("shared".into()),
                 },
             )
             .unwrap();
@@ -1394,6 +1430,83 @@ mod tests {
             );
         }
         release_guards(&automation.id, &None);
+    }
+
+    /// The pairing for the policy: "per_run" (the default for new rows) binds
+    /// a FRESH session on every prepare and re-points the row at it, so no
+    /// run inherits the previous run's transcript; "shared" binds ONE session
+    /// and reuses it for every later run.
+    #[test]
+    fn per_run_mode_fresh_session_every_run_shared_reuses_one() {
+        let conn = crate::db::mem();
+        let db = Arc::new(Mutex::new(conn));
+        let mk = |chat_mode: Option<&str>| {
+            let conn = db.lock();
+            let a = crate::db::create_automation(
+                &conn,
+                &crate::db::AutomationInput {
+                    name: "nightly".into(),
+                    prompt: "p".into(),
+                    harness: "claude_code".into(),
+                    model: None,
+                    cwd: None,
+                    schedule: "* * * * *".into(),
+                    enabled: Some(true),
+                    origin: None,
+                    trigger_type: None,
+                    trigger_config: None,
+                    chat_mode: chat_mode.map(str::to_string),
+                },
+            )
+            .unwrap();
+            crate::db::get_automation(&conn, &a.id).unwrap().unwrap()
+        };
+
+        // Default (no chat_mode in the input) = per_run.
+        let per_run = mk(None);
+        assert_eq!(per_run.chat_mode, crate::db::CHAT_MODE_PER_RUN);
+        let first = prepare_run_inner(&db, &per_run, RunSource::Manual, 0)
+            .expect("run prepared")
+            .expect("prepared run");
+        release_guards(&per_run.id, &None);
+        let second = prepare_run_inner(&db, &per_run, RunSource::Manual, 0)
+            .expect("run prepared")
+            .expect("prepared run");
+        assert_ne!(
+            first.chat_session_id, second.chat_session_id,
+            "per_run must give every run its own chat session"
+        );
+        {
+            let conn = db.lock();
+            let reloaded = crate::db::get_automation(&conn, &per_run.id).unwrap().unwrap();
+            assert_eq!(
+                reloaded.chat_session_id.as_deref(),
+                Some(second.chat_session_id.as_str()),
+                "the row points at the newest run's session"
+            );
+        }
+        release_guards(&per_run.id, &None);
+
+        // Shared mode reuses the bound session across runs.
+        let shared = mk(Some(crate::db::CHAT_MODE_SHARED));
+        let s1 = prepare_run_inner(&db, &shared, RunSource::Manual, 0)
+            .expect("run prepared")
+            .expect("prepared run");
+        release_guards(&shared.id, &None);
+        // Re-read the row so the automation carries the bound session, the
+        // way the next scheduler tick would fetch it.
+        let shared = {
+            let conn = db.lock();
+            crate::db::get_automation(&conn, &shared.id).unwrap().unwrap()
+        };
+        let s2 = prepare_run_inner(&db, &shared, RunSource::Manual, 0)
+            .expect("run prepared")
+            .expect("prepared run");
+        assert_eq!(
+            s1.chat_session_id, s2.chat_session_id,
+            "shared mode must reuse the one run-log session"
+        );
+        release_guards(&shared.id, &None);
     }
 
     #[test]
@@ -1439,6 +1552,7 @@ mod tests {
                     origin: None,
                     trigger_type: None,
                     trigger_config: None,
+                    chat_mode: None,
                 },
             )
             .unwrap();
@@ -1488,6 +1602,7 @@ mod tests {
                     origin: None,
                     trigger_type: None,
                     trigger_config: None,
+                    chat_mode: None,
                 },
             )
             .unwrap()
@@ -1523,6 +1638,7 @@ mod tests {
                 origin: None,
                 trigger_type: Some("git".into()),
                 trigger_config: Some("{\"cwd\":\"D:/repo\"}".into()),
+                chat_mode: None,
             },
         )
         .unwrap();
@@ -1542,6 +1658,7 @@ mod tests {
                 origin: None,
                 trigger_type: Some("gmail".into()),
                 trigger_config: Some("{}".into()),
+                chat_mode: None,
             },
         )
         .unwrap();
@@ -1562,6 +1679,7 @@ mod tests {
                 origin: None,
                 trigger_type: None,
                 trigger_config: None,
+                chat_mode: None,
             },
         )
         .unwrap();
@@ -1595,6 +1713,7 @@ mod tests {
                     origin: None,
                     trigger_type: None,
                     trigger_config: None,
+                    chat_mode: None,
                 },
             )
             .unwrap()

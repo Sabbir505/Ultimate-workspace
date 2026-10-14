@@ -1999,7 +1999,8 @@ const CREATE_AUTOMATION_DESC: &str = "Create an automation: `prompt` runs \
     unattended via the chosen agent — default trigger is a 5-field local-time \
     cron `schedule`; set trigger_type+trigger for webhook / file-change / \
     git-commit / new-email firing instead. Confirm an ambiguous schedule \
-    first. Runs have no conversation memory.";
+    first. Runs have no conversation memory. Each run is logged to its own \
+    chat session (chat_mode: \"shared\" for one shared chat).";
 
 const UPDATE_AUTOMATION_DESC: &str = "Update an automation by id (from \
     list_automations). Only passed fields change; `enabled` toggles it.";
@@ -2392,6 +2393,14 @@ fn create_automation_parameters() -> Value {
                     minIntervalSecs? (default 60)}. git: {cwd, branch? \
                     (default HEAD)}. gmail: {label? (default inbox)}.",
             },
+            "chat_mode": {
+                "type": "string",
+                "enum": ["per_run", "shared"],
+                "description": "Where each run's transcript is logged. \
+                    Default per_run: a fresh chat session per run, so no run \
+                    inherits the previous run's context or cost. shared: one \
+                    shared chat session for every run.",
+            },
         },
         "required": ["name", "prompt"],
     })
@@ -2439,6 +2448,13 @@ fn update_automation_parameters() -> Value {
                 "type": "object",
                 "description": "New trigger config (create_automation's \
                     trigger shape).",
+            },
+            "chat_mode": {
+                "type": "string",
+                "enum": ["per_run", "shared"],
+                "description": "Switch where runs are logged (optional); \
+                    omit to keep the stored policy. per_run = a fresh chat \
+                    session per run; shared = one chat session for every run.",
             },
         },
         "required": ["automation_id"],

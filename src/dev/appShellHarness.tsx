@@ -97,6 +97,7 @@ const demoAutomation = (id: string, over: Partial<Automation> = {}): Automation 
   origin: "user",
   triggerType: "cron",
   triggerConfig: "{}",
+  chatMode: "per_run",
   lastTriggerState: null,
   lastEventRunAt: null,
   ...over,

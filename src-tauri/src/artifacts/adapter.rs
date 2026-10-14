@@ -147,6 +147,9 @@ fn adapt_automation(spec: &AutomationSpec) -> AutomationInput {
         // event trigger engines aren't expressible in the artifact schema.
         trigger_type: None,
         trigger_config: None,
+        // Default policy: each proposed run gets its own chat session. The
+        // spec schema carries no chat preference.
+        chat_mode: None,
     }
 }
 

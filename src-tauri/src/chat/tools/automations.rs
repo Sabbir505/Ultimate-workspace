@@ -196,6 +196,10 @@ fn format_automation_detail(a: &crate::db::Automation) -> String {
         "cron" | "" => String::new(),
         t => format!("\n- trigger: `{t}` — {}", trigger_config_brief(a)),
     };
+    let chat = match a.chat_mode.as_str() {
+        crate::db::CHAT_MODE_SHARED => "shared — one chat session for every run",
+        _ => "per_run — a fresh chat session per run",
+    };
     format!(
         "# {}\n\
          - id: `{}`\n\
@@ -203,7 +207,8 @@ fn format_automation_detail(a: &crate::db::Automation) -> String {
          - cwd: {}\n\
          - cron: `{}`{}\n\
          - enabled: {}; last run: {status}\n\
-         - origin: {origin}{trigger}\n\
+         - origin: {origin}\n\
+         - chat: {chat}{trigger}\n\
          \n\
          ## Prompt (verbatim — pass it back unchanged through update_automation's \
          `prompt` field, with your edits applied)\n\
@@ -260,6 +265,28 @@ fn trigger_config_brief(a: &crate::db::Automation) -> String {
                  (default inbox)".to_string(),
         },
         _ => "cron schedule".to_string(),
+    }
+}
+
+/// The chat placement policy out of tool args: "per_run" (a fresh chat
+/// session per run — the default) | "shared" (one run-log chat for every
+/// run). `None` = not specified (create defaults to per_run, update keeps the
+/// stored policy).
+fn parse_chat_mode_arg(args: &Value) -> Result<Option<String>, String> {
+    let Some(raw) = args
+        .get("chat_mode")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return Ok(None);
+    };
+    match crate::db::normalize_chat_mode(raw) {
+        Some(v) => Ok(Some(v)),
+        None => Err(format!(
+            "Error: chat_mode must be \"per_run\" (a new chat per run) or \
+             \"shared\" (one chat for every run), got \"{raw}\"."
+        )),
     }
 }
 
@@ -364,6 +391,11 @@ fn create_automation(app: &AppHandle, args: &Value) -> String {
         }
     };
     let enabled = arg_bool(args, "enabled").unwrap_or(true);
+    // Chat placement policy: absent → the create default (per_run).
+    let chat_mode = match parse_chat_mode_arg(args) {
+        Ok(v) => v,
+        Err(e) => return e.replace("chat_mode", "create_automation: chat_mode"),
+    };
     let (trigger_type, trigger_config) = match parse_trigger_args(args) {
         Ok(v) => v,
         Err(e) => return e,
@@ -382,6 +414,7 @@ fn create_automation(app: &AppHandle, args: &Value) -> String {
         origin: Some("agent".into()),
         trigger_type,
         trigger_config,
+        chat_mode,
     };
     // Same validation + webhook-secret settle the form command uses (one
     // code path, no drift). Cron rows still validate `schedule` here.
@@ -419,11 +452,15 @@ fn create_automation(app: &AppHandle, args: &Value) -> String {
             } else {
                 String::new()
             };
+            let chat_note = if a.chat_mode == crate::db::CHAT_MODE_SHARED {
+                "every run is logged to one shared chat session and"
+            } else {
+                "each run is logged to its own chat session and"
+            };
             format!(
                 "Created automation \"{}\" (id `{}`) — agent `{}`, cron `{}`, trigger `{}`, {}. \
                  It fires while the app runs (one catch-up run after a missed cron \
-                 window); every run is logged to its own chat session and the \
-                 app's Automations view.{webhook_note}{next}",
+                 window); {chat_note} the app's Automations view.{webhook_note}{next}",
                 a.name,
                 a.id,
                 a.harness,
@@ -515,6 +552,13 @@ fn update_automation(app: &AppHandle, args: &Value) -> String {
     } else {
         (None, None)
     };
+    // Chat placement policy: an explicit arg switches it; absent keeps the
+    // stored one (the DB update COALESCEs None into the old value). The
+    // input takes a CLONE — the note below reports what actually changed.
+    let chat_mode = match parse_chat_mode_arg(args) {
+        Ok(v) => v,
+        Err(e) => return e.replace("chat_mode", "update_automation: chat_mode"),
+    };
     let mut input = crate::db::AutomationInput {
         name: name.clone(),
         prompt: prompt.clone(),
@@ -528,6 +572,7 @@ fn update_automation(app: &AppHandle, args: &Value) -> String {
         origin: None,
         trigger_type: trigger_type.clone(),
         trigger_config,
+        chat_mode: chat_mode.clone(),
     };
     // Same validation + webhook-secret settle as the form command, WITH the
     // stored row so a switch to webhook (or a redacted config) carries the
@@ -573,13 +618,18 @@ fn update_automation(app: &AppHandle, args: &Value) -> String {
                 Some(t) => format!(", trigger `{t}`"),
                 None => String::new(),
             };
+            let chat_note = match chat_mode.as_deref() {
+                Some(crate::db::CHAT_MODE_SHARED) => ", chats shared (one session for every run)",
+                Some(_) => ", chats per run (a fresh session each run)",
+                None => "",
+            };
             let effective_type = trigger_type.unwrap_or_else(|| trigger_type_of(&existing).to_string());
             let next = format_next_fire(&effective_type, &schedule)
                 .map(|t| format!(" Next run: {t}."))
                 .unwrap_or_default();
             format!(
                 "Updated automation \"{name}\" (id `{id}`) — agent `{agent}`, cron \
-                 `{schedule}`{trigger_note}.{enabled_note}{next}",
+                 `{schedule}`{trigger_note}{chat_note}.{enabled_note}{next}",
             )
         }
         Err(e) => format!("Error: update_automation failed: {e}"),
@@ -709,6 +759,7 @@ mod tests {
             origin: "user".into(),
             trigger_type: "cron".into(),
             trigger_config: "{}".into(),
+            chat_mode: "per_run".into(),
             last_trigger_state: None,
             last_event_run_at: None,
         };
@@ -718,6 +769,7 @@ mod tests {
         assert!(out.contains("`opencode`"));
         assert!(out.contains("0 9 * * *"));
         assert!(out.contains("disabled"));
+        assert!(out.contains("chat: per_run"), "the chat policy is reported");
         // The one_line cut would drop the tail — this report must not.
         assert!(!out.contains(&one_line(&long_prompt)));
     }

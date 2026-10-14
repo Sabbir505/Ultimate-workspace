@@ -1139,7 +1139,8 @@ fn static_relay_schemas() -> Vec<Value> {
                     "prompt": { "type": "string", "description": "The complete, self-contained instruction each run executes." },
                     "schedule": { "type": "string", "description": "5-field local cron, e.g. '30 8 * * *'." },
                     "agent": { "type": "string", "description": "Optional agent id (default claude_code)." },
-                    "enabled": { "type": "boolean", "description": "Optional; default true." }
+                    "enabled": { "type": "boolean", "description": "Optional; default true." },
+                    "chat_mode": { "type": "string", "enum": ["per_run", "shared"], "description": "Optional; default \"per_run\" — each run logs to its own chat session. \"shared\" logs every run into one chat." }
                 },
                 "required": ["name", "prompt", "schedule"]
             }
@@ -1155,7 +1156,8 @@ fn static_relay_schemas() -> Vec<Value> {
                     "prompt": { "type": "string" },
                     "schedule": { "type": "string", "description": "5-field local cron." },
                     "agent": { "type": "string" },
-                    "enabled": { "type": "boolean" }
+                    "enabled": { "type": "boolean" },
+                    "chat_mode": { "type": "string", "enum": ["per_run", "shared"], "description": "Switch where runs are logged; omit to keep." }
                 },
                 "required": ["automation_id"]
             }

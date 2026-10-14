@@ -1,8 +1,9 @@
 // Tests for the AutomationsView trigger-type UI: the Trigger selector in the
 // create/edit form, the per-type conditional fields (file path, git repo,
 // gmail label), the triggerType/triggerConfig payloads the form saves (the
-// same camelCase shapes automation_triggers::validate_trigger parses), and
-// the webhook trigger URL surfacing (form after create + detail pane).
+// same camelCase shapes automation_triggers::validate_trigger parses), the
+// chat-mode selector (chatMode payload — per_run default / shared), and the
+// webhook trigger URL surfacing (form after create + detail pane).
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { Automation, AutomationInput } from "../lib/ipc";
@@ -69,6 +70,26 @@ vi.mock("../state/chat", () => ({
   useChatStore: (sel: (s: Record<string, unknown>) => unknown) => sel({}),
 }));
 
+// GlassSelect → a native <select> so the form's dropdowns stay simple change
+// events (same trick apiKeysPanel.test.tsx / settingsInputDebounce.test.tsx
+// use). The real component renders a body-level glass popover — its own
+// behavior is covered by glassSelectAction.test.tsx. `ariaLabel` is mapped to
+// the DOM attribute so getByLabelText keeps working.
+vi.mock("../components/common/GlassSelect", () => ({
+  GlassSelect: ({ value, options, onChange, ariaLabel, ...props }: any) => (
+    <select
+      value={value}
+      aria-label={ariaLabel}
+      onChange={(e) => onChange(e.target.value)}
+      {...props}
+    >
+      {options.map((o: any) => (
+        <option key={o.value} value={o.value}>{o.label}</option>
+      ))}
+    </select>
+  ),
+}));
+
 import { AutomationsView } from "../components/automations/AutomationsView";
 
 const WEBHOOK_URL = "http://127.0.0.1:9/trigger/a1/s3cret";
@@ -90,6 +111,7 @@ function mkAutomation(partial: Partial<Automation>): Automation {
     origin: "user",
     triggerType: "cron",
     triggerConfig: "{}",
+    chatMode: "per_run",
     lastTriggerState: null,
     lastEventRunAt: null,
     ...partial,
@@ -234,6 +256,41 @@ describe("AutomationForm trigger selector", () => {
     expect(id).toBe("a1");
     expect(input.triggerType).toBe("git");
     expect(JSON.parse(input.triggerConfig ?? "{}")).toEqual({ cwd: "D:/repo", branch: "main" });
+  });
+});
+
+describe("AutomationForm chat-mode selector", () => {
+  it("defaults to a new chat per run and sends chatMode in the payload", async () => {
+    await openNewForm();
+    const select = screen.getByLabelText("Chats") as HTMLSelectElement;
+    expect(select.value).toBe("per_run");
+    expect(Array.from(select.options).map((o) => o.value)).toEqual([
+      "per_run", "shared",
+    ]);
+    fillNameAndPrompt();
+    fireEvent.click(screen.getByRole("button", { name: "Create automation" }));
+    await waitFor(() => expect(mockCreate).toHaveBeenCalled());
+    const input = mockCreate.mock.calls[0][0] as AutomationInput;
+    expect(input.chatMode).toBe("per_run");
+  });
+
+  it("switching to one shared chat saves chatMode \"shared\"", async () => {
+    await openNewForm();
+    fireEvent.change(screen.getByLabelText("Chats"), { target: { value: "shared" } });
+    fillNameAndPrompt();
+    fireEvent.click(screen.getByRole("button", { name: "Create automation" }));
+    await waitFor(() => expect(mockCreate).toHaveBeenCalled());
+    const input = mockCreate.mock.calls[0][0] as AutomationInput;
+    expect(input.chatMode).toBe("shared");
+  });
+
+  it("editing loads the stored chat mode", async () => {
+    storeAutomations.push(mkAutomation({ chatMode: "shared" }));
+    render(<AutomationsView />);
+    fireEvent.click((await screen.findAllByText("nightly"))[0]);
+    fireEvent.click(screen.getByTitle("Edit"));
+    await screen.findByText("Edit automation");
+    expect((screen.getByLabelText("Chats") as HTMLSelectElement).value).toBe("shared");
   });
 });
 

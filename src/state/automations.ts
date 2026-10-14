@@ -1,6 +1,7 @@
 // Automations store (scheduled headless agent runs — automations.rs).
 // The sidebar lists them; runs are launched by the backend scheduler (or the
-// run-now button) and logged into each automation's own chat session.
+// run-now button) and logged into a chat session — a fresh one per run by
+// default, or one shared chat when the automation says so (chatMode).
 import { create } from "zustand";
 import {
   createAutomation,

@@ -8,8 +8,9 @@
 //! invoke so automations fire while the Relay GUI is closed. It links
 //! relay_lib and reuses the exact launch path the in-app scheduler uses
 //! (automations::run_blocking): same overlap lock file, same run-log chat
-//! session, same DB. No Tauri runtime is created — AppHandle is None, so
-//! chat:* events become no-ops and everything lands in the DB directly.
+//! policy (a fresh session per run unless the automation is `shared`), same
+//! DB. No Tauri runtime is created — AppHandle is None, so chat:* events
+//! become no-ops and everything lands in the DB directly.
 //!
 //! `run-due` is what the one-click "Run while closed" toggle registers with
 //! Task Scheduler (see automation_task.rs): the task fires every minute and

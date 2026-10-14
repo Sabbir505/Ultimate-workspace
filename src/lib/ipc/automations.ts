@@ -39,6 +39,10 @@ export interface Automation {
   /** Timestamp of the last webhook/file/git run (never moves the cron
    *  clock — that's lastRunAt's job). */
   lastEventRunAt: number | null;
+  /** Where runs are logged: "per_run" (default — a fresh chat session per
+   *  run, so no run inherits the previous run's context/cost) or "shared"
+   *  (one run-log chat for every run). Selectable in the create/edit form. */
+  chatMode: string;
 }
 export interface AutomationInput {
   name: string;
@@ -50,6 +54,9 @@ export interface AutomationInput {
   enabled?: boolean;
   triggerType?: string;
   triggerConfig?: string;
+  /** "per_run" (default on create) | "shared". Omit on update to keep the
+   *  stored policy. */
+  chatMode?: string;
 }
 export const listAutomations = () => safeInvoke<Automation[]>("list_automations");
 export const createAutomation = (input: AutomationInput) =>

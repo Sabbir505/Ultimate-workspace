@@ -590,8 +590,7 @@
   color: var(--text-dim);
 }
 .automation-form-field input,
-.automation-form-field textarea,
-.automation-form-field select {
+.automation-form-field textarea {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -602,13 +601,20 @@
   color-scheme: dark;
 }
 :root[data-theme="light"] .automation-form-field input,
-:root[data-theme="light"] .automation-form-field textarea,
-:root[data-theme="light"] .automation-form-field select {
+:root[data-theme="light"] .automation-form-field textarea {
   color-scheme: light;
 }
-.automation-form-field select option {
-  background: var(--surface);
-  color: var(--text);
+/* GlassSelect adapter — the form's dropdowns are the app's shared themed
+   dropdown (GlassSelect), whose list is a body-level glass popover instead of
+   an OS-drawn native list. Fill the field the way the inputs do (same trick
+   as .api-provider-form .glass-select in pickers.css). */
+.automation-form-field .glass-select {
+  width: 100%;
+}
+.automation-form-field .glass-select-trigger {
+  width: 100%;
+  font-size: 13px;
+  padding: 9px 12px;
 }
 .automation-form-field textarea {
   resize: vertical;

@@ -114,6 +114,7 @@ mod tests {
                 origin: Some("user".to_string()),
                 trigger_type: Some("cron".to_string()),
                 trigger_config: None,
+                chat_mode: None,
             };
             crate::commands::automation_cmds::validate_input(&conn, &mut input, None)
                 .unwrap_or_else(|e| panic!("template {} rejected: {e}", t.id));
@@ -141,6 +142,7 @@ mod tests {
             origin: Some("user".to_string()),
             trigger_type: Some("cron".to_string()),
             trigger_config: None,
+            chat_mode: None,
         };
         crate::commands::automation_cmds::validate_input(&conn, &mut input, None).unwrap();
         let row = crate::db::create_automation(&conn, &input).expect("create");

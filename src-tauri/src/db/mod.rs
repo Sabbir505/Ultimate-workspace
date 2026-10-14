@@ -326,6 +326,26 @@ fn migrate_automations_triggers(conn: &Connection) -> DbResult<()> {
     Ok(())
 }
 
+/// Chat placement policy per automation ("per_run" | "shared"). New rows
+/// default to a FRESH chat session per run: an unattended turn that re-reads
+/// the previous run's transcript pays for it in tokens and can drift onto
+/// stale state, so per-run transcripts start empty. Rows that predate this
+/// column keep their single run-log chat ("shared") — migrating must not
+/// change how an existing automation behaves (its `chat_session_id` IS the
+/// shared log; flipping it to per_run would orphan every past transcript).
+/// The create path writes "per_run" explicitly, so only legacy rows land on
+/// the migration's default.
+fn migrate_automations_chat_mode(conn: &Connection) -> DbResult<()> {
+    let sql = "ALTER TABLE automations ADD COLUMN chat_mode TEXT NOT NULL DEFAULT 'shared'";
+    if let Err(e) = conn.execute(sql, []) {
+        let msg = e.to_string();
+        if !msg.contains("duplicate column name") {
+            return Err(e);
+        }
+    }
+    Ok(())
+}
+
 fn migrate_chat_fts(conn: &Connection) -> DbResult<()> {
     // LOW: the docsize COUNT probe is O(chat_messages) on every startup.
     // The FTS triggers keep the index in sync after the one-time backfill,
@@ -480,6 +500,7 @@ pub fn configure(conn: &Connection) -> DbResult<()> {
     migrate_improve_eval_runs_session(conn)?;
     migrate_automations_origin(conn)?;
     migrate_automations_triggers(conn)?;
+    migrate_automations_chat_mode(conn)?;
     migrate_chat_fts(conn)?;
     migrate_doc_chunks_fts(conn)?;
     llm_log::ensure_schema(conn)?;
@@ -1588,7 +1609,8 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
         CREATE INDEX IF NOT EXISTS idx_artifacts_path ON artifacts(path);
 
         -- Scheduled headless agent runs (see db/automations.rs +
-        -- crate::automations). chat_session_id is the run log, bound lazily.
+        -- crate::automations). chat_session_id is the run log, bound lazily
+        -- (rebound every run in per_run mode).
         -- origin: user (Automations view form) or agent (chat
         -- create_automation tool) — the UI badges agent-authored rows so the
         -- user can see what the model scheduled.
@@ -1597,6 +1619,9 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
         -- holds the engine's dedupe state (last git SHA / last fs-fire
         -- epoch); last_event_run_at is the event-source twin of last_run_at
         -- (event runs must not delay the cron clock).
+        -- chat_mode picks where a run's transcript is logged: 'per_run'
+        -- (fresh chat session per run — the default) or 'shared' (one
+        -- run-log chat for every run).
         CREATE TABLE IF NOT EXISTS automations (
           id TEXT PRIMARY KEY,
           name TEXT NOT NULL,
@@ -1613,6 +1638,7 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
           origin TEXT NOT NULL DEFAULT 'user',
           trigger_type TEXT NOT NULL DEFAULT 'cron',
           trigger_config TEXT NOT NULL DEFAULT '{}',
+          chat_mode TEXT NOT NULL DEFAULT 'per_run',
           last_trigger_state TEXT,
           last_event_run_at INTEGER
         );
@@ -2229,9 +2255,10 @@ pub use workspaces::{
 // automations (scheduled headless agent runs)
 pub use automations::{
     count_runs_for, create_automation, delete_automation, finish_run, get_automation,
-    list_automations, list_runs_for, record_run, record_status, set_automation_chat_session,
-    set_automation_enabled, set_automation_trigger_state, start_run, update_automation,
-    Automation, AutomationInput, AutomationRun,
+    list_automations, list_runs_for, normalize_chat_mode, record_run, record_status,
+    set_automation_chat_session, set_automation_enabled, set_automation_trigger_state, start_run,
+    update_automation, Automation, AutomationInput, AutomationRun, CHAT_MODE_PER_RUN,
+    CHAT_MODE_SHARED,
 };
 
 // subagent (declarative subagents — the persisted agent registry)
@@ -2375,6 +2402,70 @@ mod tests {
             read("chat.anthropic_compatible.base_url"),
             "https://gateway.example.com/llm"
         );
+    }
+
+    /// A database from BEFORE the `chat_mode` column: its rows are shared
+    /// run-log automations (`chat_session_id` IS the one bound log every run
+    /// appends to), so the migration must default them to "shared" — flipping
+    /// them to per_run would silently orphan every past transcript the "Open
+    /// run log" button points at. Rows created afterwards still default to
+    /// per_run (the create path writes it explicitly).
+    #[test]
+    fn legacy_automation_rows_keep_their_shared_run_log() {
+        let conn = Connection::open_in_memory().unwrap();
+        // The pre-chat_mode shape: trigger columns present, no chat_mode.
+        conn.execute(
+            "CREATE TABLE automations (
+               id TEXT PRIMARY KEY, name TEXT NOT NULL, prompt TEXT NOT NULL,
+               harness TEXT NOT NULL, model TEXT NOT NULL DEFAULT '',
+               cwd TEXT NOT NULL DEFAULT '', schedule TEXT NOT NULL,
+               enabled INTEGER NOT NULL DEFAULT 1, last_run_at INTEGER,
+               last_status TEXT, chat_session_id TEXT, created_at INTEGER NOT NULL,
+               origin TEXT NOT NULL DEFAULT 'user',
+               trigger_type TEXT NOT NULL DEFAULT 'cron',
+               trigger_config TEXT NOT NULL DEFAULT '{}',
+               last_trigger_state TEXT, last_event_run_at INTEGER)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO automations (id, name, prompt, harness, schedule, chat_session_id, created_at)
+             VALUES ('a-1', 'nightly', 'p', 'claude_code', '0 3 * * *', 'cs-run-log', 1)",
+            [],
+        )
+        .unwrap();
+
+        configure(&conn).unwrap();
+
+        let (mode, bound): (String, Option<String>) = conn
+            .query_row(
+                "SELECT chat_mode, chat_session_id FROM automations WHERE id = 'a-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(mode, "shared", "legacy rows keep their single run log");
+        assert_eq!(bound.as_deref(), Some("cs-run-log"));
+
+        // A NEW row still defaults to a fresh chat per run.
+        let created = crate::db::create_automation(
+            &conn,
+            &crate::db::AutomationInput {
+                name: "fresh".into(),
+                prompt: "p".into(),
+                harness: "claude_code".into(),
+                model: None,
+                cwd: None,
+                schedule: "0 3 * * *".into(),
+                enabled: Some(true),
+                origin: None,
+                trigger_type: None,
+                trigger_config: None,
+                chat_mode: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(created.chat_mode, "per_run");
     }
 
     /// Subagent-run sessions link to their definition through `agent_def_id` with

@@ -1262,6 +1262,7 @@ mod tests {
                 origin: None,
                 trigger_type: None,
                 trigger_config: None,
+                chat_mode: None,
             },
         )
         .unwrap();

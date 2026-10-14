@@ -4,9 +4,10 @@
 /* ---------- Glass dropdown (replaces native <select>) ----------
    Native <select> option lists are OS-rendered and unthemeable, so the CLI
    chooser and theme chooser use a custom dropdown whose list is a floating
-   glass popover. The popover is positioned absolutely under the trigger; the
-   .glass-select wrapper must be `position: relative` (set inline by callers in
-   flex contexts where width should follow content, or via the default below). */
+   glass popover. The list is PORTALED to <body> by GlassSelect and placed
+   with inline fixed coordinates (the same trick the composer's popups and
+   SubagentSelect use), so no scrolling form body or stacking context can
+   clip it — position/top/left therefore live in JS, not here. */
 .glass-select {
   position: relative;
   display: inline-flex;
@@ -82,11 +83,10 @@
   color: var(--accent);
 }
 .glass-select-list {
-  position: absolute;
-  top: calc(100% + 4px);
-  left: 0;
-  z-index: 80;
-  min-width: 100%;
+  position: fixed;
+  /* Above .modal-overlay (60) and every in-app surface — the list is portaled
+     to <body> so it must win the body-level stacking order. */
+  z-index: 2100;
   padding: 5px;
   display: flex;
   flex-direction: column;

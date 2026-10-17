@@ -78,6 +78,14 @@ export interface ChatSession {
    *  provider/model hold the LAST resolution (post-first-send they name the
    *  model that actually ran); the chip shows "Auto" while this is set. */
   autoModel?: boolean;
+  /** The bot this thread belongs to (persona + memory + pet + jobs). Only the
+   *  bot's own sessions carry this; null/undefined = a plain chat. */
+  botId?: string | null;
+  /** 'thread' = the bot's conversation (shows in chat history), 'run' = one
+   *  headless execution (hidden — opened from the bot's activity strip). */
+  botRole?: "thread" | "run" | null;
+  /** The automation that spawned a run session. */
+  botJobId?: string | null;
 }
 
 export interface ChatMessageRecord {

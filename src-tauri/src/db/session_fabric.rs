@@ -473,6 +473,7 @@ pub fn transcript_excerpt(
     let mut stmt = conn.prepare(
         "SELECT role, content FROM chat_messages
           WHERE chat_session_id = ?1 AND superseded_by IS NULL
+            AND (kind IS NULL OR kind != 'sidechat_seed')
           ORDER BY id DESC LIMIT ?2",
     )?;
     let mut lines: Vec<String> = Vec::new();
@@ -495,11 +496,13 @@ pub fn transcript_excerpt(
 }
 
 /// User-turn count — the summary worker skips sessions with fewer than two
-/// (a one-line chat needs no abstract).
+/// (a one-line chat needs no abstract). A sidechat's hidden context seed is
+/// context, not a turn, so it does not count toward the threshold.
 pub fn count_user_messages(conn: &Connection, sid: &str) -> DbResult<i64> {
     conn.query_row(
         "SELECT COUNT(*) FROM chat_messages
-          WHERE chat_session_id = ?1 AND role = 'user' AND superseded_by IS NULL",
+          WHERE chat_session_id = ?1 AND role = 'user' AND superseded_by IS NULL
+            AND (kind IS NULL OR kind != 'sidechat_seed')",
         params![sid],
         |r| r.get(0),
     )

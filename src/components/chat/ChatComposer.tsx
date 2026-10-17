@@ -38,7 +38,7 @@ import {
 } from "../../state/voiceLoop";
 import { ttsPlayer } from "../../lib/tts";
 import { TemplatePickerModal, BroadcastModal } from "./composerModals";
-import { PetStrip } from "../pet/PetStrip";
+import { BotPetDock } from "../pet/BotPetDock";
 import {
   listChatSkills,
   listPromptTemplates,
@@ -529,6 +529,12 @@ export const ChatComposer = memo(function ChatComposer({
     : [];
 
   const staticSlashCommands: SlashItem[] = [
+    {
+      kind: "command",
+      name: "Sidechat",
+      slug: "sidechat",
+      description: "Open a private side thread with a snapshot of this chat's context — ask questions without touching the main conversation",
+    },
     {
       kind: "command",
       name: "Compact context",
@@ -1322,6 +1328,36 @@ export const ChatComposer = memo(function ChatComposer({
     // Harness sessions carry it the same way — sendMessage flags the turn and
     // the protocol rides the CLI-facing appendix.
 
+    // --- /sidechat: open a private side thread for this chat ---
+    // Client-intercepted for EVERY engine (harness CLIs don't know the
+    // token): the store opens/re-focuses the sidechat pane, whose session
+    // carries a snapshot of this chat's context. A trailing question is asked
+    // IN the sidechat — the main conversation is never touched either way.
+    const sidechatMatch = /^\/sidechat\b([\s\S]*)$/.exec(trimmed);
+    if (sidechatMatch) {
+      setContent("");
+      setCommandPill(null);
+      setAttachments([]);
+      setAttachError(null);
+      setForceResearch(false);
+      setAttachMenuOpen(false);
+      const ta = textareaRef.current;
+      if (ta) ta.style.height = "auto";
+      if (!effectiveSessionId) return;
+      const question = sidechatMatch[1].replace(/^[\s:—-]+/, "").trim();
+      void useChatStore
+        .getState()
+        .openSidechat(effectiveSessionId)
+        .then((sideId) => {
+          if (sideId && question) {
+            void useChatStore
+              .getState()
+              .sendMessage(question, undefined, undefined, sideId);
+          }
+        });
+      return;
+    }
+
     // --- /compact: universal context compaction, routed by engine ---
     // CLI harness sessions: forwarded verbatim — the CLI runs its own
     // native /compact. Cloud and local sessions: Relay's own compaction
@@ -1749,10 +1785,10 @@ export const ChatComposer = memo(function ChatComposer({
           ))}
         </div>
       )}
-      {/* Companion pet's pane home — strolls along the top edge of THIS
-          pane's composer card. The pet lives in one pane at a time and
-          randomly teleports between them (petHome = pane id or "main"). */}
-      <PetStrip myHome={petHome ?? "main"} />
+      {/* The docked bot pets (docs/architecture/BOTS.md + src/lib/pets): one
+          per bot that chose a pet, clickable to open that bot. They live on
+          the search bar OR here — drag a pet to the other home to move them. */}
+      <BotPetDock myHome={petHome ?? "main"} />
       {/* Usage-limit warning notch: same fused top-seam geometry as the goal
           notch, tinted by tier (amber at the warning threshold, red once the
           limit is reached). In flow, so its height rides in composerDockHeight

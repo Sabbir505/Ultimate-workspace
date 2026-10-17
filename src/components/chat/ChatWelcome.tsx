@@ -5,16 +5,31 @@ import { WELCOME_PROMPTS, timeGreeting, WelcomePromptIcon } from "./chatWelcomeS
 
 /** Clicking a starter chip: `sendPrompt(title)` when a model is configured,
  *  otherwise the parent prefills the composer so the user picks a model. */
-export function ChatWelcome({ sendPrompt, prefill, hasModel }: {
+export function ChatWelcome({ sendPrompt, prefill, hasModel, sidechat }: {
   sendPrompt: (text: string) => void;
   prefill: (text: string) => void;
   hasModel: boolean;
+  /** Present when this empty chat is a sidechat. The source chat's recent
+   *  history rides along as model context but its rows are intentionally not
+   *  shown in the pane — without this hint an empty sidechat reads as a bug.
+   *  `title` is the source chat's title, or null when it has none/is gone. */
+  sidechat?: { title: string | null } | null;
 }) {
   return (
     <div className="chat-welcome">
       <div className="chat-welcome-inner">
-        <div className="chat-welcome-greeting">{timeGreeting().hi}</div>
-        <div className="chat-welcome-question">{timeGreeting().ask}</div>
+        <div className="chat-welcome-greeting">{sidechat ? "Side chat" : timeGreeting().hi}</div>
+        <div className="chat-welcome-question">
+          {sidechat ? (
+            <>
+              Continues {sidechat.title ? `“${sidechat.title}”` : "another chat"} — its recent
+              messages are already in context, but they aren&apos;t shown here. Ask your question
+              below.
+            </>
+          ) : (
+            timeGreeting().ask
+          )}
+        </div>
         <div className="chat-welcome-prompts">
           {WELCOME_PROMPTS.map((p, i) => (
             <button

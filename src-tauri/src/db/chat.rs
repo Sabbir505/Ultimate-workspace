@@ -61,6 +61,12 @@ fn map_chat_session(row: &rusqlite::Row) -> rusqlite::Result<ChatSession> {
         // The subagent definition this session runs; NULL = not a subagent run
         // (or the definition was deleted — ON DELETE SET NULL).
         agent_def_id: row.get::<_, Option<String>>("agent_def_id")?,
+        // Bot binding (docs/architecture/BOTS.md). NULL-safe for rows written
+        // before the columns existed: `.get` tolerates an absent column, so a
+        // half-migrated row reads as "plain chat" instead of erroring.
+        bot_id: row.get("bot_id").ok().flatten(),
+        bot_role: row.get("bot_role").ok().flatten(),
+        bot_job_id: row.get("bot_job_id").ok().flatten(),
     })
 }
 
@@ -69,6 +75,28 @@ pub fn list_chat_sessions(conn: &Connection) -> DbResult<Vec<ChatSession>> {
     let mut stmt =
         conn.prepare("SELECT * FROM chat_sessions ORDER BY starred DESC, last_active_at DESC")?;
     let rows = stmt.query_map([], map_chat_session)?;
+    rows.collect()
+}
+
+/// Idle-compaction candidates: built-in (non-harness) sessions whose last
+/// activity is at or before `idle_before` (unix secs). Excludes bot sessions
+/// and automation run-logs — their lifecycle isn't "the user stepped away from
+/// a thread" — and anything running a CLI harness, whose context lives in the
+/// CLI process and cannot be compacted from a background sweep. Ordered
+/// oldest-first so a rate-limited pass reaches the stalest threads first.
+pub fn list_idle_compact_candidates(
+    conn: &Connection,
+    idle_before: i64,
+) -> DbResult<Vec<ChatSession>> {
+    let mut stmt = conn.prepare(
+        "SELECT * FROM chat_sessions
+          WHERE last_active_at <= ?1
+            AND (agent IS NULL OR agent NOT LIKE 'harness:%')
+            AND bot_id IS NULL
+            AND id NOT IN (SELECT chat_session_id FROM automations WHERE chat_session_id IS NOT NULL)
+          ORDER BY last_active_at ASC",
+    )?;
+    let rows = stmt.query_map(params![idle_before], map_chat_session)?;
     rows.collect()
 }
 
@@ -198,20 +226,98 @@ pub fn fork_chat_session(
     source: &ChatSession,
     upto_message_id: Option<i64>,
 ) -> DbResult<ChatSession> {
-    let now = now_ts();
-    let id = new_id();
     let origin = format!("fork_of:{}", source.id);
     let fork_n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM chat_sessions WHERE origin = ?1",
         params![origin],
         |r| r.get::<_, i64>(0),
     )? + 1;
+    let title = source
+        .title
+        .as_ref()
+        .map(|t| format!("{t} · fork {fork_n}"));
+    copy_chat_session_with_history(conn, source, upto_message_id, &origin, title)
+}
+
+/// `kind` of a sidechat's hidden context seed row — the ONE model-only row
+/// `open_sidechat` writes (see `agent_sessions::sidechat_seed_from_records`).
+/// Every display/search reader filters it out; the harness primer embeds it
+/// verbatim. Single source of truth for the spelling (the SQL filters repeat
+/// it as a literal — SQLite can't bind a Rust const into a prepared string).
+pub const SIDECHAT_SEED_KIND: &str = "sidechat_seed";
+
+/// Open the sidechat of a chat: a private sub-thread that continues from a
+/// snapshot of the source's live history. Powers `/sidechat` and the tool
+/// panel's Sidechat entry — the user asks questions beside the main session
+/// without adding turns to it (the source row is never touched).
+///
+/// Contract: at most ONE sidechat per source chat. When a `side_of:<id>` row
+/// already exists it is returned as-is (its snapshot is from its creation;
+/// re-opening is a re-focus, not a re-sync). Deleting the sidechat row makes
+/// the next open build a fresh snapshot. Config is carried like the fork
+/// (provider/model/agent/project/policies/effort) and `worktree_path` is
+/// deliberately NOT copied — a worktree belongs to exactly one session and
+/// the source's is in use.
+///
+/// The snapshot is ONE hidden context row (`kind = 'sidechat_seed'`, see
+/// `agent_sessions::sidechat_seed_from_records`), not copies of the source's
+/// turns: the model reads it on every sidechat turn, while every user-facing
+/// reader (`list_display_chat_messages`, search, export) and the memory
+/// extractor (its cursor is parked past the seed) skip it — so the pane shows
+/// only what the user actually asks in the sidechat.
+pub fn open_sidechat(conn: &Connection, source: &ChatSession) -> DbResult<ChatSession> {
+    let origin = format!("side_of:{}", source.id);
+    if let Some(existing) = conn
+        .query_row(
+            "SELECT * FROM chat_sessions WHERE origin = ?1 ORDER BY created_at DESC, id DESC LIMIT 1",
+            params![origin],
+            map_chat_session,
+        )
+        .optional()?
+    {
+        return Ok(existing);
+    }
+    let title = source.title.as_ref().map(|t| format!("{t} · sidechat"));
+    let id = insert_session_copy(conn, source, &origin, title)?;
+    // Hidden context seed, built from the source's live rows. Empty seed
+    // (nothing to hand over) → no row; the sidechat starts truly empty.
+    let records = list_active_chat_messages(conn, &source.id)?;
+    let seed = crate::agent_sessions::sidechat_seed_from_records(&records);
+    if !seed.is_empty() {
+        conn.execute(
+            "INSERT INTO chat_messages (chat_session_id, role, content, created_at, kind)
+             VALUES (?1, 'user', ?2, ?3, ?4)",
+            params![id, seed, now_ts(), SIDECHAT_SEED_KIND],
+        )?;
+        // The seed is context, not conversation: park the memory-extraction
+        // cursor past it so the source's turns are never re-extracted here.
+        super::memory::upsert_cursor(conn, &id, conn.last_insert_rowid())?;
+    }
+    conn.query_row(
+        "SELECT * FROM chat_sessions WHERE id = ?1",
+        params![id],
+        map_chat_session,
+    )
+}
+
+/// Shared session-row insert behind `fork_chat_session` and `open_sidechat`:
+/// copies the source's config (provider/model/agent/project/cwd override/
+/// policies/effort/watch mode), records `origin`, and returns the new id.
+/// `worktree_path` (and bot/star/unread state) is deliberately NOT copied.
+fn insert_session_copy(
+    conn: &Connection,
+    source: &ChatSession,
+    origin: &str,
+    title: Option<String>,
+) -> DbResult<String> {
+    let now = now_ts();
+    let id = new_id();
     conn.execute(
         "INSERT INTO chat_sessions (id, title, provider, model, created_at, last_active_at, watch_mode, agent, project_id, cwd_override, permission_mode, sandbox_policy, approval_policy, auto_model, effort_level, origin)
          VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         params![
             id,
-            source.title.as_ref().map(|t| format!("{t} · fork {fork_n}")),
+            title,
             source.provider,
             source.model,
             now,
@@ -227,11 +333,25 @@ pub fn fork_chat_session(
             origin,
         ],
     )?;
+    Ok(id)
+}
+
+/// Shared engine behind `fork_chat_session`: insert a new session row copying
+/// the source's config, then INSERT..SELECT its live message rows (superseded
+/// rows skipped; `upto_message_id` truncates the tail inclusive). Returns the
+/// freshly re-read row.
+fn copy_chat_session_with_history(
+    conn: &Connection,
+    source: &ChatSession,
+    upto_message_id: Option<i64>,
+    origin: &str,
+    title: Option<String>,
+) -> DbResult<ChatSession> {
+    let id = insert_session_copy(conn, source, origin, title)?;
     // INSERT..SELECT copies the rows in place (the FTS triggers fire row by
     // row, so the copies stay searchable); new autoincrement ids keep the
     // timeline order via ORDER BY id. `kind` carries command-only rows
-    // (artifact_command) so the fork's transcript matches the source's.
-    // `upto_message_id` truncates the tail (bubble fork-at-message).
+    // (artifact_command) so the copy's transcript matches the source's.
     conn.execute(
         "INSERT INTO chat_messages (chat_session_id, role, content, input_tokens, output_tokens, cost_usd, created_at, cache_creation_input_tokens, cache_read_input_tokens, reasoning_output_tokens, provider, model_key, pricing_estimated_usd, started_at, completed_at, llm_time_ms, tool_time_ms, ttft_ms, tokens_per_second, kind)
          SELECT ?1, role, content, input_tokens, output_tokens, cost_usd, created_at, cache_creation_input_tokens, cache_read_input_tokens, reasoning_output_tokens, provider, model_key, pricing_estimated_usd, started_at, completed_at, llm_time_ms, tool_time_ms, ttft_ms, tokens_per_second, kind
@@ -367,6 +487,19 @@ pub fn delete_chat_session(conn: &Connection, chat_session_id: &str) -> DbResult
         params![chat_session_id],
     )?;
     crate::db::memory::flag_unbacked_memories(&tx)?;
+    // Bots (docs/architecture/BOTS.md): a run session can be deleted here (the
+    // Bots rail's per-row delete) and neither `bot_runs.session_id` nor
+    // `bot_approvals.run_session_id` carries a foreign key, so clean them
+    // explicitly — otherwise the run row dangles in the activity strip and a
+    // pending approval replays into a session that no longer exists.
+    tx.execute(
+        "DELETE FROM bot_approvals WHERE run_session_id = ?1",
+        params![chat_session_id],
+    )?;
+    tx.execute(
+        "DELETE FROM bot_runs WHERE session_id = ?1",
+        params![chat_session_id],
+    )?;
     // FK cascade handles chat_messages.
     tx.execute(
         "DELETE FROM chat_sessions WHERE id = ?1",
@@ -388,6 +521,7 @@ pub fn delete_empty_chat_sessions(conn: &Connection, keep: Option<&str>) -> DbRe
     let n = conn.execute(
         "DELETE FROM chat_sessions
          WHERE starred = 0
+           AND bot_id IS NULL
            AND id NOT IN (SELECT DISTINCT chat_session_id FROM chat_messages)
            AND id NOT IN (SELECT chat_session_id FROM automations WHERE chat_session_id IS NOT NULL)
            AND (?1 IS NULL OR id <> ?1)",
@@ -448,6 +582,39 @@ pub fn update_chat_session_agent(
     conn.execute(
         "UPDATE chat_sessions SET agent = ?2 WHERE id = ?1",
         params![chat_session_id, agent],
+    )?;
+    Ok(())
+}
+
+/// Bind (or unbind) a session to a bot. `None` is the one "no bot" sentinel —
+/// there is deliberately no empty-string sentinel anywhere in this feature.
+/// Used by `db::bots::ensure_bot_session` / `create_bot_run_session` and, in
+/// reverse, by `delete_bot`, which unbinds explicitly rather than relying on
+/// `PRAGMA foreign_keys` (the column carries no FK action for that reason).
+pub fn set_chat_session_bot(
+    conn: &Connection,
+    chat_session_id: &str,
+    bot_id: Option<&str>,
+) -> DbResult<()> {
+    conn.execute(
+        "UPDATE chat_sessions SET bot_id = ?2 WHERE id = ?1",
+        params![chat_session_id, bot_id],
+    )?;
+    Ok(())
+}
+
+/// Set the session's bot role (`'thread'` | `'run'` | None) and the standing
+/// job that spawned a run session. Kept separate from `set_chat_session_bot`
+/// so binding and classifying are two explicit steps.
+pub fn set_chat_session_bot_role(
+    conn: &Connection,
+    chat_session_id: &str,
+    role: Option<&str>,
+    job_id: Option<&str>,
+) -> DbResult<()> {
+    conn.execute(
+        "UPDATE chat_sessions SET bot_role = ?2, bot_job_id = ?3 WHERE id = ?1",
+        params![chat_session_id, role, job_id],
     )?;
     Ok(())
 }
@@ -733,6 +900,7 @@ fn map_chat_message(row: &rusqlite::Row) -> rusqlite::Result<ChatMessageRecord> 
         tool_time_ms: row.get("tool_time_ms")?,
         ttft_ms: row.get("ttft_ms")?,
         tokens_per_second: row.get("tokens_per_second")?,
+        kind: row.get("kind")?,
     })
 }
 
@@ -864,6 +1032,7 @@ pub fn add_chat_message(conn: &Connection, msg: NewChatMessage) -> DbResult<Chat
         tool_time_ms,
         ttft_ms,
         tokens_per_second,
+        kind: None,
     })
 }
 
@@ -906,6 +1075,7 @@ pub fn add_command_chat_message(
         tool_time_ms: None,
         ttft_ms: None,
         tokens_per_second: None,
+        kind: Some(kind.to_string()),
     })
 }
 
@@ -942,13 +1112,53 @@ pub fn list_chat_messages_page(
     rows.collect()
 }
 
+/// The user-facing timeline (desktop `get_chat_messages`, export, title
+/// generation): same rows as `list_chat_messages` EXCEPT the context-only
+/// `sidechat_seed` row — the hidden snapshot a sidechat carries from its
+/// source chat. Model-visible via `list_active_chat_messages`, never shown.
+pub fn list_display_chat_messages(
+    conn: &Connection,
+    chat_session_id: &str,
+) -> DbResult<Vec<ChatMessageRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT * FROM chat_messages
+          WHERE chat_session_id = ?1
+            AND (kind IS NULL OR kind != 'sidechat_seed')
+          ORDER BY id",
+    )?;
+    let rows = stmt.query_map(params![chat_session_id], map_chat_message)?;
+    rows.collect()
+}
+
+/// Paged [`list_display_chat_messages`] (M7 keyset paging, same page
+/// semantics as `list_chat_messages_page`).
+pub fn list_display_chat_messages_page(
+    conn: &Connection,
+    chat_session_id: &str,
+    before_id: Option<i64>,
+    limit: i64,
+) -> DbResult<Vec<ChatMessageRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT * FROM (
+           SELECT * FROM chat_messages
+             WHERE chat_session_id = ?1 AND (?2 IS NULL OR id < ?2)
+               AND (kind IS NULL OR kind != 'sidechat_seed')
+             ORDER BY id DESC LIMIT ?3
+         ) ORDER BY id",
+    )?;
+    let rows = stmt.query_map(params![chat_session_id, before_id, limit], map_chat_message)?;
+    rows.collect()
+}
+
 /// The subset of messages the send path feeds to the model: every row NOT
 /// folded into a `[compacted context]` summary (i.e. `superseded_by IS NULL`)
 /// and NOT a command-only timeline row (`kind = 'artifact_command'` — the
 /// /create flow persists those as proposal-card anchors while the actual
 /// work runs out-of-band; if the model saw them it would re-execute the
-/// stale instruction on the next send). The full `list_chat_messages` still
-/// returns them for the UI.
+/// stale instruction on the next send). Context-only rows DO pass
+/// (`sidechat_seed` — the sidechat's hidden snapshot IS model context); the
+/// full `list_chat_messages` still returns everything for readers that need
+/// it raw, while `list_display_chat_messages` is the UI-facing view.
 pub fn list_active_chat_messages(
     conn: &Connection,
     chat_session_id: &str,
@@ -1217,6 +1427,7 @@ pub fn search_chat_messages(
                  JOIN chat_messages m ON m.id = chat_messages_fts.rowid
                  JOIN chat_sessions s ON s.id = m.chat_session_id
                  WHERE chat_messages_fts MATCH ?1 AND m.superseded_by IS NULL
+                   AND (m.kind IS NULL OR m.kind != 'sidechat_seed')
                  ORDER BY rank
                  LIMIT ?2",
             )?;
@@ -1263,6 +1474,7 @@ mod tests {
                 trigger_type: None,
                 trigger_config: None,
                 chat_mode: None,
+                bot_id: None,
             },
         )
         .unwrap();
@@ -2064,6 +2276,90 @@ mod tests {
         assert_eq!(fork.origin.as_deref(), Some(format!("fork_of:{}", cs.id).as_str()));
         assert_eq!(fork.provider, "openai");
         assert_eq!(list_chat_messages(&conn, &fork.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn open_sidechat_persists_one_hidden_seed_and_reuses_the_row() {
+        let conn = super::super::mem();
+        let cs = create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
+        update_chat_session_title(&conn, &cs.id, "API redesign").unwrap();
+        // A real worktree on the source, so "not copied" is an assertion that
+        // can actually fail (the invariant "the source's worktree is in use,
+        // the sidechat provisions its own").
+        set_chat_session_worktree(&conn, &cs.id, Some("/tmp/source-wt")).unwrap();
+        let cs = get_chat_session(&conn, &cs.id).unwrap().unwrap();
+        add_msg(&conn, &cs.id, "user", "why is the build failing?");
+        add_msg(&conn, &cs.id, "assistant", "because the schema drift…");
+
+        let side = open_sidechat(&conn, &cs).unwrap();
+        assert_ne!(side.id, cs.id);
+        assert_eq!(side.origin.as_deref(), Some(format!("side_of:{}", cs.id).as_str()));
+        // Config carried; title gains the sidechat suffix.
+        assert_eq!(side.provider, cs.provider);
+        assert_eq!(side.model, cs.model);
+        assert_eq!(side.project_id, cs.project_id);
+        assert_eq!(side.title.as_deref(), Some("API redesign · sidechat"));
+        // The worktree is deliberately NOT copied (isolation invariant): the
+        // source's tree stays its own, and the sidechat provisions one later.
+        assert_eq!(cs.worktree_path.as_deref(), Some("/tmp/source-wt"));
+        assert!(side.worktree_path.is_none());
+
+        // Exactly ONE message row: the hidden context seed. The source's
+        // turns are never copied, so none of the main chat can show in the
+        // sidechat pane; the model still reads the seed on every turn.
+        let all = list_chat_messages(&conn, &side.id).unwrap();
+        assert_eq!(all.len(), 1);
+        assert!(all[0].content.contains("[Sidechat context]"));
+        assert!(all[0].content.contains("why is the build failing?"));
+        assert!(all[0].content.contains("schema drift"));
+        assert!(list_display_chat_messages(&conn, &side.id).unwrap().is_empty());
+        let active = list_active_chat_messages(&conn, &side.id).unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].content, all[0].content);
+        // The memory cursor is parked past the seed: the source's turns are
+        // not re-extracted as sidechat memories.
+        assert_eq!(
+            super::super::memory::get_cursor(&conn, &side.id).unwrap(),
+            all[0].id
+        );
+
+        // The source is untouched.
+        assert_eq!(list_chat_messages(&conn, &cs.id).unwrap().len(), 2);
+
+        // A real turn in the sidechat is the ONLY thing the pane shows.
+        add_msg(&conn, &side.id, "user", "and what about the migration?");
+        let shown = list_display_chat_messages(&conn, &side.id).unwrap();
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].content, "and what about the migration?");
+        // The paged display reader skips the seed the same way.
+        let paged = list_display_chat_messages_page(&conn, &side.id, None, 50).unwrap();
+        assert_eq!(paged.len(), 1);
+        assert_eq!(paged[0].content, "and what about the migration?");
+
+        // Re-opening returns the SAME row — one sidechat per source, its
+        // snapshot frozen at creation even as the source moves on.
+        add_msg(&conn, &cs.id, "user", "another message");
+        let again = open_sidechat(&conn, &cs).unwrap();
+        assert_eq!(again.id, side.id);
+        assert_eq!(list_chat_messages(&conn, &side.id).unwrap().len(), 2);
+
+        // Each source chat gets its own sidechat; a source with no live rows
+        // hands nothing over, so its sidechat starts truly empty.
+        let other = create_chat_session(&conn, "openai", "gpt-5", None).unwrap();
+        let other_side = open_sidechat(&conn, &other).unwrap();
+        assert_ne!(other_side.id, side.id);
+        assert_eq!(
+            other_side.origin.as_deref(),
+            Some(format!("side_of:{}", other.id).as_str())
+        );
+        // NULL title stays NULL (auto-titled by the sidechat's first send).
+        assert!(other_side.title.is_none());
+        assert!(list_chat_messages(&conn, &other_side.id).unwrap().is_empty());
+
+        // The seed is context-only: it never surfaces as a search hit (a hit
+        // would point at a row the UI cannot show or scroll to).
+        let hits = search_chat_messages(&conn, "schema drift", 10).unwrap();
+        assert!(!hits.iter().any(|h| h.chat_session_id == side.id));
     }
 
     #[test]

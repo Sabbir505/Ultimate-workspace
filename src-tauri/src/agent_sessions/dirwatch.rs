@@ -104,13 +104,15 @@ pub(super) struct DirWatch {
 }
 
 /// An entry that is never entered by a watch or a snapshot: VCS/editor
-/// dotdirs, dependency/build trees, and the harness attachments tree
-/// (input materialized for other chats — see `watch_path_allowed`).
+/// dotdirs, dependency/build trees, the harness attachments tree (input
+/// materialized for other chats — see `watch_path_allowed`), and the
+/// `_backups` recovery-zip folder the 30-day expiry sweep writes into.
 pub(super) fn watch_path_pruned(name: &str) -> bool {
     name.starts_with('.')
         || name == "node_modules"
         || name == "target"
         || name == "chat-attachments"
+        || name == "_backups"
 }
 
 /// Depth/filter rules shared by `snapshot_dir` and the watcher callback so

@@ -167,6 +167,21 @@ pub fn fork_chat_session(
     db::fork_chat_session(&conn, &source, upto_message_id).map_err(|e| e.to_string())
 }
 
+/// Open the sidechat of a chat (`/sidechat` command, tool-panel entry): a
+/// private sub-thread seeded with a snapshot of the source's live history,
+/// pinned by the frontend into a pane beside the main chat. The snapshot is
+/// ONE hidden context row — the pane shows only the sidechat's own turns
+/// (see db::open_sidechat). Reuses the existing `side_of:<id>` row when one
+/// was already created for this chat — at most ONE sidechat per source.
+#[tauri::command(async)]
+pub fn open_sidechat(chat_session_id: String, db: State<'_, DbState>) -> CmdResult<ChatSession> {
+    let conn = db.0.lock();
+    let source = db::get_chat_session(&conn, &chat_session_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("unknown chat session: {chat_session_id}"))?;
+    db::open_sidechat(&conn, &source).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn delete_chat_session(
     chat_session_id: String,
@@ -626,15 +641,19 @@ pub fn get_chat_messages(
     chat_session_id: String,
     // M7: keyset pagination. `None`/`None` keeps the legacy behavior of the
     // full history (some callers — e.g. export — need it all), but the chat
-    // view now pages 200 at a time.
+    // view now pages 200 at a time. Either way the hidden sidechat context
+    // row (`sidechat_seed`) is excluded: the pane shows only the sidechat's
+    // own turns, while the model still reads the seed on every turn.
     before_id: Option<i64>,
     limit: Option<i64>,
     db: State<'_, DbState>,
 ) -> CmdResult<Vec<ChatMessageRecord>> {
     let conn = db.0.lock();
     match (before_id, limit) {
-        (None, None) => db::list_chat_messages(&conn, &chat_session_id).map_err(|e| e.to_string()),
-        (b, l) => db::list_chat_messages_page(&conn, &chat_session_id, b, l.unwrap_or(200))
+        (None, None) => {
+            db::list_display_chat_messages(&conn, &chat_session_id).map_err(|e| e.to_string())
+        }
+        (b, l) => db::list_display_chat_messages_page(&conn, &chat_session_id, b, l.unwrap_or(200))
             .map_err(|e| e.to_string()),
     }
 }

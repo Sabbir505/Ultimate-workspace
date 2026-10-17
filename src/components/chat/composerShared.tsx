@@ -9,9 +9,17 @@ import { writeFile } from "@tauri-apps/plugin-fs";
 import type { ArtifactType } from "../../lib/ipc";
 import { toastError } from "../../lib/ipc";
 
-export const MAX_TEXT_BYTES = 512 * 1024;
-export const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
-export const MAX_DOC_BYTES = 10 * 1024 * 1024;
+// ONE per-file cap, mirroring the send-path backend check
+// (src-tauri/src/chat/commands/send.rs MAX_ATTACHMENT_BYTES = 25 MB) and the
+// mobile composer's cap, so the composer rejects exactly what the backend
+// rejects. The old split (15 MB image / 10 MB doc / 512 KB text) refused
+// files the backend would have accepted — notably any text-like file over
+// 512 KB (.html, .csv, .json, .md) was un-attachable and the error even
+// misreported it as "max 1 MB" (Math.round(0.5)).
+export const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+export const MAX_TEXT_BYTES = MAX_ATTACHMENT_BYTES;
+export const MAX_IMAGE_BYTES = MAX_ATTACHMENT_BYTES;
+export const MAX_DOC_BYTES = MAX_ATTACHMENT_BYTES;
 // A paste this large stops being a sentence and becomes a document: it turns
 // into a "Pasted text.txt" attachment card (which the sent message renders as
 // a document card with a content preview) instead of a wall of inline text in
@@ -272,7 +280,9 @@ export async function fileToAttachment(file: File): Promise<ChatAttachment> {
   const limit =
     kind === "image" ? MAX_IMAGE_BYTES : kind === "doc" ? MAX_DOC_BYTES : MAX_TEXT_BYTES;
   if (file.size > limit) {
-    throw new Error(`${file.name} is too large (max ${Math.round(limit / 1024 / 1024)} MB)`);
+    const mb = limit / 1024 / 1024;
+    const shown = Number.isInteger(mb) ? `${mb}` : mb.toFixed(1);
+    throw new Error(`${file.name} is too large (max ${shown} MB)`);
   }
   if (kind === "image") {
     return {

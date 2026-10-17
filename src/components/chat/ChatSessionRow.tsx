@@ -4,9 +4,9 @@
 // A vertical three-dot button reveals a context menu (star/pin, rename, mark
 // unread, delete) on hover. Styled to match the existing .session-row and
 // .project-row patterns.
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
-import { Folder, GitBranch, GitFork, Pin, Users } from "lucide-react";
+import { AlertTriangle, Folder, GitBranch, GitFork, Pin, Users } from "lucide-react";
 import { relativeTime } from "../../lib/relativeTime";
 import { sessionModelIcon } from "./agentIcons";
 import { useSubagentStore } from "../../state/subagents";
@@ -42,6 +42,9 @@ export interface ChatSessionRowData {
    *  `agent_def_id` column. The chip also resolves from the subagent store's
    *  live `runs` map, so a run spawned in this window is tagged either way. */
   agentDefId?: string | null;
+  /** Spawn parent (mesh/subagent) resolved from the session's `origin` column.
+   *  Consumed by the list's grouping/nesting pass, not rendered directly. */
+  parentId?: string | null;
 }
 
 interface Props {
@@ -49,6 +52,18 @@ interface Props {
   active: boolean;
   /** True while this chat has a response streaming (even when viewed elsewhere). */
   working?: boolean;
+  /** Spawn-tree child — rendered indented under its parent with a connector. */
+  nested?: boolean;
+  /** Nesting level (0 = top level). Drives how far the row is indented; a
+   *  deeper spawn chain steps in further. Falls back to `nested ? 1 : 0`. */
+  depth?: number;
+  /** Last child of its parent — the connector spine stops at this row instead
+   *  of continuing to a following sibling. */
+  lastChild?: boolean;
+  /** The row's whole subtree is done — its title reads bold. */
+  completed?: boolean;
+  /** This chat is blocked on a pending approval/question/plan. */
+  needsInput?: boolean;
   onSelect: (id: string) => void;
   onDelete: (id: string) => void;
   onRename: (id: string, title: string) => void;
@@ -83,6 +98,11 @@ export function ChatSessionRow({
   session,
   active,
   working,
+  nested,
+  depth,
+  lastChild,
+  completed,
+  needsInput,
   onSelect,
   onDelete,
   onRename,
@@ -106,6 +126,10 @@ export function ChatSessionRow({
   // True when the title is truncated — drives the hover marquee so users can
   // read the full title without a tooltip round-trip.
   const [titleOverflows, setTitleOverflows] = useState(false);
+
+  // Spawn-tree indent level. Each level steps in by the connector width (14px,
+  // set in CSS via --nest-depth).
+  const nestDepth = nested || (depth ?? 0) > 0 ? Math.max(1, depth ?? 1) : 0;
 
   // Subagent tag (Phase 2.5): a chat spawned by a subagent is a normal chat, so
   // the sidebar row is the only place the agent shows. Two sources, in order:
@@ -222,7 +246,8 @@ export function ChatSessionRow({
   return (
     <div
       ref={rowRef}
-      className={`chat-session-row${active ? " active" : ""}${session.unread ? " unread" : ""}${menuOpen ? " menu-open" : ""}`}
+      className={`chat-session-row${active ? " active" : ""}${session.unread ? " unread" : ""}${menuOpen ? " menu-open" : ""}${nestDepth > 0 ? " is-nested" : ""}${nestDepth > 0 && lastChild ? " is-last-child" : ""}${completed ? " is-completed" : ""}${needsInput ? " needs-input" : ""}`}
+      style={nestDepth > 0 ? ({ "--nest-depth": String(nestDepth) } as CSSProperties) : undefined}
       onClick={() => !editing && onSelect(session.id)}
       title={session.title}
       // Drag a session row onto any open chat pane's edge (left/right/top/
@@ -277,6 +302,19 @@ export function ChatSessionRow({
             <div ref={titleRef} className={`chat-session-title${titleOverflows ? " overflows" : ""}`}>
               <span className="chat-session-title-text">{session.title}</span>
             </div>
+          )}
+          {/* "Needs input" mark: this chat is paused on a pending
+              approval/question/plan. Sits just before the time/menu slot so
+              it reads at the row's right edge (see the group section it lands
+              in). */}
+          {needsInput && (
+            <span
+              className="chat-session-needs-input"
+              title="Needs your input"
+              aria-label="Needs input"
+            >
+              <AlertTriangle size={13} strokeWidth={1.9} />
+            </span>
           )}
           {/* Time slot: the working spinner takes the timer's place while the
               chat is streaming; the relative time returns once it's done. The
@@ -422,3 +460,10 @@ export function ChatSessionRow({
 // reference-stable across renders.
 export const ChatSessionRowMemo = memo(ChatSessionRow);
 ChatSessionRowMemo.displayName = "ChatSessionRow";
+
+/** Section header inside a chat list ("Needs input" / "Working" / "Completed").
+ *  Shared by the Chat History inbox and the Projects panel so the section
+ *  rhythm matches across both surfaces. */
+export function ChatSessionGroupHeader({ label }: { label: string }) {
+  return <div className="chat-group-header">{label}</div>;
+}

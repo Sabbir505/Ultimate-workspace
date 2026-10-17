@@ -1,0 +1,548 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Relay — grouped chat list harness</title>
+<style>
+/* ============================================================================
+   Theme tokens (subset of src/styles/tokens.css that the chat list uses)
+   ========================================================================== */
+:root {
+  --font-ui: system-ui, -apple-system, "Segoe UI", "Nirmala UI", sans-serif;
+  --radius: 12px; --radius-sm: 8px; --radius-xs: 6px;
+  --glass-rim: inset 0 1px 0 0 rgba(255,255,255,.06);
+  --glass-rim-soft: inset 0 1px 0 0 rgba(255,255,255,.04);
+  --glass-drop: 0 12px 32px -12px rgba(0,0,0,.35);
+  --ease: cubic-bezier(.2,.7,.2,1);
+  --warn: #d29922;
+}
+:root[data-theme="dark"] {
+  --bg-tint:#181818; --surface:#1a1a1a; --surface-2:#1f1f1f; --surface-solid:#141414;
+  --surface-glass:#1e1e1e; --surface-glass-2:#252525; --surface-1:#1e1e1e; --surface-3:#2a2a2a;
+  --glass-hover:rgba(255,255,255,.06); --border:#2a2a2a; --border-strong:#3a3a3a;
+  --text:#e4e4e4; --text-dim:#a0a0a0; --chat-text:#c9c9c9;
+  --accent:#6e706f; --accent-soft:rgba(110,112,111,.16); --accent-contrast:#fff;
+  --danger:#ff7b72; --warn:#d29922;
+}
+:root[data-theme="light"] {
+  --bg-tint:#ffffff; --surface:#ffffff; --surface-2:#f3f3f3; --surface-solid:#fafafa;
+  --surface-glass:#ffffff; --surface-glass-2:#f3f3f3; --surface-1:#f0f0f0; --surface-3:#e8e8e8;
+  --glass-hover:rgba(0,0,0,.06); --border:#e0e0e0; --border-strong:#c8c8c8;
+  --text:#1a1a1a; --text-dim:#6a6a6a; --chat-text:#1a1a1a;
+  --accent:#6e706f; --accent-soft:rgba(110,112,111,.12); --accent-contrast:#fff;
+  --danger:#d64545; --warn:#9a6700;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0; font-family: var(--font-ui); color: var(--text);
+  background:
+    radial-gradient(1200px 600px at 70% -10%, color-mix(in srgb, var(--accent) 16%, transparent), transparent 60%),
+    var(--bg-tint);
+  display: flex; min-height: 100%;
+}
+
+/* ============================================================================
+   Sidebar shell (faithful to .sidebar-glass / .sidebar)
+   ========================================================================== */
+.sidebar {
+  width: 288px; flex-shrink: 0; height: 100vh; display: flex; flex-direction: column;
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--surface-glass) 45%, transparent),
+    color-mix(in srgb, var(--surface-glass) 25%, transparent));
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  border-right: 1px solid var(--border);
+  box-shadow: var(--glass-rim), inset 0 0 0 1px rgba(255,255,255,.08);
+  overflow: hidden;
+}
+:root[data-theme="light"] .sidebar {
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--surface-glass) 55%, transparent),
+    color-mix(in srgb, var(--surface-glass) 38%, transparent));
+}
+.sidebar-scroll { flex: 1; overflow-y: auto; min-height: 0; padding: 4px 8px 12px; }
+.sidebar-thin-scroll::-webkit-scrollbar { width: 8px; }
+.sidebar-thin-scroll::-webkit-scrollbar-thumb { background: rgba(128,128,128,.28); border-radius: 4px; }
+
+.sidebar-brand { display:flex; align-items:center; gap:8px; padding: 14px 14px 10px; font-weight: 700; letter-spacing:.01em; }
+.sidebar-brand .dot { width:8px; height:8px; border-radius:50%; background: var(--accent); }
+
+/* Section header ("Chat History") — matches .sidebar-section-header */
+.section-header {
+  display:flex; align-items:center; gap:4px; margin: 2px 4px 2px; padding: 4px 4px;
+  border-radius: var(--radius-xs);
+}
+.section-header:hover { background: var(--glass-hover); }
+.section-label {
+  flex:1; display:inline-flex; align-items:center; gap:6px; padding:6px 4px;
+  font-size:12px; font-weight:500; color: var(--text-dim); user-select:none;
+}
+.section-label:hover { color: var(--text); }
+.section-plus {
+  display:inline-flex; align-items:center; justify-content:center; width:26px; height:26px;
+  border:none; background:transparent; color: var(--text-dim); border-radius: var(--radius-sm); cursor:pointer;
+}
+.section-plus:hover { background: var(--glass-hover); color: var(--text); }
+
+/* ============================================================================
+   Group header + nesting + completed + needs-input  (src/styles/chat.css)
+   ======================================================================== */
+.chat-group-header {
+  padding: 8px 8px 2px; font-size: 10.5px; font-weight: 600; letter-spacing: .01em;
+  color: var(--text-dim); user-select: none;
+}
+.chat-session-row {
+  position: relative; display:flex; align-items:flex-start; gap:5px;
+  padding: 6px 8px; border-radius: var(--radius-sm); cursor:pointer;
+  transition: background .15s var(--ease);
+}
+.chat-session-row:hover { background: var(--surface-2); }
+.chat-session-row.active { background: var(--accent-soft); box-shadow: var(--glass-rim-soft); }
+.chat-session-row.unread .chat-session-title { font-weight: 700; }
+.chat-session-row.is-nested {
+  --nest-indent: 20px;
+  margin-left: calc(var(--nest-indent) * var(--nest-depth, 1));
+  --nest-connector: color-mix(in srgb, var(--text) 24%, transparent);
+  --nest-spine-x: calc(31px - var(--nest-indent));
+  --nest-arm: calc(25px - var(--nest-spine-x));
+}
+.chat-session-row.is-nested::before {
+  content:""; position:absolute; left:var(--nest-spine-x); top:14px; bottom:0; width:0;
+  border-left:1px solid var(--nest-connector); pointer-events:none;
+}
+.chat-session-row.is-nested.is-last-child::before { content:none; }
+.chat-session-row.is-nested::after {
+  content:""; position:absolute; left:var(--nest-spine-x); top:calc(14px - 100%); width:var(--nest-arm); height:100%;
+  border-left:1px solid var(--nest-connector); border-bottom:1px solid var(--nest-connector);
+  border-bottom-left-radius:7px; pointer-events:none;
+}
+.chat-session-row.is-completed .chat-session-title { font-weight: 700; }
+.chat-session-needs-input {
+  flex:none; display:inline-flex; align-items:center; margin-left:auto; color: var(--warn);
+}
+
+.chat-session-info { flex:1; min-width:0; display:flex; flex-direction:column; gap:1px; }
+.chat-session-title-row { display:flex; align-items:baseline; gap:6px; }
+.chat-session-title {
+  font-size:11.5px; font-weight:500; overflow:hidden; text-overflow:ellipsis;
+  white-space:nowrap; flex:1; min-width:0;
+}
+.chat-session-title-text { display:inline-block; white-space:nowrap; }
+.chat-session-meta {
+  position:relative; font-size:9px; color:var(--text-dim); display:flex;
+  align-items:baseline; gap:6px; flex:none; white-space:nowrap;
+}
+.chat-session-time { transition: opacity .15s var(--ease); }
+.chat-session-menu-btn {
+  opacity:0; pointer-events:none; border:none; background:transparent; color:var(--text-dim);
+  font-size:15px; line-height:1; padding:0 5px; border-radius:var(--radius-sm); cursor:pointer;
+  transition: opacity .15s var(--ease), background .15s var(--ease);
+}
+.chat-session-row:hover .chat-session-menu-btn { opacity:1; pointer-events:auto; }
+.chat-session-menu-btn:hover { background: color-mix(in srgb, var(--text) 13%, transparent); }
+
+.chat-session-working {
+  flex:none; width:11px; height:11px; border-radius:50%;
+  border:2px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-top-color: var(--accent); animation: chat-session-spin .7s linear infinite;
+}
+.chat-session-row:hover .chat-session-working { opacity:0; }
+@keyframes chat-session-spin { to { transform: rotate(360deg); } }
+
+.chat-session-pin-btn {
+  position:relative; flex:none; width:12px; height:14px; margin-top:2px; display:inline-flex;
+  align-items:center; justify-content:center; padding:0; background:none; border:none;
+  border-radius:var(--radius-sm); color:var(--text-dim); opacity:0; pointer-events:none;
+  transition: opacity .15s var(--ease), color .15s var(--ease);
+}
+.chat-session-row:hover .chat-session-pin-btn, .chat-session-pin-btn.pinned { opacity:1; pointer-events:auto; }
+.chat-session-pin-btn.pinned { color: var(--accent); }
+
+.chat-session-sub-row { display:flex; align-items:center; gap:6px; margin-top:3px; min-width:0; }
+.chat-session-context, .chat-session-branch { display:inline-flex; align-items:center; gap:3px; min-width:0; }
+.chat-session-context { flex:1 1 auto; overflow:hidden; }
+.chat-session-branch { flex:none; max-width:45%; }
+.chat-session-context-icon { flex:none; color:var(--text-dim); opacity:.85; }
+.chat-session-context-text {
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:10.5px;
+  line-height:1.2; color:var(--text-dim); opacity:.9;
+}
+.chat-session-provider { flex:none; margin-left:auto; display:flex; align-items:center; color:var(--text-dim); opacity:.9; }
+
+/* Projects panel variant */
+.projects-panel { padding: 2px 8px; }
+.project-node { display:flex; flex-direction:column; width:100%; }
+.project-row {
+  display:flex; align-items:center; gap:4px; width:100%; padding:6px 8px;
+  border-radius:var(--radius-sm); font-size:13px; font-weight:500; color:var(--text);
+  cursor:pointer; user-select:none;
+}
+.project-row:hover { background: var(--surface-2); }
+.project-name { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.project-branch { flex:none; max-width:84px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:10px; color:var(--text-dim); }
+.projects-chats { padding-left:14px; margin:1px 0 2px; }
+.projects-chats .chat-group-header { padding-left: 0; }
+.sidebar-projects-more {
+  margin-top:2px; padding:4px 8px; border:none; background:transparent; text-align:left;
+  font-size:11.5px; color:var(--text-dim); cursor:pointer; border-radius:var(--radius-sm);
+}
+.sidebar-projects-more:hover { color:var(--text); background:var(--surface-2); }
+
+/* ============================================================================
+   Harness chrome (controls panel on the right)
+   ========================================================================== */
+.controls { flex:1; padding: 22px 26px; max-width: 560px; }
+.controls h1 { font-size: 16px; margin: 0 0 4px; }
+.controls p.lede { color: var(--text-dim); font-size: 13px; margin: 0 0 18px; line-height:1.5; }
+.ctl-group { margin-bottom: 18px; }
+.ctl-group > .lbl { font-size: 11px; font-weight:700; text-transform: uppercase; letter-spacing:.06em; color: var(--text-dim); margin-bottom:8px; }
+.btns { display:flex; flex-wrap:wrap; gap:8px; }
+.btns button {
+  padding: 7px 12px; border-radius: 8px; border:1px solid var(--border-strong);
+  background: var(--surface-2); color: var(--text); font-size:12.5px; cursor:pointer;
+  transition: background .15s var(--ease), border-color .15s var(--ease);
+}
+.btns button:hover { background: var(--surface-3); }
+.btns button.on { border-color: var(--accent); background: var(--accent-soft); }
+.legend { display:flex; flex-direction:column; gap:8px; font-size:12.5px; color:var(--text-dim); }
+.legend .row { display:flex; align-items:center; gap:10px; }
+.legend .swatch { width:14px; height:14px; flex:none; display:inline-flex; align-items:center; justify-content:center; }
+.legend b { color: var(--text); }
+.note { font-size:12px; color:var(--text-dim); margin-top:14px; line-height:1.5; }
+</style>
+</head>
+<body>
+
+  <aside class="sidebar" id="sidebar"></aside>
+
+  <main class="controls">
+    <h1>Grouped chat list — harness</h1>
+    <p class="lede">Faithful re-render of the new sidebar grouping using the real CSS
+      (<code>chat.css</code> + <code>tokens.css</code> subset). The sample data drives the
+      same grouping logic as <code>src/lib/chatSessionGroups.ts</code>.</p>
+
+    <div class="ctl-group">
+      <div class="lbl">Scenario</div>
+      <div class="btns" id="scenarios"></div>
+    </div>
+
+    <div class="ctl-group">
+      <div class="lbl">Surface</div>
+      <div class="btns" id="surfaces"></div>
+    </div>
+
+    <div class="ctl-group">
+      <div class="lbl">Theme</div>
+      <div class="btns" id="themes"></div>
+    </div>
+
+    <div class="ctl-group">
+      <div class="lbl">Legend</div>
+      <div class="legend">
+        <div class="row"><span class="swatch">⚠</span><span><b>Needs input</b> — pending approval / question / plan (amber mark, own row only)</span></div>
+        <div class="row"><span class="swatch">◌</span><span><b>Working</b> — streaming spinner replaces the time</span></div>
+        <div class="row"><span class="swatch">└</span><span><b>Nested</b> — indent + L-connector: an agent-spawned mesh/subagent chat under its parent</span></div>
+        <div class="row"><span class="swatch"><b>T</b></span><span><b>Bold</b> — the row's whole subtree is done (completed), even while nested in a working parent</span></div>
+      </div>
+    </div>
+
+    <p class="note">A child that needs input or is working lifts its <em>parent</em> into that
+      section too; the parent's row stays regular (only the child carries the state mark or bold).</p>
+  </main>
+
+<script>
+/* ============================================================================
+   Grouping logic — port of src/lib/chatSessionGroups.ts
+   ========================================================================== */
+const SECTION_ORDER = ["needsInput", "working", "completed"];
+const SECTION_LABEL = { needsInput: "Needs input", working: "Working", completed: "Completed" };
+const RANK = { needsInput: 2, working: 1, completed: 0 };
+
+function groupChatSessions(sessions, { isWorking, needsInput, maxRoots }) {
+  const byId = new Map(sessions.map(s => [s.id, s]));
+  const children = new Map();
+  const roots = [];
+  for (const s of sessions) {
+    const pid = s.parentId || null;
+    if (pid && pid !== s.id && byId.has(pid)) {
+      const list = children.get(pid) || (children.set(pid, []), children.get(pid));
+      list.push(s);
+    } else roots.push(s);
+  }
+  const ownCache = new Map();
+  const own = s => {
+    if (ownCache.has(s.id)) return ownCache.get(s.id);
+    const st = needsInput(s) ? "needsInput" : isWorking(s) ? "working" : "completed";
+    ownCache.set(s.id, st); return st;
+  };
+  const effCache = new Map(), guard = new Set();
+  const eff = s => {
+    if (effCache.has(s.id)) return effCache.get(s.id);
+    if (guard.has(s.id)) return own(s);
+    guard.add(s.id);
+    let best = own(s);
+    for (const c of children.get(s.id) || []) { const cs = eff(c); if (RANK[cs] > RANK[best]) best = cs; }
+    guard.delete(s.id); effCache.set(s.id, best); return best;
+  };
+  const secRoots = { needsInput: [], working: [], completed: [] };
+  for (const r of roots) secRoots[eff(r)].push(r);
+  for (const k of SECTION_ORDER) {
+    secRoots[k].sort((a, b) => (Number(!!b.starred) - Number(!!a.starred)) || (b.lastActiveAt - a.lastActiveAt));
+  }
+  const ordered = SECTION_ORDER.flatMap(k => secRoots[k]);
+  const total = ordered.length;
+  const shown = maxRoots == null ? total : Math.min(total, Math.max(0, maxRoots));
+  const shownSet = new Set(ordered.slice(0, shown).map(r => r.id));
+  const walked = new Set();
+  const sections = [];
+  const visit = (node, depth, rootId, rows, isLastChild) => {
+    if (walked.has(node.id)) return;
+    walked.add(node.id);
+    const o = own(node);
+    rows.push({ session: node, nested: depth > 0, lastChild: depth > 0 && isLastChild, depth, needsInput: o === "needsInput", working: o === "working", completed: eff(node) === "completed" });
+    const kids = children.get(node.id) || [];
+    kids.forEach((c, i) => visit(c, depth + 1, rootId, rows, i === kids.length - 1));
+  };
+  for (const k of SECTION_ORDER) {
+    const rows = [];
+    for (const r of secRoots[k]) if (shownSet.has(r.id)) visit(r, 0, r.id, rows, true);
+    if (rows.length) sections.push({ key: k, label: SECTION_LABEL[k], rows });
+  }
+  return { sections, totalRoots: total, shownRoots: shown, hasMore: total > shown };
+}
+
+/* ============================================================================
+   Sample data / scenarios
+   ========================================================================== */
+let n = 100;
+function s(title, state, over = {}) {
+  return {
+    id: over.id ?? ("c" + (n++)), title, state,
+    lastActiveAt: over.lastActiveAt ?? (1000 - n),
+    starred: over.starred ?? false, unread: over.unread ?? false,
+    parentId: over.parentId ?? null,
+    project: over.project ?? null, branch: over.branch ?? null,
+    provider: over.provider ?? "anthropic", time: over.time ?? "2m",
+  };
+}
+
+// 1. Mirrors the screenshot's shape.
+function scMixed() {
+  const parentId = "parent-grid";
+  return [
+    s("Update onboarding emails", "needsInput", { id: "onboard", time: "1h", project: "Relay", branch: "main", provider: "anthropic" }),
+    s("Fix product grid layout shift", "working", { id: parentId, time: "now", project: "Storefront", branch: "fix/grid", provider: "harness:claude_code" }),
+    s("Images: lazy-load below the fold", "working", { id: "img", parentId, time: "now", provider: "harness:claude_code" }),
+    s("Cart: add width and height", "completed", { id: "cart", parentId, time: "3m", provider: "harness:claude_code" }),
+    s("Fix flaky checkout tests", "working", { id: "flaky", time: "now", project: "Storefront", branch: "main", provider: "openai" }),
+    s("Migrate cart to server actions", "completed", { id: "migrate", starred: true, time: "2d", project: "Storefront", branch: "main", provider: "anthropic" }),
+    s("Retry failed webhook delivery", "completed", { id: "webhook", time: "3d", provider: "local_gguf" }),
+    s("Add dark mode color tokens", "completed", { id: "tokens", unread: true, time: "5d", project: "Design system", branch: "tokens", provider: "local_gguf" }),
+  ];
+}
+
+// 2. A child that needs input lifts its (otherwise completed) parent up.
+function scChildNeedsInput() {
+  return [
+    s("Refactor auth middleware", "completed", { id: "auth", time: "20m", project: "API", branch: "main", provider: "anthropic" }),
+    s("Rotate the signing key (needs approval)", "needsInput", { id: "rot", parentId: "auth", time: "2m", provider: "harness:claude_code" }),
+    s("Write release notes", "completed", { id: "notes", time: "1h", provider: "openai" }),
+  ];
+}
+
+// 3. Everything idle -> only the Completed section exists.
+function scAllCompleted() {
+  return [
+    s("Migrate cart to server actions", "completed", { id: "m1", time: "2d", project: "Storefront", branch: "main", provider: "anthropic" }),
+    s("Retry failed webhook delivery", "completed", { id: "m2", time: "3d", provider: "local_gguf" }),
+    s("Add dark mode color tokens", "completed", { id: "m3", time: "5d", project: "Design system", branch: "tokens", provider: "local_gguf" }),
+  ];
+}
+
+// 4. Deep spawn tree (parent -> child -> grandchild).
+function scDeep() {
+  return [
+    s("Ship the checkout flow", "working", { id: "root", time: "now", project: "Storefront", branch: "feat/checkout", provider: "harness:claude_code" }),
+    s("Build the address form", "working", { id: "child", parentId: "root", time: "now", provider: "harness:claude_code" }),
+    s("Validate postcode formats", "completed", { id: "grand", parentId: "child", time: "1m", provider: "harness:claude_code" }),
+    s("Wire the payment provider", "completed", { id: "child2", parentId: "root", time: "4m", provider: "harness:claude_code" }),
+  ];
+}
+
+// 5. Only work that needs you.
+function scNeedsInput() {
+  return [
+    s("Approve the schema migration", "needsInput", { id: "n1", time: "now", project: "API", branch: "main", provider: "anthropic" }),
+    s("Review the generated PDF", "needsInput", { id: "n2", time: "5m", provider: "openai" }),
+    s("Answer the harness question", "needsInput", { id: "n3", time: "8m", project: "Mobile", branch: "release", provider: "harness:claude_code" }),
+  ];
+}
+
+// 6. Empty inbox.
+function scEmpty() { return []; }
+
+const SCENARIOS = {
+  "Mixed (screenshot)": scMixed,
+  "Child needs input": scChildNeedsInput,
+  "All completed": scAllCompleted,
+  "Deep nesting": scDeep,
+  "Only needs input": scNeedsInput,
+  "Empty": scEmpty,
+};
+const PROJECT_SCENARIO = "Project panel (paged)";
+SCENARIOS[PROJECT_SCENARIO] = scMixed;
+
+/* ============================================================================
+   Rendering
+   ========================================================================== */
+function icon(name, size = 12) {
+  const open = `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">`;
+  const paths = {
+    alert: `<path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>`,
+    folder: `<path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/>`,
+    branch: `<line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>`,
+    pin: `<line x1="12" y1="17" x2="12" y2="22"/><path d="M5 17h14l-1.6-3.4a2 2 0 0 1-.2-.9V4H6.8v8.7a2 2 0 0 1-.2.9L5 17Z"/>`,
+    cloud: `<path d="M17.5 19a4.5 4.5 0 0 0 .5-8.97A6 6 0 0 0 6.34 9.5 4 4 0 0 0 7 19Z"/>`,
+    laptop: `<rect x="4" y="5" width="16" height="11" rx="1.5"/><path d="M2 20h20"/>`,
+    terminal: `<rect x="3" y="4" width="18" height="16" rx="2"/><path d="m8 10 3 3-3 3M13 16h3"/>`,
+    spark: `<path d="M12 3v18M3 12h18M5.6 5.6l12.8 12.8M18.4 5.6 5.6 18.4"/>`,
+    message: `<path d="M21 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2Z"/>`,
+    plus: `<path d="M12 5v14M5 12h14"/>`,
+    project: `<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/>`,
+    chevron: `<path d="m9 6 6 6-6 6"/>`,
+  };
+  return open + paths[name] + "</svg>";
+}
+const providerIcon = p => p === "local_gguf" ? icon("laptop") : p === "harness:claude_code" ? icon("terminal") : icon("cloud");
+
+function rowHTML(row, activeId) {
+  const x = row.session;
+  const cls = [
+    "chat-session-row",
+    x.id === activeId ? "active" : "",
+    x.unread ? "unread" : "",
+    row.nested ? "is-nested" : "",
+    row.nested && row.lastChild ? "is-last-child" : "",
+    row.completed ? "is-completed" : "",
+    row.needsInput ? "needs-input" : "",
+  ].filter(Boolean).join(" ");
+  const sub = [
+    x.project ? `<span class="chat-session-context" title="${x.project}">${icon("folder",10)}<span class="chat-session-context-text">${x.project}</span></span>` : "",
+    x.branch ? `<span class="chat-session-branch" title="${x.branch}">${icon("branch",10)}<span class="chat-session-context-text">${x.branch}</span></span>` : "",
+    `<span class="chat-session-provider" title="${x.provider}">${providerIcon(x.provider)}</span>`,
+  ].join("");
+  const meta = row.working
+    ? `<span class="chat-session-working" title="Working…"></span>`
+    : `<span class="chat-session-time">${x.time}</span>`;
+  return `
+    <div class="${cls}"${row.nested ? ` style="--nest-depth:${row.depth}"` : ""}>
+      <button class="chat-session-pin-btn ${x.starred ? "pinned" : ""}" title="Pin to top">${icon("pin",11)}</button>
+      <div class="chat-session-info">
+        <div class="chat-session-title-row">
+          <div class="chat-session-title"><span class="chat-session-title-text">${x.title}</span></div>
+          ${row.needsInput ? `<span class="chat-session-needs-input" title="Needs your input">${icon("alert",13)}</span>` : ""}
+          <div class="chat-session-meta">${meta}<button class="chat-session-menu-btn">⋮</button></div>
+        </div>
+        <div class="chat-session-sub-row">${sub}</div>
+      </div>
+    </div>`;
+}
+
+function renderChatHistory(sessions) {
+  const groups = groupChatSessions(sessions, {
+    isWorking: x => x.state === "working",
+    needsInput: x => x.state === "needsInput",
+  });
+  const body = sessions.length === 0
+    ? `<div style="display:flex;flex-direction:column;align-items:center;gap:8px;padding:24px 12px;color:var(--text-dim)">
+         ${icon("message",20)}<span style="font-size:12px">No chats yet</span></div>`
+    : groups.sections.map(sec => `
+        <div class="chat-group">
+          <div class="chat-group-header">${sec.label}</div>
+          ${sec.rows.map(r => rowHTML(r, state.activeId)).join("")}
+        </div>`).join("");
+  return `
+    <div class="sidebar-brand"><span class="dot"></span> Relay</div>
+    <div class="section-header">
+      <span class="section-label">${icon("message",14)} Chat History</span>
+      <button class="section-plus" title="New Chat">${icon("plus",14)}</button>
+    </div>
+    <div class="sidebar-scroll sidebar-thin-scroll">${body}</div>`;
+}
+
+let projectExpanded = true;
+function renderProjectPanel(sessions) {
+  const groups = groupChatSessions(sessions, {
+    isWorking: x => x.state === "working",
+    needsInput: x => x.state === "needsInput",
+    maxRoots: 5,
+  });
+  const chats = groups.sections.map(sec => `
+    <div class="chat-group">
+      <div class="chat-group-header">${sec.label}</div>
+      ${sec.rows.map(r => rowHTML(r, state.activeId)).join("")}
+    </div>`).join("");
+  const more = (groups.hasMore || false)
+    ? `<button class="sidebar-projects-more">${groups.hasMore ? "Show more" : "Show less"}</button>` : "";
+  return `
+    <div class="sidebar-brand"><span class="dot"></span> Projects</div>
+    <div class="projects-panel">
+      <div class="project-node">
+        <div class="project-row">
+          <span style="transform:rotate(90deg);display:inline-flex">${icon("chevron",12)}</span>
+          ${icon("project",13)}
+          <span class="project-name">Storefront</span>
+          <span class="project-branch">fix/grid</span>
+        </div>
+        <div class="projects-chats">${chats}${more}</div>
+      </div>
+    </div>`;
+}
+
+/* ============================================================================
+   Harness state + wiring
+   ========================================================================== */
+const state = {
+  scenario: "Mixed (screenshot)",
+  surface: "Chat History",
+  theme: "dark",
+  activeId: "parent-grid",
+};
+
+function render() {
+  document.documentElement.setAttribute("data-theme", state.theme);
+  const sessions = SCENARIOS[state.scenario]();
+  const isProject = state.surface === "Projects";
+  document.getElementById("sidebar").innerHTML =
+    isProject ? renderProjectPanel(sessions) : renderChatHistory(sessions);
+
+  for (const btn of document.querySelectorAll("#scenarios button"))
+    btn.classList.toggle("on", btn.dataset.v === state.scenario);
+  for (const btn of document.querySelectorAll("#surfaces button"))
+    btn.classList.toggle("on", btn.dataset.v === state.surface);
+  for (const btn of document.querySelectorAll("#themes button"))
+    btn.classList.toggle("on", btn.dataset.v === state.theme);
+}
+
+function buildButtons(hostId, values, get, set) {
+  const host = document.getElementById(hostId);
+  host.innerHTML = "";
+  for (const v of values) {
+    const b = document.createElement("button");
+    b.textContent = v; b.dataset.v = v;
+    b.onclick = () => { set(v); render(); };
+    host.appendChild(b);
+  }
+}
+
+buildButtons("scenarios", Object.keys(SCENARIOS), () => state.scenario, v => state.scenario = v);
+buildButtons("surfaces", ["Chat History", "Projects"], () => state.surface, v => state.surface = v);
+buildButtons("themes", ["dark", "light"], () => state.theme, v => state.theme = v);
+
+render();
+</script>
+</body>
+</html>

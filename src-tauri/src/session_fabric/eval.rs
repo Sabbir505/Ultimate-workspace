@@ -40,7 +40,7 @@ fn mem_conn() -> Connection {
          CREATE TABLE chat_messages (
            id INTEGER PRIMARY KEY AUTOINCREMENT, chat_session_id TEXT NOT NULL,
            role TEXT NOT NULL, content TEXT NOT NULL, created_at INTEGER NOT NULL,
-           superseded_by INTEGER);
+           superseded_by INTEGER, kind TEXT);
          CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
          CREATE TABLE session_mail (
            id TEXT PRIMARY KEY, from_session TEXT NOT NULL, to_session TEXT NOT NULL,

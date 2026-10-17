@@ -55,6 +55,7 @@ function rememberGenAnchor(path: string | null, key: string | null) {
 // entry chunk doesn't statically pull in MessageBubble (react-markdown).
 import { TypingIndicator } from "./TypingIndicator";
 import { CitationReportStrip } from "./CitationReportStrip";
+import { noteJitter } from "../../lib/transcriptJitter";
 import { ChatWelcome } from "./ChatWelcome";
 const MessageBubble = lazy(() => import("./MessageBubble").then((m) => ({ default: m.MessageBubble })));
 // Heavy chat features (artifact previews with syntax-highlighting + markdown,
@@ -75,6 +76,8 @@ import { seedSelectionFrom } from "../../lib/lastSelection";
 import { TurnNavigator } from "./TurnNavigator";
 import { useContextMeter } from "../../hooks/useContextMeter";
 import { GitToolsSidebar } from "./GitToolsSidebar";
+import { sidechatSourceId } from "../../lib/chatSessionGroups";
+import { MessagesSquare } from "lucide-react";
 
 /** Downward chevron-arrow for the jump-to-latest pill. */
 function ArrowDownIcon() {
@@ -124,7 +127,18 @@ function formatChatError(raw: string): string {
     .trim();
 }
 
-export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string; paneId?: string } = {}) {
+export function ChatView({
+  popoutSessionId,
+  paneId,
+  hideGitSidebar,
+}: {
+  popoutSessionId?: string;
+  paneId?: string;
+  /** Bots view hosts its own activity rail (approvals / jobs / runs / outputs)
+   *  in place of the git tools sidebar — this suppresses the shared rail so
+   *  the two never stack. */
+  hideGitSidebar?: boolean;
+} = {}) {
   // Split pane view: `paneId` pins this instance to ONE session via the pane
   // tree + its own paneBuffers entry — everything below keys off the local
   // `activeChatSessionId`, so per-session maps (streaming, status, artifacts,
@@ -209,6 +223,19 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
   );
 
   const activeSession = sessions.find((s) => s.id === activeChatSessionId) ?? null;
+  // Sidechat pane affordance: `origin = side_of:<id>` means this chat carries
+  // the SOURCE chat's recent history as model context only — the backend
+  // stores it as a hidden seed row that never reaches the transcript. The
+  // banner (non-empty) / welcome hint (empty) makes that hidden handoff
+  // explicit, otherwise the pane reads as a fresh empty chat. `title` is the
+  // source chat's title, or null when it has none (unset) or was deleted.
+  const sidechat = useMemo(() => {
+    const sourceId = sidechatSourceId(activeSession?.origin);
+    if (!sourceId) return null;
+    const source = sessions.find((s) => s.id === sourceId);
+    const title = source?.title?.trim();
+    return { title: title ? title : null };
+  }, [activeSession?.origin, sessions]);
   // The provider column is load-bearing only for the built-in and local
   // paths. A harness/ACP session runs on its CLI and keeps whichever provider
   // the row was created under — a chat created while a local model was active
@@ -471,6 +498,19 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
       : (pollUncached ?? lastUncached);
 
 
+  // Drop THIS session's stale error banner. A committed re-bind — ejecting
+  // the sidecar, loading another model, or picking any other model — makes
+  // the previous failure's banner a leftover; previously only the next send
+  // cleared it, so the old model's error ("could not be started after
+  // restart") sat on screen after the user moved on to a working model.
+  const clearSessionError = useCallback(() => {
+    if (!activeChatSessionId) return;
+    useChatStore.setState((s) => ({
+      errorBySession: omitKey(s.errorBySession, activeChatSessionId),
+      errorCodeBySession: omitKey(s.errorCodeBySession, activeChatSessionId),
+    }));
+  }, [activeChatSessionId]);
+
   const handleModelChange = useCallback(
     async (model: string) => {
       if (!activeChatSessionId) return;
@@ -530,8 +570,10 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
         await setSessionProvider(activeChatSessionId, target);
       }
       void setSessionModel(activeChatSessionId, model);
+      // The pick committed — the previous model's banner is stale.
+      clearSessionError();
     },
-    [activeChatSessionId, sessions, setSessionModel, setSessionProvider, setSessionAgent, isLocal, localModels, spawnLocalModel, config?.provider, localLoading],
+    [activeChatSessionId, sessions, setSessionModel, setSessionProvider, setSessionAgent, isLocal, localModels, spawnLocalModel, config?.provider, localLoading, clearSessionError],
   );
 
   // "Load model" from the picker's per-model gear panel: persist the drafted
@@ -570,6 +612,8 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
         }));
         return;
       }
+      // The spawn committed — drop the previous model's stale banner.
+      clearSessionError();
       const status = await localModelStatus().catch(() => null);
       if (status?.modelId) setActiveLocalModelId(status.modelId);
       if (session?.provider !== "local_gguf") {
@@ -583,7 +627,7 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
         .getState()
         .rememberSelection({ agent: "local", provider: "local_gguf", model });
     },
-    [activeChatSessionId, sessions, localModels, spawnLocalModel, setSessionAgent, setSessionProvider, setSessionModel, localLoading],
+    [activeChatSessionId, sessions, localModels, spawnLocalModel, setSessionAgent, setSessionProvider, setSessionModel, localLoading, clearSessionError],
   );
 
   // Eject the running local-model sidecar. Stops the llama-server process
@@ -598,6 +642,9 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
     // the pill rolls back to "Select a model to start" before the IPC round
     // trip. The status effect below reconciles once the kill lands.
     setActiveLocalModelId(null);
+    // Ejecting is a deliberate move off the model — the previous failure's
+    // banner (e.g. "could not be started after restart") must not outlive it.
+    clearSessionError();
     try {
       await stopLocalModel(id);
     } catch (err) {
@@ -608,7 +655,7 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
     } catch (err) {
       console.warn("clear session model after eject failed", err);
     }
-  }, [activeLocalModelId, activeChatSessionId, setSessionModel]);
+  }, [activeLocalModelId, activeChatSessionId, setSessionModel, clearSessionError]);
 
   // Commit a selection from the composer's combined agent/model picker. The
   // agent, provider, and model land TOGETHER so a session can never end up
@@ -641,6 +688,7 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
         useChatStore
           .getState()
           .rememberSelection({ agent: "builtin", provider: "auto", model: "auto" });
+        clearSessionError();
         return;
       }
       // A manual pick takes the session out of Auto mode first, so the flag
@@ -657,6 +705,9 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
       useChatStore
         .getState()
         .rememberSelection({ agent: sel.agent, provider: sel.provider, model: sel.model });
+      // The selection is committed; a prior model's failure banner is stale.
+      // (The local branch below re-sets it if THIS spawn fails.)
+      clearSessionError();
       if (sel.agent.startsWith("acp:")) return;
       if (sel.provider === "local_gguf") {
         const match = localModels.find((m) => (m.name || m.filename) === sel.model);
@@ -690,6 +741,7 @@ export function ChatView({ popoutSessionId, paneId }: { popoutSessionId?: string
       setSessionModel,
       setSessionAuto,
       localLoading,
+      clearSessionError,
     ],
   );
 
@@ -1457,6 +1509,12 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
       revokedKeysRef.current = new Set();
     } else {
       const prevKeys = prevItemKeysRef.current.keys;
+      // The live tail's key embeds the session (see the pushes above).
+      const tailPrefix = activeChatSessionId ?? "none";
+      const hadLiveTail = [...prevKeys].some(
+        (k) =>
+          k.startsWith(`streaming-${tailPrefix}-`) || k.startsWith(`typing-${tailPrefix}-`),
+      );
       let granted = false;
       for (const it of list) {
         if (revokedKeysRef.current.has(it.key)) {
@@ -1465,10 +1523,23 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
           it.enter = true;
         } else if (prevKeys.has(it.key)) {
           it.enter = false;
+        } else if (
+          // Continuation/swap of the turn ALREADY on screen — the live row's
+          // key changes with messages.length (a queued send), and the turn's
+          // persisted row replaces the live row at turn end. Both land where
+          // the user is already watching, so the 6px pop-in is a jolt
+          // mid-stream and at every turn end, not an entrance.
+          hadLiveTail &&
+          (it.key.startsWith(`streaming-${tailPrefix}-`) ||
+            it.key.startsWith(`typing-${tailPrefix}-`) ||
+            (it.role === "assistant" && it.id != null))
+        ) {
+          it.enter = false;
         } else {
           enterKeysRef.current.add(it.key);
           it.enter = true;
           granted = true;
+          noteJitter("row.enter");
         }
       }
       prevItemKeysRef.current.keys = new Set(list.map((it) => it.key));
@@ -1575,6 +1646,7 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
         measureElement: (el: HTMLDivElement | null) => void;
       };
       const sizes = v.getMeasurements?.() ?? [];
+      let remeasured = 0;
       rowElsRef.current.forEach((el, key) => {
         if (!el.isConnected) return;
         // Remember the real height while the row is mounted: this is the value
@@ -1587,7 +1659,9 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
         v.itemSizeCache?.delete(key);
         v.measureElement(el);
         rowHeightsRef.current.set(key, el.offsetHeight);
+        remeasured += 1;
       });
+      if (remeasured > 0) noteJitter("virt.remeasure", remeasured);
     });
     return () => cancelAnimationFrame(raf);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1843,13 +1917,29 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
           own rail and toggling would open it on all of them. */}
       {(isPaneView
         ? focusedPin === activeChatSessionId
-        : focusedPin == null) && <GitToolsSidebar />}
+        : focusedPin == null) && !hideGitSidebar && <GitToolsSidebar />}
       {!activeChatSessionId || hasItems ? (
         <div
           className="chat-messages"
           ref={messagesContainerCallbackRef}
           onScroll={handleScroll}
         >
+          {/* Sidechat provenance divider: in-flow (not virtualized) at the top
+              of the transcript, above the positioned row wrapper, so it
+              scrolls away like a "conversation started here" line. The source
+              chat's history is in context but has no rows in this pane — see
+              the `sidechat` memo. Only rendered once the sidechat has its own
+              visible turns; the empty state carries the same hint. */}
+          {sidechat && (
+            <div className="chat-sidechat-banner" role="note">
+              <MessagesSquare size={14} aria-hidden="true" />
+              <span>
+                Sidechat of {sidechat.title ? `“${sidechat.title}”` : "another chat"} — its
+                recent messages are in context but{" "}
+                aren&apos;t shown here.
+              </span>
+            </div>
+          )}
           <div
             style={{
               // Math.max(liveTotal): the virtualizer's getTotalSize() can be
@@ -1913,6 +2003,7 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
                         // notify so totalSize recomputes.
                         if (v.itemSizeCacheVersion != null) v.itemSizeCacheVersion++;
                         v.notify?.(false);
+                        noteJitter("virt.sizePoke", h);
                       }
                       rowHeightsRef.current.delete(rowKey);
                     }
@@ -2089,6 +2180,7 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
             }}
             prefill={(text) => setDraft({ text, nonce: Date.now() })}
             hasModel={!!(activeSession?.model || config?.model)}
+            sidechat={sidechat}
           />
         ) : (
           // Buffer belongs to another chat and this one's page hasn't landed
@@ -2152,7 +2244,8 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
 
       {/* End-of-turn citation-integrity verdict (research turns only): what
           the mechanical ledger lint verified about the report just delivered.
-          Renders above the composer so it survives transcript scrolling. */}
+          Renders above the composer so it survives transcript scrolling — the
+          component carries its own dock-notch container. */}
       <CitationReportStrip chatSessionId={activeChatSessionId} onFix={(sid) => void handleFixCitations(sid)} />
 
       {/* present_plan proposal: renders INLINE in the transcript (as the last

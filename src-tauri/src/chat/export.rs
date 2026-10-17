@@ -165,7 +165,9 @@ fn serialize_chat_rows(
     conn: &Connection,
     session: &crate::types::ChatSession,
 ) -> Result<(ChatWithFiles, Vec<(String, String)>), String> {
-    let messages = db::list_chat_messages(conn, &session.id).map_err(|e| e.to_string())?;
+    // Display rows: a sidechat's hidden context seed (`sidechat_seed`) is not
+    // part of the conversation and must not leak into an export.
+    let messages = db::list_display_chat_messages(conn, &session.id).map_err(|e| e.to_string())?;
     let arts = crate::db::list_artifacts_for_chat(conn, &session.id).map_err(|e| e.to_string())?;
     let by_msg: HashMap<Option<i64>, Vec<&crate::types::ArtifactRecord>> = {
         let mut m: HashMap<Option<i64>, Vec<_>> = HashMap::new();

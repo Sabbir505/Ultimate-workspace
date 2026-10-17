@@ -115,6 +115,14 @@ pub(super) fn build_context_primer(db: &DbState, chat_session_id: &str, summary:
     context_primer_from_records(&records, summary)
 }
 
+/// True for a sidechat's hidden handoff seed (`kind = 'sidechat_seed'` — the
+/// row `db::open_sidechat` writes). Its content is already a budgeted primer
+/// (see `sidechat_seed_from_records`), so the harness primer embeds it
+/// verbatim rather than re-labelling and re-truncating it as a `[User]:` turn.
+pub(super) fn is_sidechat_seed(r: &crate::types::ChatMessageRecord) -> bool {
+    r.kind.as_deref() == Some(crate::db::SIDECHAT_SEED_KIND)
+}
+
 /// One rendered primer line (`[Who]: body`) from a record. Display-only
 /// `<think>`/`<tool>` markup is stripped (tool JSON the new CLI never ran),
 /// per-message capped, and role-labeled.
@@ -186,8 +194,36 @@ pub(super) fn context_primer_from_records(
     records: &[crate::types::ChatMessageRecord],
     summary: Option<&str>,
 ) -> String {
-    let (tail, _, _) = primer_tail_and_head(records);
+    // A sidechat's history LEADS with its hidden handoff seed. That row is a
+    // complete primer in its own right (its own "[Sidechat context]" preamble
+    // and omission marker), so it is embedded VERBATIM and pinned OUTSIDE the
+    // tail budget: wrapping it as a `[User]:` turn double-labels the handoff,
+    // and the per-message cap (`CONTEXT_PRIMER_MESSAGE_CAP`) would truncate a
+    // long handoff to its first ~6k chars before the CLI ever saw the rest.
+    let (seed, rest): (
+        Option<&crate::types::ChatMessageRecord>,
+        &[crate::types::ChatMessageRecord],
+    ) = match records.first() {
+        Some(r) if is_sidechat_seed(r) => (Some(r), &records[1..]),
+        _ => (None, records),
+    };
+    let (tail, head_count, _) = primer_tail_and_head(rest);
     let lines: Vec<String> = tail.iter().filter_map(|r| primer_line(r)).collect();
+    if let Some(seed) = seed {
+        // No `[Context handoff]` framing and no head summary: the seed already
+        // IS the handoff (`build_primer_summary` skips seed-led sessions for
+        // the same reason). Older sidechat turns the tail budget dropped are
+        // still marked, so nothing disappears silently.
+        let mut out = String::from(seed.content.trim());
+        if head_count > 0 {
+            out.push_str("\n\n[Earlier messages omitted for length]");
+        }
+        if !lines.is_empty() {
+            out.push_str("\n\n");
+            out.push_str(&lines.join("\n\n"));
+        }
+        return out;
+    }
     if lines.is_empty() && summary.is_none() {
         return String::new();
     }
@@ -209,6 +245,34 @@ pub(super) fn context_primer_from_records(
         }
         out.push_str(&lines.join("\n\n"));
     }
+    out
+}
+
+/// Pure builder for a sidechat's context seed: the ONE hidden transcript row
+/// `db::open_sidechat` persists (`kind = 'sidechat_seed'`) so a sidechat
+/// continues from a snapshot of its source chat WITHOUT the copied turns
+/// showing in its pane. Same line format and char budget as the engine-handoff
+/// primer — newest turns win when the source is long (older ones are marked
+/// omitted). Returns "" when there is nothing to hand over (a source with no
+/// live rows), in which case the sidechat starts truly empty.
+pub(crate) fn sidechat_seed_from_records(
+    records: &[crate::types::ChatMessageRecord],
+) -> String {
+    let (tail, _, head_chars) = primer_tail_and_head(records);
+    let lines: Vec<String> = tail.iter().filter_map(|r| primer_line(r)).collect();
+    if lines.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "[Sidechat context] This sidechat branches off another chat. The transcript \
+         below is the recent history of that chat, oldest first — it is not shown \
+         in this pane, but treat it as conversation you and the user already had. \
+         Continue naturally; the user's messages in this sidechat follow.\n\n",
+    );
+    if head_chars > 0 {
+        out.push_str("[Earlier messages omitted for length]\n\n");
+    }
+    out.push_str(&lines.join("\n\n"));
     out
 }
 
@@ -258,6 +322,13 @@ pub(crate) async fn build_primer_summary(
         let conn = db.0.lock();
         crate::db::list_active_chat_messages(&conn, chat_session_id).unwrap_or_default()
     };
+    // A sidechat's history leads with its hidden seed, which is already a
+    // budgeted handoff and which `build_context_primer` embeds verbatim
+    // (ignoring any summary). Summarizing it would echo the source transcript
+    // back at the model and burn a cloud call for nothing.
+    if records.first().map(is_sidechat_seed).unwrap_or(false) {
+        return None;
+    }
     let (_, head_count, head_chars) = primer_tail_and_head(&records);
     if head_count == 0 || head_chars < CONTEXT_PRIMER_SUMMARY_TRIGGER_CHARS {
         return None;

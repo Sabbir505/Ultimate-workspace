@@ -12,7 +12,12 @@
 // falling the main pane back to another chat when the dragged/opened
 // session IS the active one.
 import { useUiStore } from "../../ui";
-import { forkChatSession, toastError, type ChatSession } from "../../../lib/ipc";
+import {
+  forkChatSession,
+  openSidechatSession,
+  toastError,
+  type ChatSession,
+} from "../../../lib/ipc";
 import {
   CHAT_MAIN_PANE_ID,
   MAX_CHAT_PANES,
@@ -325,6 +330,75 @@ export function createPanesSlice(set: ChatStoreSet, get: ChatStoreGet) {
         get().setChatPaneRatio(splitIds[j], 1 / (k + 1 - j));
       }
       return forked;
+    },
+
+    // Sidechat (`/sidechat`, tool-panel entry): open a private sub-thread of
+    // a chat, seeded with a snapshot of its live history, pinned right of the
+    // focused pane. The main session is never touched — its pane keeps
+    // running, the sidechat is its own session with its own agent turn.
+    // At most ONE sidechat per source chat (origin `side_of:<id>`): opening
+    // again re-focuses the existing pane, or re-pins the existing session
+    // when its pane was closed. Its context snapshot is from its creation.
+    openSidechat: async (chatSessionId?: string): Promise<string | null> => {
+      const st = get();
+      const sourceId = chatSessionId ?? st.activeChatSessionId;
+      if (!sourceId) {
+        toast("Open a chat before starting a sidechat");
+        return null;
+      }
+      if (isDeletedSession(sourceId) || !st.sessions.some((x) => x.id === sourceId)) {
+        return null;
+      }
+      // An empty ACTIVE chat has nothing to snapshot — same buffer-ownership
+      // shape forkChatToPanes applies (the main buffer must hold ITS rows).
+      if (
+        st.activeChatSessionId === sourceId &&
+        st.messagesSessionId === sourceId &&
+        st.messages.length === 0
+      ) {
+        toast("Send a message before opening a sidechat");
+        return null;
+      }
+      let sidechat =
+        st.sessions.find(
+          (x) => x.origin === `side_of:${sourceId}` && !isDeletedSession(x.id),
+        ) ?? null;
+      if (sidechat) {
+        const pinned = findPaneForSession(st.chatPaneTree, sidechat.id);
+        if (pinned) {
+          // Already on screen — just make it the focused pane.
+          set({ focusedPaneId: pinned, focusedChatSessionId: sidechat.id });
+          return sidechat.id;
+        }
+      } else {
+        let created: ChatSession | null = null;
+        try {
+          created = await openSidechatSession(sourceId);
+        } catch (err) {
+          toastError("Couldn't open the sidechat", err);
+          return null;
+        }
+        if (!created) {
+          toastError("Couldn't open the sidechat", "backend returned no session row");
+          return null;
+        }
+        sidechat = created;
+        // Register the row BEFORE the pane insert — openSessionOnPaneEdge
+        // only opens sessions live in `sessions` (forkChatToPanes' shape).
+        set((s) => ({
+          sessions: sortSessions([created!, ...s.sessions.filter((x) => x.id !== created!.id)]),
+          sessionProjects:
+            created!.projectId != null
+              ? { ...s.sessionProjects, [created!.id]: created!.projectId }
+              : s.sessionProjects,
+        }));
+        // Worktree-per-session default, fire-and-forget — same as newChat and
+        // forks: the sidechat can explore/edit without sharing the source
+        // chat's tree.
+        void maybeEnsureWorktree(get().sessions.find((s) => s.id === created!.id), set);
+      }
+      const paneId = await openSessionOnPaneEdge(sidechat.id, resolvePaneTarget(), "right");
+      return paneId ? sidechat.id : null;
     },
 
     closeChatPane: (paneId: string) => {

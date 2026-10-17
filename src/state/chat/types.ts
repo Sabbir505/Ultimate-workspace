@@ -465,6 +465,13 @@ export interface ChatState {
     count: number,
     uptoMessageId?: number,
   ) => Promise<number>;
+  /** Open (or re-focus) the chat's sidechat — a private sub-thread seeded
+   *  with a snapshot of its live history (`/sidechat`, tool-panel entry),
+   *  pinned right of the focused pane. At most ONE sidechat per source chat;
+   *  opening again re-focuses its pane or re-pins the existing session. The
+   *  main session is never touched. Returns the sidechat's session id, or
+   *  null when nothing opened (no source chat, empty chat, or the pane cap). */
+  openSidechat: (chatSessionId?: string) => Promise<string | null>;
   /** Close one pinned pane (its header ✕). The main pane can't close. */
   closeChatPane: (paneId: string) => void;
   /** Close every pinned pane and drop the tree (back to the single view). */

@@ -1126,7 +1126,9 @@
      the card above a hairline): chips centered on the card's column, and the
      context meter absolutely pinned to the strip's right end (the card's
      right edge). position:relative anchors that pin; min-height makes room
-     for the 28px meter slot so the strip doesn't grow when it mounts. */
+     for the 28px meter slot so the strip doesn't grow when it mounts. The
+     chips box caps short of the meter's column (see below) so the two can
+     never collide. */
   justify-content: center;
   position: relative;
   min-height: 28px;
@@ -1139,10 +1141,24 @@
   overflow: visible;
 }
 /* Size to the chips, not the full column — the row's justify-content then
-   centers the group under the card. */
+   centers the group under the card. The 44px cap is the meter's reserved
+   column: the meter is absolutely pinned at right: 2px with a 22px circle,
+   OUT of flow — so a centered chips group that grows toward it (every
+   metric filled, or a pane narrowed by a split / the right tool panel)
+   used to slide under the ring, and the ring (z-index 40) painted over
+   the last chip. A centered box of width W ends at (100% + W)/2, so W =
+   100% − 44px lands its right edge just short of the ring's left edge at
+   100% − 24px; past the cap the chips WRAP (still centered, still clear)
+   instead of sliding under. HUD-only: the non-HUD row keeps the meter in
+   flow (margin-left: auto), which reserves the column on its own. */
 .composer-metrics-row.is-hud .composer-metrics-chips {
   flex: 0 1 auto;
   justify-content: center;
+  max-width: calc(100% - 44px);
+  /* Tighter column gap than the base row: the full strip (in/out/llm/
+     tools/ttft/speed/cache/elapsed) has to keep fitting on ONE line inside
+     the 44px-reserved column at the default card width (775px). */
+  gap: 6px 10px;
 }
 /* The meter rides at the strip's right end, vertically centered against the
    chips without transforms (top/bottom 0 + auto margins = the classic

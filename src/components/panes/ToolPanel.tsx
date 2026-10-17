@@ -16,7 +16,7 @@ import { lazy, useState, Suspense, useCallback, useEffect, useMemo, useRef, memo
 import { createPortal } from "react-dom";
 import { LazyReactMarkdown } from "../common/LazyMarkdown";
 import remarkGfm from "remark-gfm";
-import { Globe, Terminal, FileDiff, GitPullRequest, Bot, FileCode, NotebookText, GitBranch } from "lucide-react";
+import { Globe, Terminal, FileDiff, GitPullRequest, Bot, FileCode, NotebookText, GitBranch, MessagesSquare } from "lucide-react";
 import { openBrowserPane, openShellTerminal, restoreMinimizedBrowser } from "../../lib/sessionLauncher";
 import { startPointerDrag } from "../../lib/pointerDrag";
 import {
@@ -27,7 +27,7 @@ import {
   type Pane,
 } from "../../state/panes";
 import { useUiStore, type ToolPanelTab, type ToolPanelTabInstance } from "../../state/ui";
-import type { ChatArtifact } from "../../state/chat";
+import { useChatStore, type ChatArtifact } from "../../state/chat";
 import { harnessShortName } from "../../types";
 // ArtifactPreviewPane is the heaviest chat component (syntax highlighting,
 // markdown rendering, JSX live preview). Lazy-load so the right panel tab
@@ -53,6 +53,18 @@ const TABS: { id: ToolPanelTab; label: string; Icon: React.ElementType }[] = [
   // their icon renders in chips.
   { id: "artifact", label: "Artifact", Icon: FileCode },
   { id: "plan", label: "Plan", Icon: NotebookText },
+];
+
+/** Quick actions that share the "add a pane" surfaces (the empty-state grid
+ *  and the "+" menu) but open a CHAT pane — the sidechat split — instead of a
+ *  tool tab. Same special-casing the "+" menu already applies to Browser. */
+const PANEL_ACTIONS: { id: string; label: string; title: string; Icon: React.ElementType }[] = [
+  {
+    id: "sidechat",
+    label: "Sidechat",
+    title: "Open a private side thread for the active chat",
+    Icon: MessagesSquare,
+  },
 ];
 
 function terminalLabel(t: Pane): string {
@@ -453,6 +465,17 @@ export function ToolPanel() {
                   <span>{t.label}</span>
                 </button>
               ))}
+              {PANEL_ACTIONS.map((a) => (
+                <button
+                  key={a.id}
+                  className="tool-panel-picker-btn"
+                  title={a.title}
+                  onClick={() => void useChatStore.getState().openSidechat()}
+                >
+                  <a.Icon size={20} className="tool-panel-picker-btn-icon" aria-hidden />
+                  <span>{a.label}</span>
+                </button>
+              ))}
             </div>
           </div>
         )}
@@ -551,6 +574,21 @@ export function ToolPanel() {
                           {openTabs.some((o) => o.kind === t.id) && (
                             <span className="tool-panel-picker-item-tag">+{openTabs.filter((o) => o.kind === t.id).length}</span>
                           )}
+                        </button>
+                      ))}
+                      {PANEL_ACTIONS.map((a) => (
+                        <button
+                          key={a.id}
+                          className="tool-panel-picker-item"
+                          title={a.title}
+                          onClick={() => {
+                            void useChatStore.getState().openSidechat();
+                            setTabPickerOpen(false);
+                          }}
+                          role="menuitem"
+                        >
+                          <a.Icon size={13} className="tool-panel-picker-item-icon" aria-hidden />
+                          <span className="tool-panel-picker-item-label">{a.label}</span>
                         </button>
                       ))}
                     </div>

@@ -239,9 +239,22 @@ function MessageBubbleInner({
   // cite from inside their generated .md artifact, so fall back to reading the
   // turn's markdown artifacts over IPC (once per artifact path — the result
   // feeds component state, not the render, so the element cache stays sound).
-  const inlineSources = useMemo(
+  const parsedInlineSources = useMemo(
     () => (isUser ? [] : parseChatSources(cleanContent)),
     [isUser, cleanContent],
+  );
+  // STABLE identity across token flushes. parseChatSources returns a fresh
+  // array on every parse, and this array feeds Markdown's components map —
+  // a new identity per token made react-markdown see brand-new renderer
+  // types and REMOUNT every code block: the highlighter dropped back to its
+  // plain <pre> fallback and flashed back to highlighted on every flush
+  // ("the copy block flickers while streaming"), and CopyButton state reset.
+  // The fingerprint only moves when the parsed sources actually change.
+  const inlineSourcesSig = sourcesFingerprint(parsedInlineSources);
+  const inlineSources = useMemo(
+    () => parsedInlineSources,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [inlineSourcesSig],
   );
   const [artifactSources, setArtifactSources] = useState<ChatSource[]>([]);
   useEffect(() => {

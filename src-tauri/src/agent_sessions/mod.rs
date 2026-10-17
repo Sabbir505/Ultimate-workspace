@@ -1364,7 +1364,9 @@ pub(crate) use attachments::prepare_agent_attachments;
 pub(crate) use bundle::{artifacts_dir_for_bundle, resolve_harness_bundle};
 pub(crate) use dirwatch::previewable_ext;
 pub(crate) use lifecycle::{kill_child_tree, kill_one_shot_children};
-pub(crate) use primer::{actual_model_key, build_primer_summary, persist_actual_model};
+pub(crate) use primer::{
+    actual_model_key, build_primer_summary, persist_actual_model, sidechat_seed_from_records,
+};
 /// kill them (M13): `run_one_shot` spawns a full `--dangerously-skip-permissions`
 /// CLI tree that is NOT in the session registry — without this it keeps
 /// running after the app quits. Keyed by pid; entries are removed when the
@@ -2560,6 +2562,7 @@ mod tests {
             tool_time_ms: None,
             ttft_ms: None,
             tokens_per_second: None,
+            kind: None,
         }
     }
 
@@ -2943,7 +2946,15 @@ mod tests {
             tool_time_ms: None,
             ttft_ms: None,
             tokens_per_second: None,
+            kind: None,
         }
+    }
+
+    /// A sidechat's hidden handoff seed row (`kind = 'sidechat_seed'`).
+    fn seed_record(content: &str) -> crate::types::ChatMessageRecord {
+        let mut r = primer_record("user", content);
+        r.kind = Some(crate::db::SIDECHAT_SEED_KIND.to_string());
+        r
     }
 
     #[test]
@@ -3011,6 +3022,96 @@ mod tests {
         assert!(primer.contains("old message 199"));
         assert!(primer.contains("old reply 199"));
         assert!(!primer.contains("old message 0 "));
+    }
+
+    #[test]
+    fn sidechat_seed_is_a_budgeted_handoff_transcript() {
+        let records = vec![
+            primer_record("user", "why is the build failing?"),
+            primer_record("assistant", "<think>hmm</think>because the schema drift."),
+            primer_record("user", "and the migration?"),
+            primer_record("assistant", "It needs a backfill first."),
+        ];
+        let seed = sidechat_seed_from_records(&records);
+        assert!(seed.starts_with("[Sidechat context]"), "{seed}");
+        assert!(seed.contains("[User]: why is the build failing?"));
+        assert!(seed.contains("[Relay]: because the schema drift."));
+        assert!(seed.contains("and the migration?"));
+        // Display-only markup must not ride into the model's context block.
+        assert!(!seed.contains("<think>"));
+        // A source with no rendered rows hands over nothing, so its sidechat
+        // starts truly empty rather than with a header-only stub.
+        assert_eq!(sidechat_seed_from_records(&[]), "");
+        let markup_only = vec![primer_record("assistant", "<tool>{\"name\":\"bash\"}</tool>")];
+        assert_eq!(sidechat_seed_from_records(&markup_only), "");
+    }
+
+    #[test]
+    fn sidechat_seed_marks_omitted_older_turns_and_keeps_newest() {
+        let mut records = Vec::new();
+        for i in 0..200 {
+            records.push(primer_record(
+                "user",
+                &format!("old message {i} {}", "x".repeat(200)),
+            ));
+            records.push(primer_record(
+                "assistant",
+                &format!("old reply {i} {}", "y".repeat(200)),
+            ));
+        }
+        // Distinct ids: the head/tail split (and the omission note) needs
+        // real ordering, unlike the fixture's shared default id.
+        for (idx, r) in records.iter_mut().enumerate() {
+            r.id = idx as i64 + 1;
+        }
+        let seed = sidechat_seed_from_records(&records);
+        assert!(seed.starts_with("[Sidechat context]"), "{}", &seed[..64.min(seed.len())]);
+        assert!(seed.contains("[Earlier messages omitted for length]"));
+        assert!(seed.contains("old message 199"));
+        assert!(!seed.contains("old message 0 "));
+        assert!(seed.len() <= CONTEXT_PRIMER_MAX_CHARS + 1024, "{}", seed.len());
+    }
+
+    #[test]
+    fn sidechat_seed_leads_the_handoff_primer_verbatim() {
+        // A seed far larger than the per-message cap must survive intact: the
+        // pre-fix path re-labelled it `[User]: [Sidechat context] …` and
+        // truncated it to `CONTEXT_PRIMER_MESSAGE_CAP` (6k) chars, so a long
+        // handoff reached the CLI half-empty.
+        let big = format!("[Sidechat context] {}", "z".repeat(9_000));
+        let mut seed = seed_record(&big);
+        seed.id = 1;
+        let mut user = primer_record("user", "and the migration?");
+        user.id = 2;
+        let mut asst = primer_record("assistant", "It needs a backfill first.");
+        asst.id = 3;
+        let primer = context_primer_from_records(&[seed, user, asst], None);
+        assert!(primer.starts_with("[Sidechat context]"), "{}", &primer[..48.min(primer.len())]);
+        assert!(primer.contains(&"z".repeat(9_000)));
+        assert!(!primer.contains("[User]: [Sidechat context]"));
+        // The seed IS the handoff — no generic engine-handoff framing on top.
+        assert!(!primer.contains("[Context handoff]"));
+        assert!(primer.contains("[User]: and the migration?"));
+        assert!(primer.contains("[Relay]: It needs a backfill first."));
+        assert!(!primer.contains("[Earlier messages omitted for length]"));
+
+        // Older sidechat turns beyond the tail budget are still marked, so the
+        // seed's pin doesn't hide the fact that the middle was dropped.
+        let mut records = vec![seed_record("[Sidechat context] handoff")];
+        records[0].id = 1;
+        for i in 0..200i64 {
+            let mut u = primer_record("user", &format!("old {i} {}", "x".repeat(200)));
+            u.id = i * 2 + 2;
+            let mut a = primer_record("assistant", &format!("reply {i} {}", "y".repeat(200)));
+            a.id = i * 2 + 3;
+            records.push(u);
+            records.push(a);
+        }
+        let primer = context_primer_from_records(&records, None);
+        assert!(primer.starts_with("[Sidechat context] handoff"));
+        assert!(primer.contains("[Earlier messages omitted for length]"));
+        assert!(primer.contains("old 199"));
+        assert!(!primer.contains("old 0 "));
     }
 
     #[test]

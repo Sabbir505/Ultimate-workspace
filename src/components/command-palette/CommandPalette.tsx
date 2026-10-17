@@ -193,6 +193,16 @@ export function CommandPalette() {
         },
       },
       {
+        id: "action:sidechat",
+        section: "Actions",
+        label: "Open Sidechat",
+        hint: "/sidechat",
+        run: () => {
+          close();
+          void useChatStore.getState().openSidechat();
+        },
+      },
+      {
         id: "action:hotkey-overlay",
         section: "Actions",
         label: "Show Keyboard Shortcuts",

@@ -726,6 +726,26 @@ pub(super) fn opencode_error_text(v: &Value) -> Option<String> {
     v.get("message").and_then(|m| m.as_str()).map(|s| s.to_string())
 }
 
+/// User-facing message for a free-tier `session.status` retry. The leading
+/// "free limit reached" carries the usage-limit marker itself, so the emitted
+/// `chat:error` classifies as `usage_limit` even if the server's own wording
+/// drifts from the markers.
+pub(super) fn free_tier_limit_message(status: Option<&Value>) -> String {
+    let msg = status
+        .and_then(|s| s.get("message"))
+        .and_then(|m| m.as_str())
+        .map(truncate_output)
+        .filter(|m| !m.trim().is_empty())
+        .unwrap_or_else(|| "the model's free daily allowance is spent".to_string());
+    match status
+        .and_then(|s| s.pointer("/action/link"))
+        .and_then(|l| l.as_str())
+    {
+        Some(url) => format!("OpenCode free limit reached: {msg} ({url})"),
+        None => format!("OpenCode free limit reached: {msg}"),
+    }
+}
+
 /// POST one turn. Resolves when the TURN completes (the endpoint blocks until
 /// then) and carries final usage + cost; streaming arrives via SSE meanwhile.
 /// `agent` selects OpenCode's built-in agent ("plan" for plan mode — the
@@ -999,7 +1019,15 @@ pub(super) fn handle_opencode_sse_data(
         return;
     };
     last_event_ms.store(now_ms_u64(), Ordering::Relaxed);
-    if v.get("type").and_then(|t| t.as_str()) != Some("session.error") {
+    let ev_type = v.get("type").and_then(|t| t.as_str());
+    // Reset the transient-notice latch on anything that isn't an error signal
+    // — EXCEPT a retry status: it is part of the same error episode (and
+    // every retry attempt re-emits it), so resetting there would re-arm the
+    // once-per-episode notice.
+    if ev_type != Some("session.error")
+        && !(ev_type == Some("session.status")
+            && v.pointer("/properties/status/type").and_then(|t| t.as_str()) == Some("retry"))
+    {
         *rate_notice_sent = false;
     }
 
@@ -1041,6 +1069,57 @@ pub(super) fn handle_opencode_sse_data(
                 "harness_rate_limit",
                 "OpenCode was rate limited and is retrying…",
             );
+        }
+        return;
+    }
+
+    // session.status: the server's live status stream. OpenCode Zen reports a
+    // SPENT free-tier allowance here — `{"status":{"type":"retry",
+    // "message":"Free usage exceeded, subscribe to Go","action":{"reason":
+    // "free_tier_limit",…},"next":<epoch ms, HOURS out>}}` (captured from a
+    // live opencode 1.18.7). The server parks its own retry until the daily
+    // reset, so the turn POST stays open for its full timeout (the spinner
+    // sits on "Working for …") and NOTHING else ever fires: `serve` keeps
+    // stderr empty without --print-logs, and no `session.error` is emitted.
+    // This status is the only timely signal — abort the turn, which kills the
+    // parked retry with the server. A retry WITHOUT the free-tier action is
+    // an ordinary transient throttle (the server retries on its own), so the
+    // turn is left alone.
+    if v.get("type").and_then(|t| t.as_str()) == Some("session.status") {
+        // One serve process per chat session: ignore other sessions' traffic.
+        if let Some(ev_sid) = v.pointer("/properties/sessionID").and_then(|s| s.as_str()) {
+            let want = session_cell.lock().ok().and_then(|g| g.clone());
+            if let Some(want) = want {
+                if want != ev_sid {
+                    return;
+                }
+            }
+        }
+        let status = v.pointer("/properties/status");
+        let is_retry = status
+            .and_then(|s| s.get("type"))
+            .and_then(|t| t.as_str())
+            == Some("retry");
+        if !is_retry {
+            return;
+        }
+        let reason = status
+            .and_then(|s| s.pointer("/action/reason"))
+            .and_then(|r| r.as_str())
+            .unwrap_or("");
+        let msg = status
+            .and_then(|s| s.get("message"))
+            .and_then(|m| m.as_str())
+            .unwrap_or("");
+        if reason == "free_tier_limit" || crate::chat::error_class::is_usage_limit(msg) {
+            if !*session_aborted {
+                *session_aborted = true;
+                if let Some(h) = app {
+                    h.state::<crate::agent_sessions::AgentSessionState>()
+                        .0
+                        .abort_turn_with_error(h, sid, &free_tier_limit_message(status));
+                }
+            }
         }
         return;
     }
@@ -1613,6 +1692,119 @@ mod tests {
             &mut rate_notice,
         );
         assert!(!aborted && !rate_notice, "other sessions' errors are not ours");
+    }
+
+    /// The CURRENT shape of a spent Zen free-tier allowance (captured from a
+    /// live opencode 1.18.7): a `session.status` retry carrying the
+    /// structured `free_tier_limit` action and a `next` HOURS out — the
+    /// server parks its OWN retry, so without this abort the turn POST (and
+    /// the chat spinner) sit until its 30-minute timeout. A retry without
+    /// that action is an ordinary transient throttle and must be left alone.
+    #[test]
+    fn session_status_free_tier_retry_aborts_and_plain_retry_does_not() {
+        let session_cell = Arc::new(Mutex::new(Some("ses_1".to_string())));
+        let full_cell = Arc::new(Mutex::new(String::new()));
+        let think_cell = Arc::new(Mutex::new(false));
+        let quiet = Arc::new(AtomicU64::new(0));
+        let mut last_text = String::new();
+        let mut last_reasoning = String::new();
+        let mut tools = ToolTracker::new();
+        let mut states: HashMap<String, u8> = HashMap::new();
+        let mut roles: HashMap<String, String> = HashMap::new();
+        let mut part_kinds: HashMap<String, String> = HashMap::new();
+        let mut cur_text_part = String::new();
+        let mut cur_reasoning_part = String::new();
+
+        let mut feed = |data: &str, aborted: &mut bool, rate_notice: &mut bool| {
+            handle_opencode_sse_data(
+                None,
+                "s",
+                "http://127.0.0.1:1",
+                data,
+                &session_cell,
+                &full_cell,
+                &think_cell,
+                &quiet,
+                &mut last_text,
+                &mut last_reasoning,
+                &mut tools,
+                &mut states,
+                &mut roles,
+                &mut part_kinds,
+                &mut cur_text_part,
+                &mut cur_reasoning_part,
+                aborted,
+                rate_notice,
+            );
+        };
+
+        // The free-tier retry, verbatim apart from the event id.
+        let mut aborted = false;
+        let mut rate_notice = false;
+        feed(
+            r#"{"id":"evt_1","type":"session.status","properties":{"sessionID":"ses_1","status":{"type":"retry","attempt":1,"message":"Free usage exceeded, subscribe to Go","action":{"reason":"free_tier_limit","provider":"opencode","title":"Free limit reached","message":"Subscribe to OpenCode Go for reliable access to the best open-source models, starting at $5/month.","label":"subscribe","link":"https://opencode.ai/go"},"next":1792022401514}}}"#,
+            &mut aborted,
+            &mut rate_notice,
+        );
+        assert!(aborted, "a free-tier limit retry must abort the turn");
+        assert!(!rate_notice, "a spent allowance is not a transient notice");
+
+        // A plain retry status (transient throttle / provider outage): the
+        // server retries on its own — no abort, no notice.
+        let mut aborted = false;
+        feed(
+            r#"{"type":"session.status","properties":{"sessionID":"ses_1","status":{"type":"retry","attempt":3,"message":"Endpoint is unavailable","next":1791979999999}}}"#,
+            &mut aborted,
+            &mut rate_notice,
+        );
+        assert!(!aborted, "a plain retry status must not end the turn");
+
+        // The structured reason alone is enough, even with wording the text
+        // markers would miss.
+        let mut aborted = false;
+        feed(
+            r#"{"type":"session.status","properties":{"sessionID":"ses_1","status":{"type":"retry","attempt":2,"message":"try later","action":{"reason":"free_tier_limit"},"next":1}}}"#,
+            &mut aborted,
+            &mut rate_notice,
+        );
+        assert!(aborted, "the structured free_tier_limit reason must abort");
+
+        // Busy/idle statuses and other sessions' free-tier retries are inert.
+        let mut aborted = false;
+        feed(
+            r#"{"type":"session.status","properties":{"sessionID":"ses_1","status":{"type":"busy"}}}"#,
+            &mut aborted,
+            &mut rate_notice,
+        );
+        assert!(!aborted, "busy statuses are inert");
+        feed(
+            r#"{"type":"session.status","properties":{"sessionID":"ses_other","status":{"type":"retry","attempt":1,"message":"Free usage exceeded","action":{"reason":"free_tier_limit"},"next":1}}}"#,
+            &mut aborted,
+            &mut rate_notice,
+        );
+        assert!(!aborted, "other sessions' statuses are not ours");
+
+        // The composed message IS what `abort_turn_with_error` emits, so it
+        // must classify as `usage_limit` on its own — including the fallback
+        // wording when the server sends no message text.
+        let status = serde_json::json!({
+            "type": "retry",
+            "message": "Free usage exceeded, subscribe to Go",
+            "action": { "reason": "free_tier_limit", "link": "https://opencode.ai/go" }
+        });
+        let msg = free_tier_limit_message(Some(&status));
+        assert!(msg.contains("free limit reached"), "{msg}");
+        assert!(msg.contains("Free usage exceeded, subscribe to Go"), "{msg}");
+        assert!(msg.contains("https://opencode.ai/go"), "{msg}");
+        assert_eq!(
+            crate::chat::error_class::classify_error(&msg),
+            Some(crate::chat::error_class::CODE_USAGE_LIMIT)
+        );
+        let bare = free_tier_limit_message(Some(&serde_json::json!({ "type": "retry" })));
+        assert_eq!(
+            crate::chat::error_class::classify_error(&bare),
+            Some(crate::chat::error_class::CODE_USAGE_LIMIT)
+        );
     }
 
     /// MED-12: id-less tool parts (no `id` field) must get a STABLE fallback

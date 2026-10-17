@@ -2586,7 +2586,7 @@ mod tests {
              CREATE TABLE chat_messages (
                id INTEGER PRIMARY KEY AUTOINCREMENT, chat_session_id TEXT NOT NULL,
                role TEXT NOT NULL, content TEXT NOT NULL, created_at INTEGER NOT NULL,
-               superseded_by INTEGER);
+               superseded_by INTEGER, kind TEXT);
              CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT);
              CREATE TABLE session_summaries (
                chat_session_id TEXT PRIMARY KEY REFERENCES chat_sessions(id) ON DELETE CASCADE,
@@ -2773,10 +2773,21 @@ mod tests {
             .unwrap();
         }
         conn.execute("UPDATE chat_messages SET superseded_by = 99 WHERE id = 3", []).unwrap();
+        // A sidechat's hidden handoff seed is context, not a turn: it must not
+        // appear in the excerpt nor count toward the summary-worker's
+        // two-user-turn threshold.
+        conn.execute(
+            "INSERT INTO chat_messages (chat_session_id, role, content, created_at, kind)
+             VALUES ('s', 'user', '[Sidechat context] handoff transcript', 1, 'sidechat_seed')",
+            [],
+        )
+        .unwrap();
         let t = store::transcript_excerpt(&conn, "s", 10, 4000).unwrap();
         assert!(t.contains("[user] hello"));
         assert!(t.contains("[assistant] hi there"));
         assert!(!t.contains("superseded draft"));
+        assert!(!t.contains("Sidechat context"));
+        assert_eq!(store::count_user_messages(&conn, "s").unwrap(), 1);
     }
 
     #[test]

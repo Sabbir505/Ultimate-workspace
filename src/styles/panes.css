@@ -490,7 +490,7 @@
   overflow: auto;
 }
 .terminal-feed-card-body .chat-mermaid-block {
-  margin: 0;
+  margin: 0 auto;
 }
 .terminal-feed-iframe {
   width: 100%;

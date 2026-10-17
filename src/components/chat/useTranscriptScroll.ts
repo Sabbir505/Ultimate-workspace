@@ -12,6 +12,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useElementHeight } from "../../hooks/useElementHeight";
 import { setChatScrollToMessage } from "../../lib/chatScroll";
+import { maybeAutoStartProbe, noteJitter } from "../../lib/transcriptJitter";
 
 /** Visual-to-CSS pixel scale for rect measurements: getBoundingClientRect
  *  values are VISUAL px (scaled by browser zoom — Ctrl+wheel, e.g. 90%), while
@@ -280,6 +281,10 @@ export function useTranscriptScroll({
   useEffect(() => {
     const el = containerEl;
     if (!el) return;
+    // Dev jitter probe: auto-arms when the app was launched with ?jitter=1 /
+    // localStorage.ccJitter=1 (see src/lib/transcriptJitter.ts). No-op
+    // otherwise.
+    maybeAutoStartProbe(el);
     const noteUpward = (deltaY: number) => {
       userIntentUntilRef.current = performance.now() + USER_INTENT_WINDOW_MS;
       if (deltaY >= 0) return;
@@ -351,8 +356,8 @@ export function useTranscriptScroll({
     const maxScroll = el.scrollHeight - el.clientHeight;
     const rows = el.querySelectorAll<HTMLElement>("[data-index]");
     const last = rows[rows.length - 1];
-    if (!last || itemsRef.current.length === 0) return maxScroll;
-    if (Number(last.dataset.index) !== itemsRef.current.length - 1) return maxScroll;
+    if (!last || itemsRef.current.length === 0) return Math.round(maxScroll);
+    if (Number(last.dataset.index) !== itemsRef.current.length - 1) return Math.round(maxScroll);
     // Rect measurements are VISUAL px: at browser zoom ≠ 100% (the card sat
     // ~144px behind the composer at 90% zoom) they must be scaled back to
     // CSS px before mixing with scrollTop / style heights.
@@ -365,7 +370,10 @@ export function useTranscriptScroll({
     for (let n: Element | null = firstTail; n; n = n.nextElementSibling) {
       tail += (n as HTMLElement).offsetHeight;
     }
-    return Math.max(0, Math.min(maxScroll, rowBottom + tail - el.clientHeight));
+    // Rounded: rect reads at zoom ≠ 100% produce fractional targets, and a
+    // fractional scrollTop that the next frame's measurement reads back
+    // slightly differently is a sub-pixel sawtooth the user sees as shimmer.
+    return Math.round(Math.max(0, Math.min(maxScroll, rowBottom + tail - el.clientHeight)));
   }, []);
 
   /** Jump-to-latest pill: glide smoothly down to the live edge instead of
@@ -468,7 +476,11 @@ export function useTranscriptScroll({
     const last = rows[rows.length - 1];
     if (!last || !last.parentElement) return;
     const inner = last.parentElement;
-    let total = virt.getTotalSize();
+    // Integer px ONLY: the two sources (virtualizer totalSize, measured tail
+    // bottom) disagree by fractions while a stream re-measures every frame —
+    // a fractional height write that the next frame reads back differently is
+    // a 1px sawtooth in scrollHeight, and (pinned) in scrollTop too.
+    let total = Math.round(virt.getTotalSize());
     // MEASURED TAIL CLAMP: when the tail row IS mounted, its rendered bottom
     // is ground truth — clamp the wrapper to it, shrinking and growing alike
     // (rows are transform-positioned, so the rect delta IS the position).
@@ -477,8 +489,9 @@ export function useTranscriptScroll({
     // live edge could never quite scroll clear of the composer).
     if (Number(last.dataset.index) === itemsRef.current.length - 1) {
       const scale = visualScale(last);
-      const measuredBottom =
-        (last.getBoundingClientRect().bottom - inner.getBoundingClientRect().top) / scale;
+      const measuredBottom = Math.round(
+        (last.getBoundingClientRect().bottom - inner.getBoundingClientRect().top) / scale,
+      );
       if (measuredBottom > 0 && Math.abs(total - measuredBottom) > 1) {
         total = measuredBottom;
       }
@@ -487,9 +500,13 @@ export function useTranscriptScroll({
       // Instant DOM sync (next React render confirms it via liveTotal —
       // a plain React style write would otherwise be clobbered by the stale
       // getTotalSize() that render computes with).
+      noteJitter("tail.height", total);
       inner.style.setProperty("height", `${total}px`, "important");
     }
-    if (total !== liveTotalRef.current) {
+    // Deadband, not exact equality: unrounded totals drift by a fraction
+    // every frame while scrolling/streaming, and an exact comparison turned
+    // each drift into a state update → full ChatView re-render per frame.
+    if (Math.abs(total - liveTotalRef.current) > 1) {
       liveTotalRef.current = total;
       setLiveTotal(total);
     }
@@ -515,6 +532,7 @@ export function useTranscriptScroll({
       }
       const realH = last.offsetHeight;
       if (key && realH > 0 && v.itemSizeCache && v.itemSizeCache.get(key) !== realH) {
+        noteJitter("tail.cachePoke", realH);
         v.itemSizeCache.set(key, realH);
         if (v.itemSizeCacheVersion != null) v.itemSizeCacheVersion++;
         v.notify?.(false);
@@ -568,11 +586,17 @@ export function useTranscriptScroll({
       // flag hot, which makes its element-measure pass SKIP rows mounting
       // mid-stream (the swapped-in persisted row after a turn ends).
       if (Math.abs(el.scrollTop - target) > 1) {
+        noteJitter("pin", target - el.scrollTop);
         el.scrollTop = target;
         lastPinTopRef.current = target;
         // The scroll event this write produces must not be read as user
         // intent (see handleScroll).
         programmaticPinUntilRef.current = performance.now() + PROGRAMMATIC_PIN_GUARD_MS;
+      } else {
+        // Already at the edge — the healthy case. A flood of these with zero
+        // writes is the pin working; interleaved with pin writes + reversals
+        // it points at a measurement/write feedback loop.
+        noteJitter("pin.skip");
       }
     };
     pinToLiveEdgeRef.current = patchTailAndPin;
@@ -637,6 +661,7 @@ export function useTranscriptScroll({
     };
     const ro = new ResizeObserver(() => {
       if (!stickToBottomRef.current) return;
+      noteJitter("ro.cascade");
       cancelAnimationFrame(raf);
       frame = 0;
       raf = requestAnimationFrame(step);
@@ -724,6 +749,7 @@ export function useTranscriptScroll({
       const raf = requestAnimationFrame(() => {
         const el = messagesContainerRef.current;
         if (el && stickToBottomRef.current) {
+          noteJitter("anchor.pin");
           el.scrollTop = pinTargetFor(el);
           programmaticPinUntilRef.current = performance.now() + PROGRAMMATIC_PIN_GUARD_MS;
         }
@@ -744,6 +770,7 @@ export function useTranscriptScroll({
       const el = messagesContainerRef.current;
       if (!el) return;
       const max = Math.max(0, el.scrollHeight - el.clientHeight);
+      noteJitter("anchor.restore");
       el.scrollTop = Math.min(max, Math.max(0, el.scrollHeight - el.clientHeight - prevBottom));
     });
     return () => cancelAnimationFrame(raf);

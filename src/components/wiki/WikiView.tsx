@@ -693,39 +693,7 @@ export function WikiView() {
             )}
           </div>
         ) : (
-          <>
-            {/* Rebuild over an existing wiki: the reader stays usable, so
-                the live feed rides as a slim strip above it. */}
-            {(running || snapshotRunning) && (
-              <div className="wiki-reader-live">
-                <WikiBuildFeed
-                  compact
-                  steps={steps}
-                  state={
-                    jobDead
-                      ? "error"
-                      : progress?.state === "error"
-                        ? "error"
-                        : progress?.state === "cancelled"
-                          ? "cancelled"
-                          : "running"
-                  }
-                  phase={progress?.phase ?? "analysis"}
-                  mode={progress?.mode ?? "build"}
-                  pagesDone={progress?.pagesDone ?? 0}
-                  pagesTotal={progress?.pagesTotal ?? 0}
-                  onCancel={() => {
-                    const target = loadedPath ?? root ?? progress?.path;
-                    if (target) {
-                      void cancel(target).catch((e) =>
-                        toastError("Failed to cancel the build", e),
-                      );
-                    }
-                  }}
-                />
-              </div>
-            )}
-            <article className="wiki-reader" data-testid="wiki-reader" ref={readerRef}>
+          <article className="wiki-reader" data-testid="wiki-reader" ref={readerRef}>
             {pageDetail ? (
               <>
                 {!bodyStartsWithH1 && <h1>{pageDetail.title}</h1>}
@@ -758,7 +726,6 @@ export function WikiView() {
               <div className="wiki-tab-empty">{pageLoading ? "Loading…" : "Select a page."}</div>
             )}
           </article>
-          </>
         )}
 
         {loadedPath && pages.length > 0 && (

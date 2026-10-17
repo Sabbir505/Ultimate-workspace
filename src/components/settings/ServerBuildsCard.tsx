@@ -37,15 +37,15 @@ const INSTALLERS: Record<string, (force?: boolean) => Promise<unknown>> = {
 const DESCRIPTIONS: Record<string, string> = {
   "stt-whisper": "CPU build — used when “Use the GPU” is off.",
   "stt-whisper-cuda":
-    "CUDA build — used when “Use the GPU” is on. Bundles its own CUDA 12 runtime. ~640 MB.",
+    "CUDA build — used when “Use the GPU” is on. Bundles its CUDA 12 runtime. ~640 MB.",
   "llama-cuda":
-    "CUDA build of llama-server for GPU offload on local models. Needs an NVIDIA GPU. ~242 MB.",
+    "CUDA build of llama-server for GPU offload. Needs an NVIDIA GPU. ~242 MB.",
   "tts-gpu":
-    "CUDA voice engine + cuDNN 9 runtime. Needs an NVIDIA GPU with the CUDA 13 runtime. ~876 MB.",
+    "CUDA voice engine + cuDNN 9. Needs an NVIDIA GPU with the CUDA 13 runtime. ~876 MB.",
   "image-sd-cuda":
-    "CUDA build of sd-server (stable-diffusion.cpp) + its CUDA 12 runtime. Needs an NVIDIA GPU. ~892 MB.",
+    "CUDA build of sd-server + its CUDA 12 runtime. Needs an NVIDIA GPU. ~892 MB.",
   "image-sd-vulkan":
-    "Vulkan build — runs image models on NVIDIA, AMD and Intel GPUs. ~32 MB.",
+    "Vulkan build — runs on NVIDIA, AMD and Intel GPUs. ~32 MB.",
   "image-sd-cpu": "CPU build — works everywhere, slow for image generation. ~17 MB.",
 };
 
@@ -152,7 +152,7 @@ export function ServerBuildsCard({
       <div style={{ fontWeight: 600, marginBottom: 2 }}>{title}</div>
       <div style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 10 }}>
         {note ??
-          "Pinned, checksum-verified builds this app downloads and keeps up to date."}
+          "Pinned, checksum-verified builds the app keeps up to date."}
       </div>
       <div style={{ display: "flex", flexDirection: "column" }}>
         {ids.map((id, i) => {

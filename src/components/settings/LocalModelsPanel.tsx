@@ -37,7 +37,6 @@ import { TtsPanel } from "./TtsPanel";
 import { ImageGenPanel } from "./ImageGenPanel";
 import { ServerBuildsCard } from "./ServerBuildsCard";
 import { KnowledgePanel } from "./KnowledgePanel";
-import { GlassSelect } from "../common/GlassSelect";
 import { Modal } from "../common/Modal";
 import { ToggleSwitch } from "./ToggleSwitch";
 import { LogGatewayPanel } from "./LogGatewayPanel";
@@ -475,17 +474,11 @@ export function LocalModelsPanel() {
         </button>
       </div>
 
-      {/* Compaction + Electricity Cost — surfaced near the top so users
-          don't scroll past the model list to reach them. One compaction
-          panel covers both engines: local (GGUF sidecar) and cloud (the
-          session's own provider). */}
+      {/* Electricity Cost — surfaced near the top so users don't scroll past
+          the model list to reach it. Context compaction now lives in its own
+          Settings section (Settings → Compaction). */}
       {tab === "models" && (
         <div className="local-model-settings-row">
-          <details className="model-advanced local-compaction-advanced">
-            <summary>Compaction (advanced)</summary>
-            <LocalCompactionControls />
-            <CloudCompactionControls />
-          </details>
           <LocalElectricitySettings />
         </div>
       )}
@@ -547,7 +540,7 @@ export function LocalModelsPanel() {
         <ServerBuildsCard
           ids={["llama-cuda"]}
           title="Server builds"
-          note="The CUDA llama-server build for GPU offload — pinned, checksum-verified, kept up to date."
+          note="CUDA llama-server build for GPU offload — pinned and checksum-verified."
         />
       )}
 
@@ -556,9 +549,9 @@ export function LocalModelsPanel() {
       {!infoDismissed && (
         <div className="local-info-callout">
           <span>
-            Models are scanned from ~/.lmstudio/models, ~/.cache/lm-studio/models,
-            your Downloads folder, Ollama, and any folder you add. llama-server
-            (llama.cpp) must be installed separately.
+            Models are scanned from ~/.lmstudio/models, your Downloads folder,
+            Ollama, and any folder you add. llama-server must be installed
+            separately.
           </span>
           <button
             className="ghost"
@@ -610,8 +603,8 @@ export function LocalModelsPanel() {
         {models.length === 0 && !loading && !active && (
           <div className="empty-reserved local-empty">
             <span className="empty-text">
-              No .gguf models found. Add a folder to scan, or grab one from the
-              Model Market.
+              No .gguf models found. Add a folder to scan or browse the Model
+              Market.
             </span>
             <div className="empty-ctas">
               <button className="primary cta-strong" onClick={() => void handleAddFolder()}>
@@ -894,7 +887,7 @@ function LocalElectricitySettings() {
             onBlur={save}
           />
           <span className="local-compaction-hint">
-            Your electricity cost per kilowatt-hour (e.g., 0.15)
+            Electricity cost per kWh (e.g., 0.15)
           </span>
         </label>
         <label>
@@ -922,7 +915,7 @@ function LocalElectricitySettings() {
           <span className="local-compaction-hint">
             {gpuName
               ? `${gpuName} — override if the estimate is off`
-              : "GPU power consumption in watts, or click Auto-detect"}
+              : "GPU power draw in watts, or use Auto-detect"}
           </span>
         </label>
       </div>
@@ -930,158 +923,8 @@ function LocalElectricitySettings() {
   );
 }
 
-/** Context-compaction controls for local-GGUF sessions. These tune when the
- *  framework summarizes older turns before a small context window overflows.
- *  Defaults and clamping mirror the Rust loader in chat/compaction.rs. */
-function LocalCompactionControls() {
-  const threshold = useSettingsStore((s) => s.localCompactionThreshold);
-  const pin = useSettingsStore((s) => s.localPinExchanges);
-  const summarizer = useSettingsStore((s) => s.localCompactionSummarizer);
-  const rebuildFromRaw = useSettingsStore((s) => s.localCompactionRebuildFromRaw);
-  const setThreshold = useSettingsStore((s) => s.setLocalCompactionThreshold);
-  const setPin = useSettingsStore((s) => s.setLocalPinExchanges);
-  const setSummarizer = useSettingsStore((s) => s.setLocalCompactionSummarizer);
-  const setRebuildFromRaw = useSettingsStore((s) => s.setLocalCompactionRebuildFromRaw);
-  return (
-    <div className="model-advanced-fields">
-      <label>
-        Summarizer
-        <select
-          value={summarizer}
-          onChange={(e) => setSummarizer(e.target.value === "cloud" ? "cloud" : "sidecar")}
-        >
-          <option value="sidecar">Sidecar model (default)</option>
-          <option value="cloud">Cloud provider (needs an API key)</option>
-        </select>
-        <span className="local-compaction-hint">
-          which model writes the summary — a small sidecar model can lean on a
-          configured cloud key for better quality
-        </span>
-      </label>
-      <label>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <input
-            type="checkbox"
-            checked={rebuildFromRaw}
-            onChange={(e) => setRebuildFromRaw(e.target.checked)}
-          />
-          <span>Rebuild summaries from the original turns</span>
-        </div>
-        <span className="local-compaction-hint">
-          re-derives each new summary from the folded raw turns instead of
-          stacking summary-on-summary (prevents compounding loss)
-        </span>
-      </label>
-      <label>
-        Threshold
-        <input
-          type="number"
-          min={0.25}
-          max={0.99}
-          step={0.05}
-          value={threshold}
-          onChange={(e) => setThreshold(Number(e.target.value))}
-        />
-        <span className="local-compaction-hint">
-          fraction of the context window that triggers compaction (default 0.75)
-        </span>
-      </label>
-      <label>
-        Pin exchanges
-        <input
-          type="number"
-          min={1}
-          max={50}
-          step={1}
-          value={pin}
-          onChange={(e) => setPin(Math.floor(Number(e.target.value)))}
-        />
-        <span className="local-compaction-hint">
-          recent user+assistant pairs kept verbatim (default 6)
-        </span>
-      </label>
-    </div>
-  );
-}
-
-/** Context-compaction controls for cloud/API sessions. Same engine as the
- *  local path; the trigger is an estimated request size against the model
- *  registry's window and the summarizer is the session's own provider.
- *  Defaults and clamping mirror the Rust loader in chat/cloud_compact.rs. */
-function CloudCompactionControls() {
-  const enabled = useSettingsStore((s) => s.cloudCompactionEnabled);
-  const threshold = useSettingsStore((s) => s.cloudCompactionThreshold);
-  const pin = useSettingsStore((s) => s.cloudPinExchanges);
-  const contextLimit = useSettingsStore((s) => s.cloudContextLimit);
-  const setEnabled = useSettingsStore((s) => s.setCloudCompactionEnabled);
-  const setThreshold = useSettingsStore((s) => s.setCloudCompactionThreshold);
-  const setPin = useSettingsStore((s) => s.setCloudPinExchanges);
-  const setContextLimit = useSettingsStore((s) => s.setCloudContextLimit);
-  return (
-    <div className="model-advanced-fields">
-      <label>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <input
-            type="checkbox"
-            checked={enabled}
-            onChange={(e) => setEnabled(e.target.checked)}
-          />
-          <span>Compact cloud conversations automatically</span>
-        </div>
-        <span className="local-compaction-hint">
-          summarizes older turns when the estimated request approaches the model's
-          window; a context-overflow rejection is compacted and retried regardless
-        </span>
-      </label>
-      <label>
-        Threshold
-        <input
-          type="number"
-          min={0.25}
-          max={0.99}
-          step={0.05}
-          value={threshold}
-          disabled={!enabled}
-          onChange={(e) => setThreshold(Number(e.target.value))}
-        />
-        <span className="local-compaction-hint">
-          fraction of the model window that triggers compaction (default 0.75)
-        </span>
-      </label>
-      <label>
-        Pin exchanges
-        <input
-          type="number"
-          min={1}
-          max={50}
-          step={1}
-          value={pin}
-          disabled={!enabled}
-          onChange={(e) => setPin(Math.floor(Number(e.target.value)))}
-        />
-        <span className="local-compaction-hint">
-          recent user+assistant pairs kept verbatim (default 6)
-        </span>
-      </label>
-      <label>
-        Context limit (tokens)
-        <input
-          type="number"
-          min={0}
-          step={10000}
-          placeholder="0 = model default"
-          value={contextLimit}
-          onChange={(e) => setContextLimit(Number(e.target.value))}
-        />
-        <span className="local-compaction-hint">
-          cap the effective window below the model's own — 0 uses the model's
-          real window (fetched live from Anthropic/OpenRouter where available);
-          a cap only shrinks, never raises
-        </span>
-      </label>
-    </div>
-  );
-}
+/** Context-compaction controls moved to their own Settings section —
+ *  see src/components/settings/CompactionPanel.tsx. */
 
 export const K_SYSTEM_PROMPT = "assistant.systemPrompt";
 export const K_COMMIT_PROVIDER = "commitMessage.provider";

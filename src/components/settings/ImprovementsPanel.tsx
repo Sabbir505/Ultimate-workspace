@@ -238,9 +238,8 @@ export function ImprovementsPanel() {
         <div className="improve-hero-copy">
           <h3>Self-improving artifacts</h3>
           <p className="settings-desc">
-            Skills, loops, prompt templates, and automations get versioned,
-            learn from failed and corrected runs, and propose improvements that
-            must pass a regression eval before being applied.
+            Skills, loops, templates, and automations are versioned; proposed improvements must pass a
+            regression eval before being applied.
           </p>
         </div>
       </div>
@@ -426,8 +425,8 @@ export function ImprovementsPanel() {
         <div className="improve-empty">
           <HistoryIcon size={16} strokeWidth={1.6} aria-hidden="true" />
           <span>
-            No tracked artifacts yet — they are registered automatically as
-            skills, loops, and templates are used.
+            No tracked artifacts yet — they register automatically as you use skills, loops, and
+            templates.
           </span>
         </div>
       )}

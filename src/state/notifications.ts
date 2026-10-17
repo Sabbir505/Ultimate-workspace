@@ -38,7 +38,7 @@ export interface RelayNotification {
   /** Terminal pane to focus when the row is clicked. */
   paneId?: string;
   /** Overlay view to open when the row is clicked (e.g. "automations"). */
-  view?: "automations" | "cost" | "settings";
+  view?: "automations" | "cost" | "settings" | "bots";
   /** Settings category to preselect when `view` is "settings" (e.g. a
    *  harness-update row lands on Agent harnesses, not the last-used panel). */
   settingsCategory?: string;

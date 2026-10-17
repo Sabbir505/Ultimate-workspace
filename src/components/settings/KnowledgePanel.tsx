@@ -17,6 +17,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { GlassSelect } from "../common/GlassSelect";
 import {
   docsAddCorpus,
   docsRemoveCorpus,
@@ -489,10 +490,9 @@ export function KnowledgePanel() {
       </div>
 
       <p className="settings-note">
-        Index local folders of notes, docs, or PDFs into a searchable Knowledge
-        Base. The chat assistant can then answer questions from your files via
-        the <code>search_docs</code> tool, which is auto-enabled whenever the
-        embedding sidecar is running and at least one corpus is indexed.
+        Index local folders so the assistant can answer from them via the{" "}
+        <code>search_docs</code> tool, enabled once the sidecar runs and a corpus
+        is indexed.
       </p>
 
       {/* Embedding model picker — every discovered embedding GGUF grouped by
@@ -515,42 +515,37 @@ export function KnowledgePanel() {
           </button>
         </div>
         <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 2 }}>
-          Which local GGUF embeds your corpora. New downloads in your models
-          folders are discovered automatically.
+          Which local GGUF embeds your corpora; new downloads are discovered
+          automatically.
         </div>
-        <select
+        <GlassSelect<string>
           className="knowledge-embed-select"
-          aria-label="Embedding model"
+          ariaLabel="Embedding model"
           value={embedChoice}
           disabled={switchingModel}
-          onChange={(e) => void handleSelectEmbeddingModel(e.target.value)}
-        >
-          <option value="">Auto — best installed model (prefers nomic-embed)</option>
-          {/* The stored choice vanished from the scan (deleted while
-              selected): keep it visible so the select reflects reality —
-              the "file is gone" note below explains the fallback. */}
-          {embedChoice &&
+          options={[
+            { value: "", label: "Auto — best installed model (prefers nomic-embed)" },
+            // The stored choice vanished from the scan (deleted while
+            // selected): keep it visible so the picker reflects reality.
+            ...(embedChoice &&
             embedModels !== null &&
-            !embedModels.some((m) => m.path === embedChoice) && (
-              <option value={embedChoice}>{shortName(embedChoice)} (missing)</option>
-            )}
-          {embedModels === null ? (
-            <option value="" disabled>
-              scanning model folders…
-            </option>
-          ) : (
-            embedGroups.map((g) => (
-              <optgroup key={g.family} label={g.family}>
-                {g.files.map((f) => (
-                  <option key={f.path} value={f.path}>
-                    {f.quantization ?? "model"} · {formatBytes(f.sizeBytes)}
-                    {sidecar?.modelPath === f.path ? " — active" : ""}
-                  </option>
-                ))}
-              </optgroup>
-            ))
-          )}
-        </select>
+            !embedModels.some((m) => m.path === embedChoice)
+              ? [{ value: embedChoice, label: `${shortName(embedChoice)} (missing)`, hint: "file is gone" }]
+              : []),
+            ...(embedModels === null
+              ? [{ value: "__scanning", label: "scanning model folders…", disabled: true }]
+              : embedGroups.flatMap((g) =>
+                  g.files.map((f) => ({
+                    value: f.path,
+                    label: `${f.quantization ?? "model"} · ${formatBytes(f.sizeBytes)}${
+                      sidecar?.modelPath === f.path ? " — active" : ""
+                    }`,
+                    hint: g.family,
+                  })),
+                )),
+          ]}
+          onChange={(v) => void handleSelectEmbeddingModel(v)}
+        />
         <div style={{ fontSize: 11, marginTop: 2 }}>
           {hasInstalledModel ? (
             <>
@@ -574,14 +569,12 @@ export function KnowledgePanel() {
         </div>
         {choiceMissing && (
           <div style={{ fontSize: 11, color: "var(--warn, #d29922)", marginTop: 2 }}>
-            Chosen model file is gone — using auto-discovery until you pick
-            another.
+            Chosen model file is gone — using auto-discovery.
           </div>
         )}
         <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 2 }}>
-          Switching models restarts the sidecar. Existing chunks keep their old
-          dimensions, so re-index a corpus after a switch to make it searchable
-          with the new model.
+          Switching models restarts the sidecar; re-index corpora to make them
+          searchable with the new dimensions.
         </div>
       </div>
 
@@ -637,7 +630,7 @@ export function KnowledgePanel() {
       {!hasCorpora && !busy && loadError && (
         <div className="empty-reserved">
           <div className="empty-text" style={{ color: "var(--danger, #f85149)" }}>
-            Failed to load corpora. Check that the backend is running, then retry.
+            Failed to load corpora — check the backend is running and retry.
           </div>
         </div>
       )}
@@ -645,7 +638,7 @@ export function KnowledgePanel() {
       {!hasCorpora && !busy && !loadError && (
         <div className="empty-reserved">
           <div className="empty-text">
-            No corpora yet. Click “+ Add folder” to index your first one.
+            No corpora yet — click “+ Add folder” to index your first one.
           </div>
         </div>
       )}
@@ -758,10 +751,9 @@ export function KnowledgePanel() {
           <span style={{ fontWeight: 600, fontSize: 12 }}>Rerank search results</span>
         </div>
         <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>
-          Optional: re-scores the fused hybrid hits with a local reranker
-          model for better <code>search_docs</code> ranking. Expects a
-          bge-reranker-v2-m3 GGUF (filename containing “reranker”) in your
-          models folder.
+          Optional: re-scores search hits with a local reranker for better{" "}
+          <code>search_docs</code> ranking. Needs a bge-reranker-v2-m3 GGUF
+          (filename containing “reranker”).
         </div>
         <div style={{ fontSize: 11, marginTop: 2 }}>
           Reranker model:&nbsp;
@@ -852,8 +844,8 @@ export function KnowledgePanel() {
                 </div>
               </div>
               <p className="model-detail-desc">
-                Embedding model for the Knowledge Base. After download it is detected
-                automatically and used to index your corpora.
+                Embedding model for the Knowledge Base — detected automatically
+                after download.
               </p>
               {variants.length > 0 && (
                 <div className="model-detail-quants">

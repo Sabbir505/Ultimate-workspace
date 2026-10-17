@@ -78,7 +78,7 @@ export function LogGatewayPanel() {
   return (
     <div className="llm-log-settings">
       <p className="llm-log-intro">
-        Every local-model request is captured with its full request and response, then
+        Local-model requests are captured with their full request and response, then
         summarised into token counts and timings. Open the log from the sidebar footer.
       </p>
 
@@ -94,63 +94,69 @@ export function LogGatewayPanel() {
       </Field>
 
       <Field label="Keep requests for" hint="Older rows are pruned hourly.">
-        <select
+        <GlassSelect<string>
           className="llm-log-select"
-          value={cfg.retentionDays}
-          onChange={(e) =>
-            void llmLogConfigSet({ retentionDays: Number(e.target.value) })
+          ariaLabel="Keep requests for"
+          value={String(cfg.retentionDays)}
+          options={[
+            { value: "1", label: "1 day" },
+            { value: "7", label: "7 days" },
+            { value: "30", label: "30 days" },
+            { value: "90", label: "90 days" },
+          ]}
+          onChange={(v) =>
+            void llmLogConfigSet({ retentionDays: Number(v) })
               .then((c) => setCfg(c))
               .catch((err) => onWriteFailed("the retention setting", err))
           }
-        >
-          <option value={1}>1 day</option>
-          <option value={7}>7 days</option>
-          <option value={30}>30 days</option>
-          <option value={90}>90 days</option>
-        </select>
+        />
       </Field>
 
-      <Field label="Maximum rows" hint="The oldest are dropped first when this is exceeded.">
-        <select
+      <Field label="Maximum rows" hint="The oldest are dropped first.">
+        <GlassSelect<string>
           className="llm-log-select"
-          value={cfg.maxRows}
-          onChange={(e) =>
-            void llmLogConfigSet({ maxRows: Number(e.target.value) })
+          ariaLabel="Maximum rows"
+          value={String(cfg.maxRows)}
+          options={[
+            { value: "1000", label: "1,000" },
+            { value: "5000", label: "5,000" },
+            { value: "20000", label: "20,000" },
+          ]}
+          onChange={(v) =>
+            void llmLogConfigSet({ maxRows: Number(v) })
               .then((c) => setCfg(c))
               .catch((err) => onWriteFailed("the row limit", err))
           }
-        >
-          <option value={1000}>1,000</option>
-          <option value={5000}>5,000</option>
-          <option value={20000}>20,000</option>
-        </select>
+        />
       </Field>
 
       <Field
         label="Maximum body size"
-        hint="Larger responses are cut. Prompts and answers can be long."
+        hint="Larger responses are cut."
       >
-        <select
+        <GlassSelect<string>
           className="llm-log-select"
-          value={cfg.maxBodyKb}
-          onChange={(e) =>
-            void llmLogConfigSet({ maxBodyKb: Number(e.target.value) })
+          ariaLabel="Maximum body size"
+          value={String(cfg.maxBodyKb)}
+          options={[
+            { value: "64", label: "64 KB" },
+            { value: "256", label: "256 KB" },
+            { value: "1024", label: "1 MB" },
+          ]}
+          onChange={(v) =>
+            void llmLogConfigSet({ maxBodyKb: Number(v) })
               .then((c) => setCfg(c))
               .catch((err) => onWriteFailed("the body-size limit", err))
           }
-        >
-          <option value={64}>64 KB</option>
-          <option value={256}>256 KB</option>
-          <option value={1024}>1 MB</option>
-        </select>
+        />
       </Field>
 
       <hr className="llm-log-rule" />
 
       <h3 className="llm-log-heading">Gateway</h3>
       <p className="llm-log-intro">
-        Other apps point their base URL here. Requests are forwarded to the runtime unchanged
-        and recorded in the same log.
+        Other apps point their base URL here; requests are forwarded unchanged and
+        recorded in the same log.
       </p>
 
       {gw.running ? (
@@ -174,8 +180,8 @@ export function LogGatewayPanel() {
         </Field>
       ) : (
         <p className="llm-log-warn">
-          The gateway is not running. It starts with the app; if this persists, check the
-          startup log.
+          The gateway is not running — it starts with the app. If this persists,
+          check the startup log.
         </p>
       )}
 

@@ -56,6 +56,13 @@ import { MarkdownTable } from "./MarkdownTable";
 
 export type SyntaxHighlighterComponent = (props: SyntaxHighlighterProps) => React.ReactNode;
 
+/** The resolved Prism highlighter, cached at MODULE scope (the dynamic import
+ *  itself is memoized, so this is the same component every time). Without it
+ *  every remount of a code block — virtualized scroll-out/scroll-back, or a
+ *  structural swap in the live streaming bubble — started from the plain
+ *  <pre> fallback and visibly flashed when the effect re-resolved. */
+let loadedHighlighter: SyntaxHighlighterComponent | null = null;
+
 /** Hook that loads a lazy component once (on mount) and resolves it via the
  *  provided async loader. The component stays null until the dynamic import
  *  finishes, then re-renders with the loaded module. Safe across StrictMode
@@ -825,11 +832,17 @@ export function StepCodeHighlighter({ code, language }: { code: string; language
   // dark-on-light light-theme values.
   const theme = useSyntaxTheme("chat-block");
   // `comp` resolves to the lazy-loaded Prism component after first use.
-  const [comp, setComp] = useState<SyntaxHighlighterComponent | null>(null);
+  // Initialised from the MODULE-level cache: a remount (virtualized scroll,
+  // a structural swap above the block) must render highlighted immediately
+  // instead of flashing the plain fallback until the effect re-resolves.
+  const [comp, setComp] = useState<SyntaxHighlighterComponent | null>(() => loadedHighlighter);
   // The loaded value IS a function component — pass it via an updater fn,
   // otherwise React treats it as a setState updater and calls it with the
   // previous state (null) as props, crashing inside the highlighter.
-  useLazyComponent(loadSyntaxHighlighter, (c) => setComp(() => c));
+  useLazyComponent(loadSyntaxHighlighter, (c) => {
+    loadedHighlighter = c;
+    setComp(() => c);
+  });
   if (!comp) {
     // Fallback <pre> before the chunk loads — styled to match the highlighter's
     // output so there's no layout shift when it upgrades.
@@ -1826,6 +1839,11 @@ export function Markdown({
   // highlighter re-initialised and flashed its plain <pre> fallback, CopyButton
   // state reset). Memoised on the only values it closes over, so flushes
   // reconcile instead of remount.
+  //
+  // Keyed on the sources FINGERPRINT, not the array: callers rebuild the array
+  // per parse (a fresh identity per streamed token even when the sources are
+  // byte-identical), and an array dep re-armed the whole remount on every
+  // flush. The fingerprint only moves when the sources themselves change.
   const mdComponents = useMemo<Components>(
     () => ({
         table: MarkdownTable,
@@ -1941,7 +1959,8 @@ export function Markdown({
           return <MdLink href={href}>{children}</MdLink>;
         },
     }),
-    [chatSessionId, onPreviewArtifact, sources],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [chatSessionId, onPreviewArtifact, fingerprint],
   );
 
   const build = () => {

@@ -106,9 +106,10 @@ describe("ModelMarket auto-mmproj after vision download (C5)", () => {
       });
     });
 
-    // The mmproj auto-download must trigger for the vision card.
+    // The mmproj auto-download must trigger for the vision card, named
+    // after the model file it projects for.
     expect(onDownloadComplete).toHaveBeenCalled();
-    expect(downloadMmprojMock).toHaveBeenCalledWith("author/vision");
+    expect(downloadMmprojMock).toHaveBeenCalledWith("author/vision", undefined, "vis-q4.gguf");
   });
 
   function screen_has_vision_card(): boolean {

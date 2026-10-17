@@ -10,5 +10,6 @@ export const deleteDownloadedModel = (path: string) =>
 export const downloadMmproj = (
   repoId: string,
   mmprojFilename?: string,
+  baseFilename?: string,
 ) =>
-  safeInvoke<void>("download_mmproj", { repoId, mmprojFilename });
+  safeInvoke<void>("download_mmproj", { repoId, mmprojFilename, baseFilename });

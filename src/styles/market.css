@@ -40,11 +40,14 @@
 .fit-dot.too_large { background: var(--fit-bad); }
 
 /* High-contrast primary CTA: lifts the muted accent toward the theme's text
-   color, but mixed back toward the surface so it doesn't glare on dark. */
+   color, but mixed back toward the surface so it doesn't glare on dark. The
+   label uses --surface-solid, NOT --surface: wallpaper mode remaps --surface
+   to a 30%-alpha glass (shell.css), which would wash the label to near
+   invisible on the light plate. */
 button.primary.cta-strong {
   background: color-mix(in srgb, var(--text) 78%, var(--surface));
   border-color: transparent;
-  color: var(--surface);
+  color: var(--surface-solid);
   box-shadow: none;
 }
 button.primary.cta-strong:hover {

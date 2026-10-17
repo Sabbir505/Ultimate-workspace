@@ -8,6 +8,7 @@ if (!Element.prototype.scrollIntoView) {
 }
 
 import { AgentModelPicker } from "../components/chat/AgentModelPicker";
+import { useUiStore } from "../state/ui";
 
 // The Local pane's eject row lets the user stop the running llama-server
 // sidecar and free its VRAM. Visibility is gated on the session itself being
@@ -71,5 +72,46 @@ describe("AgentModelPicker — local model eject", () => {
   it("shows a spinner on the chip while a harness/local model loads", () => {
     const { container } = renderPicker({ loading: true });
     expect(container.querySelector(".agent-chip-spinner")).toBeTruthy();
+  });
+});
+
+// Native browser webviews (the right tool panel) float above ALL DOM, so an
+// HTML popup can only paint over them while the occlusion flag is set — the
+// same contract the context-meter panel and the chip tooltips use. Without
+// it, the open picker is silently covered by the browser pane the moment it
+// overlaps it.
+describe("AgentModelPicker — webview occlusion while open", () => {
+  afterEach(() => {
+    cleanup();
+    useUiStore.setState({ openContextTipIds: [], contextTipOpen: false });
+  });
+
+  it("sets the occlusion flag while the popup is open and clears it on close", () => {
+    const view = render(
+      <AgentModelPicker agent="builtin" model="gpt-4o" provider="openai" onPick={() => {}} />,
+    );
+    expect(useUiStore.getState().contextTipOpen).toBe(false);
+    fireEvent.click(view.container.querySelector<HTMLElement>(".agent-chip")!);
+    expect(useUiStore.getState().contextTipOpen).toBe(true);
+    fireEvent.click(view.container.querySelector<HTMLElement>(".agent-chip")!);
+    expect(useUiStore.getState().contextTipOpen).toBe(false);
+  });
+
+  it("keeps the flag while another pane's picker is still open", () => {
+    // Split view: two pickers, one per pane. Closing pane A must not
+    // re-expose the webviews pane B's open popup still has to paint over.
+    const a = render(
+      <AgentModelPicker agent="builtin" model="gpt-4o" provider="openai" onPick={() => {}} />,
+    );
+    const b = render(
+      <AgentModelPicker agent="builtin" model="gpt-4o" provider="openai" onPick={() => {}} />,
+    );
+    fireEvent.click(a.container.querySelector<HTMLElement>(".agent-chip")!);
+    fireEvent.click(b.container.querySelector<HTMLElement>(".agent-chip")!);
+    expect(useUiStore.getState().contextTipOpen).toBe(true);
+    fireEvent.click(a.container.querySelector<HTMLElement>(".agent-chip")!);
+    expect(useUiStore.getState().contextTipOpen).toBe(true);
+    fireEvent.click(b.container.querySelector<HTMLElement>(".agent-chip")!);
+    expect(useUiStore.getState().contextTipOpen).toBe(false);
   });
 });

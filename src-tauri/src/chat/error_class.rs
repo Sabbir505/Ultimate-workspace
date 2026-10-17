@@ -65,8 +65,18 @@ const OVERFLOW_MARKERS: &[&str] = &[
 ///
 /// - CommandCode free tier: "Free usage limit hit. Come back in 3 hours."
 /// - OpenCode free models: "free usage limit reached", provider quota logs
+/// - OpenCode Zen free tier (current shape, opencode ≥1.18): the server
+///   parks the turn's own retry hours out and streams the refusal as
+///   `session.status` retry — "Free usage exceeded, subscribe to Go" — so
+///   the message text and the structured `free_tier_limit` reason both
+///   classify. Older opencode builds surface the Zen 429 body verbatim
+///   ("Rate limit exceeded. Please try again later.") through the AI SDK
+///   after its retry budget; the full sentence is required so a bare "rate
+///   limit exceeded" from any provider stays transient (below).
 /// - Anthropic spend caps: "enforced_spend_limit_reached"
 /// - OpenRouter/OpenAI: "insufficient credits", "exceeded your current quota"
+/// - DeepSeek-style endpoints (openai-compatible relays): "API key 额度已用完"
+///   ("the API key's quota is used up") — unambiguously exhaustion.
 /// - Generic harness stderr: "quota exceeded", "insufficient credits"
 const USAGE_LIMIT_MARKERS: &[&str] = &[
     "usage limit hit",
@@ -79,6 +89,7 @@ const USAGE_LIMIT_MARKERS: &[&str] = &[
     "usage_limit_exceeded",
     "usage_limit_reached",
     "free limit reached",
+    "free usage exceeded",
     "daily limit reached",
     "daily limit exceeded",
     "weekly limit reached",
@@ -93,6 +104,10 @@ const USAGE_LIMIT_MARKERS: &[&str] = &[
     "payment required",
     "spend limit reached",
     "spend_limit",
+    "额度已用完",
+    // The Zen refusal's full sentence (trailing "please try again later"
+    // included): the bare "rate limit exceeded" prefix must stay transient.
+    "rate limit exceeded. please try again later",
     "come back later",
     "come back in",
 ];
@@ -344,6 +359,25 @@ mod tests {
             classify_error("HTTP 429: exceeded your current quota, please check your plan"),
             Some(CODE_USAGE_LIMIT)
         );
+        // OpenCode Zen free tier, CURRENT shape — the `session.status` retry
+        // the server parks hours out (captured from a live opencode 1.18.7).
+        assert_eq!(
+            classify_error("Free usage exceeded, subscribe to Go"),
+            Some(CODE_USAGE_LIMIT)
+        );
+        // OpenCode Zen free tier, LEGACY shape — the Zen 429 body the AI SDK
+        // surfaces verbatim once its retry budget is exhausted.
+        assert_eq!(
+            classify_error(
+                "OpenCode turn failed: AI_APICallError: Rate limit exceeded. Please try again later."
+            ),
+            Some(CODE_USAGE_LIMIT)
+        );
+        // Openai-compatible relay: "the API key's quota is used up".
+        assert_eq!(
+            classify_error("HTTP 402: API key 额度已用完"),
+            Some(CODE_USAGE_LIMIT)
+        );
         assert_eq!(
             classify_error("HTTP 402: insufficient credits"),
             Some(CODE_USAGE_LIMIT)
@@ -375,6 +409,15 @@ mod tests {
         // A spent allowance never reads as transient, even with a 429 status.
         assert!(!is_transient_rate_limit(
             "HTTP 429: free usage limit reached"
+        ));
+        assert!(!is_transient_rate_limit(
+            "AI_APICallError: Rate limit exceeded. Please try again later."
+        ));
+        // A bare rate-limit refusal stays transient — only the Zen free-tier
+        // sentence (the trailing "please try again later") classifies.
+        assert!(!is_usage_limit("HTTP 429: Rate limit exceeded for this key"));
+        assert!(is_transient_rate_limit(
+            "HTTP 429: Rate limit exceeded for this key"
         ));
         assert!(!is_transient_rate_limit("HTTP 402: insufficient credits"));
         // Overflow text is neither.

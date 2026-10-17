@@ -57,16 +57,31 @@ pub(crate) const SETTING_MAX_PAGES: &str = "wiki.max_pages";
 pub(crate) const SETTING_BUILD_PROVIDER: &str = "wiki.build_provider";
 pub(crate) const SETTING_BUILD_MODEL: &str = "wiki.build_model";
 
-const DEFAULT_MAX_PAGES: usize = 20;
+const DEFAULT_MAX_PAGES: usize = 30;
+/// The one-shot "whole wiki in one call" path is a LATENCY optimization for
+/// small wikis: every page shares one 16k output budget, so past a dozen pages
+/// the pages get thin and the model starts dropping modules. Above this cap the
+/// build goes straight to the outline + per-page pipeline, where each page gets
+/// its OWN 48k input bundle and 4k output budget — that is what makes the wiki
+/// actually cover every subsystem.
+const SINGLE_CALL_MAX_PAGES: usize = 12;
 /// Bound for one harness generation call. 600s (matching the Real arm's HTTP
 /// client) — the shared 180s `ONESHOT_GEN_TIMEOUT` killed real wiki builds:
 /// the CLI's own context is ~25k tokens before the wiki prompt lands.
 const WIKI_ONESHOT_TIMEOUT: Duration = Duration::from_secs(600);
 /// Char budgets. Page file bundles are the input-cost driver; heads only —
-/// the wiki describes structure, not every line.
-const MAX_OUTLINE_INPUT_CHARS: usize = 16_000;
+/// the wiki describes structure, not every line. The outline budget carries
+/// the whole repo map (languages, ranked modules, key files, ranked docs), so
+/// it is deliberately larger than a single page's prose budget needs to be.
+const MAX_OUTLINE_INPUT_CHARS: usize = 24_000;
 const MAX_PAGE_INPUT_CHARS: usize = 48_000;
 const MAX_FILE_CHARS: usize = 12_000;
+/// How many ranked subsystem rows the repo map carries (top by LOC). Enough
+/// to enumerate a real monorepo's backend + frontend + packages without
+/// flooding the outline prompt.
+const MAX_MODULES: usize = 30;
+/// How many repo-relative markdown docs the analysis keeps after ranking.
+const MAX_DOCS: usize = 40;
 const MAX_CLAIMS_PER_PAGE: usize = 64;
 /// Cap for the layered prompt section (chars) — same prompt-cache logic as
 /// `agents_md::MAX_CONTEXT_CHARS`, which this section rides next to.
@@ -543,6 +558,26 @@ pub struct LangStat {
     pub loc: usize,
 }
 
+/// One subsystem bucket of the repo map: a directory subtree rolled up to a
+/// file count, a LOC total, its dominant language, and a couple of
+/// representative files. This is what tells the outline model that a project
+/// HAS subsystems — the old summary was a flat stat list plus 16 root files,
+/// so anything that wasn't a known top-level file was invisible and got no
+/// page.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModuleStat {
+    /// Repo-relative directory ("src-tauri/src/wiki", "src/components"), or
+    /// "(root)" for top-level files.
+    pub path: String,
+    pub files: usize,
+    pub loc: usize,
+    /// Dominant file extension in the bucket ("" when none).
+    pub ext: String,
+    /// Up to three largest files in the bucket — the outline's evidence paths.
+    pub sample: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RepoAnalysis {
@@ -551,6 +586,9 @@ pub struct RepoAnalysis {
     pub total_files: usize,
     pub total_loc: usize,
     pub languages: Vec<LangStat>,
+    /// Ranked subsystem map (top [`MAX_MODULES`] directories by LOC). Ordered
+    /// before the flatter lists so a truncated prompt keeps the structure.
+    pub modules: Vec<ModuleStat>,
     pub key_files: Vec<String>,
     pub docs: Vec<String>,
     pub recent_activity: Vec<String>,
@@ -572,9 +610,47 @@ fn rel_under_root(root: &Path, p: &Path) -> Option<String> {
     Some(rel.to_string_lossy().replace('\\', "/"))
 }
 
-/// The phase-1 repo map: extension/LOC statistics, key files, docs, and the
-/// recent commit themes. Walk caps mirror the corpus walk; a file counts its
-/// first 4k lines for LOC — analysis describes shape, not bytes.
+/// Roll one file's LOC into the directory bucket that owns it. Keyed on the
+/// file's repo-relative PARENT directory, so `src-tauri/src/wiki/mod.rs` lands
+/// in `src-tauri/src/wiki` — a real subsystem, not a language.
+fn module_key(rel: &str) -> String {
+    match rel.rsplit_once('/') {
+        Some((dir, _)) if !dir.is_empty() => dir.to_string(),
+        _ => "(root)".to_string(),
+    }
+}
+
+/// Rank docs so the outline sees the meaningful ones first: shallow docs win,
+/// then README / architecture / contributing / guide names, then the docs/
+/// tree, then the rest. The old code took the first 40 `.md` in walk order,
+/// which is `read_dir` order — effectively random.
+fn doc_rank(rel: &str) -> (usize, u8, usize) {
+    let depth = rel.matches('/').count();
+    let lower = rel.to_lowercase();
+    let name = lower.rsplit('/').next().unwrap_or("");
+    let prio = if name == "readme.md" {
+        0
+    } else if name.starts_with("readme") || name == "agents.md" || name == "claude.md" {
+        1
+    } else if name.contains("architect") || name.contains("design") || name.contains("overview") {
+        2
+    } else if name.contains("contribut") || name.contains("guide") || name.contains("getting-started")
+    {
+        3
+    } else if lower.starts_with("docs/") || lower.contains("/docs/") {
+        4
+    } else if name.contains("api") || name.contains("reference") || name.contains("index") {
+        5
+    } else {
+        6
+    };
+    (depth, prio, rel.len())
+}
+
+/// The phase-1 repo map: extension/LOC statistics, a ranked subsystem map,
+/// key files, ranked docs, and the recent commit themes. Walk caps mirror the
+/// corpus walk; a file counts its first 4k lines for LOC — analysis describes
+/// shape, not bytes.
 pub fn analyze_repo(root: &Path) -> RepoAnalysis {
     let mut total_files = 0usize;
     let mut total_loc = 0usize;
@@ -582,6 +658,15 @@ pub fn analyze_repo(root: &Path) -> RepoAnalysis {
     let mut key_hits: Vec<String> = Vec::new();
     let mut docs: Vec<String> = Vec::new();
     let mut biggest: Vec<(usize, String)> = Vec::new();
+    // Directory bucket: files, loc, per-ext file counts, and every member
+    // (loc, rel) — trimmed to the top few by LOC at the end.
+    struct ModuleAcc {
+        files: usize,
+        loc: usize,
+        exts: HashMap<String, usize>,
+        members: Vec<(usize, String)>,
+    }
+    let mut mods: HashMap<String, ModuleAcc> = HashMap::new();
     let mut truncated = false;
 
     const KEY_FILES: &[&str] = &[
@@ -636,7 +721,10 @@ pub fn analyze_repo(root: &Path) -> RepoAnalysis {
                 .unwrap_or_default();
             if ext == "md" {
                 if let Ok(rel) = path.strip_prefix(&root_canon) {
-                    if docs.len() < 40 {
+                    // Collect well past the cap, then rank. The old
+                    // first-40-in-walk-order pick walked `read_dir` order,
+                    // so which docs survived was arbitrary.
+                    if docs.len() < MAX_DOCS * 8 {
                         docs.push(rel.to_string_lossy().replace('\\', "/"));
                     }
                 }
@@ -656,6 +744,16 @@ pub fn analyze_repo(root: &Path) -> RepoAnalysis {
             entry_stats.0 += 1;
             entry_stats.1 += loc;
             total_loc += loc;
+            let acc = mods.entry(module_key(&rel)).or_insert(ModuleAcc {
+                files: 0,
+                loc: 0,
+                exts: HashMap::new(),
+                members: Vec::new(),
+            });
+            acc.files += 1;
+            acc.loc += loc;
+            *acc.exts.entry(ext.clone()).or_insert(0) += 1;
+            acc.members.push((loc, rel.clone()));
             if biggest.len() < 24 {
                 biggest.push((loc, rel));
                 biggest.sort_by(|a, b| b.0.cmp(&a.0));
@@ -679,6 +777,39 @@ pub fn analyze_repo(root: &Path) -> RepoAnalysis {
     languages.sort_by(|a, b| b.loc.cmp(&a.loc));
     languages.truncate(8);
 
+    // Rank the subsystem buckets by LOC, keep the top slice, and give each a
+    // dominant language plus its three largest files as the outline's anchors.
+    let mut modules: Vec<ModuleStat> = mods
+        .into_iter()
+        .map(|(path, mut acc)| {
+            let ext = acc
+                .exts
+                .into_iter()
+                .max_by_key(|(_, n)| *n)
+                .map(|(e, _)| e)
+                .unwrap_or_default();
+            acc.members.sort_by(|a, b| b.0.cmp(&a.0));
+            let sample = acc
+                .members
+                .into_iter()
+                .take(3)
+                .map(|(_, rel)| rel)
+                .collect();
+            ModuleStat {
+                path,
+                files: acc.files,
+                loc: acc.loc,
+                ext,
+                sample,
+            }
+        })
+        .collect();
+    modules.sort_by(|a, b| b.loc.cmp(&a.loc));
+    modules.truncate(MAX_MODULES);
+
+    docs.sort_by_key(|d| doc_rank(d));
+    docs.truncate(MAX_DOCS);
+
     let key_files = key_files_from(root, &key_hits, &biggest);
     let recent_activity = git_recent_activity(root);
 
@@ -688,6 +819,7 @@ pub fn analyze_repo(root: &Path) -> RepoAnalysis {
         total_files,
         total_loc,
         languages,
+        modules,
         key_files,
         docs,
         recent_activity,
@@ -843,13 +975,14 @@ pub(crate) fn normalize_outline(raw: &str, max_pages: usize) -> Result<Vec<PageB
 /// calls to 1 — one prompt overhead instead of N+1, one round-trip of
 /// latency, and every page is written against the SAME context so
 /// cross-page duplication drops out naturally. The trade is shallower
-/// pages (one shared file budget), so this is the FAST path: any parse
-/// problem falls back to the outline + per-page pipeline below.
-const SINGLE_SYSTEM: &str = "You are a project-wiki generator. You get a JSON summary of a repository (languages, key files, docs, recent commit themes). Produce the COMPLETE wiki in ONE response — the outline and every page together.
+/// pages (one shared file budget), so this is the FAST path for SMALL wikis
+/// only (see [`SINGLE_CALL_MAX_PAGES`]); any parse problem falls back to the
+/// outline + per-page pipeline below.
+const SINGLE_SYSTEM: &str = "You are a project-wiki generator. You get a JSON summary of a repository (languages, a ranked `modules` map of its subsystems, key files, docs, recent commit themes). Produce the COMPLETE wiki in ONE response — the outline and every page together.
 
 Return STRICT JSON only — no prose, no code fences: {\"pages\":[{\"slug\":\"kebab-slug\",\"title\":\"...\",\"kind\":\"overview|architecture|module|howto|glossary|history\",\"summary\":\"one sentence\",\"body\":\"full page markdown\",\"claims\":[{\"claim\":\"...\",\"path\":\"repo/relative.ext\",\"lines\":[1,20]}]}]}
 
-Page rules: between 4 and the stated cap; the first page is the overview; one module page per major subsystem; a history page only when commit themes justify one; 250-700 words per page, short sections, bullet lists, `code` references with repo-relative paths; at most 2 ```mermaid fenced diagrams per page, only for structure visible in the summary; the body is the page's PROSE ONLY — do NOT put an evidence ledger, a <!-- relay:claims --> marker or a ```relay-claims fence inside it: on this path the sibling \"claims\" array IS the ledger, and a marker left in the body renders as raw text in the reader. GROUNDED: never invent modules, flags, commands or file names; paths must come from the input summary. Order pages the way a new contributor should read them.";
+Page rules: between 4 and the stated cap; the FIRST page is the overview; include ONE architecture page; create ONE module page for EVERY subsystem in the `modules` array (never silently drop one); add howto/glossary pages for cross-cutting features or commands; a history page only when commit themes justify one; 250-700 words per page, short sections, bullet lists, `code` references with repo-relative paths; an overview or architecture page MUST contain at least one ```mermaid fenced diagram (flowchart / sequence / class) of structure visible in the excerpts, and a module page must too whenever its excerpts reveal a flow or composition (up to 3 per page) — never diagram invented components; in mermaid, QUOTE every edge label containing special characters: write `A -->|\"text (x)\"| B`, NOT `A -->|text (x)| B`, because a bare `(` starts a node shape and breaks the parse — quote any label with `()[]{}|` or a method call like `run()`, and use `<br/>` (not a literal `\\n`) for line breaks inside a label; the body is the page's PROSE ONLY — do NOT put an evidence ledger, a <!-- relay:claims --> marker or a ```relay-claims fence inside it: on this path the sibling \"claims\" array IS the ledger, and a marker left in the body renders as raw text in the reader. GROUNDED: never invent modules, flags, commands or file names; paths must come from the input summary. Order pages the way a new contributor should read them.";
 
 #[derive(Debug, serde::Deserialize)]
 struct SinglePage {
@@ -969,25 +1102,36 @@ pub(crate) struct RawClaim {
 }
 
 const OUTLINE_SYSTEM: &str = "You are the architect layer of a project-wiki generator. You get a \
-JSON summary of a repository (languages, key files, docs, recent commit themes). Produce the page \
-outline for a concise developer wiki that orients a new contributor in minutes.\
+JSON summary of a repository (languages, a ranked `modules` map of its subsystems, key files, docs, \
+recent commit themes). Produce the page outline for a COMPLETE developer wiki: a new contributor \
+must be able to reach every meaningful subsystem and feature from it.\
 \n\nReturn STRICT JSON only — no prose, no code fences: \
 {\"pages\":[{\"slug\":\"kebab-slug\",\"title\":\"...\",\"kind\":\"overview|architecture|module|\
 howto|glossary|history\",\"summary\":\"one sentence\",\"brief\":\"2-4 sentences telling the page \
 writer exactly what to cover\",\"files\":[\"repo/relative/path.ext\"]}]}\
-\n\nRules: between 4 and the stated page cap; the first page is the overview; one module page \
-per major subsystem with its most important files listed; a history page only when the commit \
-themes show meaningful churn stories; every \"files\" entry must be a real repo-relative path \
-from the input (or an obvious direct member of a listed directory); order pages the way a new \
-contributor should read them.";
+\n\nRules: between 4 and the stated page cap; the FIRST page is the overview; include ONE \
+architecture page for the top-level structure; then create ONE module page for EVERY subsystem in \
+the `modules` array (merge only tiny, tightly-coupled neighbours — do NOT silently drop a \
+subsystem); add howto/glossary pages for cross-cutting features, commands, or terms the summary \
+reveals; a history page only when the commit themes show meaningful churn stories. Every \"files\" \
+entry must be a real repo-relative path from the input — prefer each subsystem's `sample` files — \
+and every module page's `files` should come from that subsystem's own bucket. Order pages the way \
+a new contributor should read them.";
 
 const PAGE_SYSTEM: &str = "You write ONE page of a project wiki, in GitHub-flavored Markdown.\
 \n\nRules:\
 \n- GROUNDED: every non-obvious factual sentence must be backed by the provided file excerpts. \
 Never invent modules, flags, commands or file names. If the excerpts don't cover part of the \
 brief, say plainly that it isn't visible in the provided sources.\
-\n- At most 2 ```mermaid fenced diagrams (flowchart / sequence / class) clarifying structure you \
-can see in the sources. Never draw invented components.\
+\n- DIAGRAMS: an `overview` or `architecture` page MUST contain at least one ```mermaid fenced \
+diagram (flowchart / sequence / class) of the structure or data flow you can see in the sources. \
+A `module` or `howto` page MUST include a mermaid diagram whenever the excerpts reveal any flow, \
+state machine, or component composition. Never draw invented components.\
+\n- At most 3 mermaid diagrams per page.\
+\n- MERMAID SYNTAX: quote every edge label that contains special characters — write \
+`A -->|\"text (x)\"| B`, NOT `A -->|text (x)| B`, because a bare `(` starts a node shape and \
+breaks the parse. Quote any label containing `()[]{}|` or a method call like `run()`. Use `<br/>` \
+for line breaks inside a label, not a literal `\\n`.\
 \n- Concise: 300-900 words, short sections, bullet lists, `code` references with repo-relative \
 paths.\
 \n- TERMINATE the page with the evidence ledger: on its own line the marker \
@@ -1476,11 +1620,13 @@ async fn run_build_acquired<R: Runtime>(
         (project.id, max_pages_from(&conn))
     };
     let root_path = PathBuf::from(canonical);
-    // ── FAST PATH: the whole wiki in ONE call. N+1 model calls → 1: one
-    // prompt overhead, one round-trip of latency, and every page written
-    // against the same context. Any parse problem (truncation, outline-
-    // shaped answer) falls through to the two-phase pipeline below.
-    {
+    // ── FAST PATH: the whole wiki in ONE call — SMALL wikis only. One shared
+    // output budget means pages get thin and modules start getting dropped as
+    // the page count grows, so above [`SINGLE_CALL_MAX_PAGES`] the build skips
+    // straight to the per-page pipeline (each page gets its own bundle). Any
+    // parse problem here (truncation, outline-shaped answer) still falls
+    // through to the two-phase pipeline below.
+    if max_pages <= SINGLE_CALL_MAX_PAGES {
         emit_progress(
             app,
             canonical,

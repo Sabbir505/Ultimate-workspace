@@ -111,11 +111,13 @@ pub async fn generate_chat_title(
 
     // Build a compact transcript from history (length-capped). Fetch rows
     // under the lock, format AFTER releasing it (strip + truncate are pure
-    // CPU work — no reason to hold the DB mutex through them).
+    // CPU work — no reason to hold the DB mutex through them). Display rows
+    // only: a sidechat's hidden context seed (`sidechat_seed`) is not part of
+    // the conversation, so it must not steer the title.
     let transcript = {
         let records = {
             let conn = db.0.lock();
-            db::list_chat_messages(&conn, &chat_session_id).map_err(|e| e.to_string())?
+            db::list_display_chat_messages(&conn, &chat_session_id).map_err(|e| e.to_string())?
         };
         let mut t = String::new();
         for r in &records {

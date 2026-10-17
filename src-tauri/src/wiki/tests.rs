@@ -55,17 +55,21 @@ fn scripted(pages: &[&str]) -> Caller {
     ))
 }
 
-/// A BUILD queue: prepends the non-JSON stub the single-call fast path
-/// consumes (and rejects) before the outline + page pipeline runs. Update
-/// queues must use `scripted()` — they have no single-call pass, and the
-/// stub would be stored as a page body.
+/// A BUILD queue: outline + one response per page. The one-pass fast path is
+/// gated behind `SINGLE_CALL_MAX_PAGES`, and these tests run at the default
+/// cap (30), so the two-phase pipeline is what consumes the queue. Tests that
+/// exercise the one-pass path set a small cap (see `set_max_pages`) and use
+/// `direct_scripted`.
 fn scripted_build(pages: &[&str]) -> Caller {
-    let mut queue: VecDeque<String> = VecDeque::new();
-    queue.push_back("this is not json at all".to_string());
-    for s in pages {
-        queue.push_back(s.to_string());
-    }
-    Caller::Scripted(std::sync::Mutex::new(queue))
+    scripted(pages)
+}
+
+/// Pin the page cap for a test — the one-pass fast path only runs when the
+/// cap is at or below `SINGLE_CALL_MAX_PAGES`.
+fn set_max_pages(app: &tauri::AppHandle<tauri::test::MockRuntime>, n: usize) {
+    let db = app.state::<crate::DbState>();
+    let conn = db.0.lock();
+    crate::db::set_setting(&conn, SETTING_MAX_PAGES, &n.to_string()).unwrap();
 }
 
 /// One-page outline for tests that don't want to script both pages.
@@ -98,6 +102,48 @@ fn sample_repo() -> (TempDir, PathBuf) {
 }
 
 // ── pure parsing / validation ─────────────────────────────────────────────
+
+#[test]
+fn analyze_repo_ranks_subsystems_and_docs() {
+    // The old analysis was a flat stat list + 16 root files, so a subsystem
+    // like `src/` (neither a known root file nor one giant file) was
+    // invisible and got no page. The module map must name it.
+    let (_tmp, root) = sample_repo();
+    let a = analyze_repo(&root);
+    let src = a
+        .modules
+        .iter()
+        .find(|m| m.path == "src")
+        .expect("the src subsystem must appear in the module map");
+    assert!(src.files >= 2, "src holds main.rs + mesh.rs: {src:?}");
+    assert!(
+        src.sample.iter().any(|f| f == "src/mesh.rs"),
+        "sample files anchor the outline's evidence paths: {:?}",
+        src.sample
+    );
+    // README ranks ahead of a nested docs note (shallow + name priority).
+    let readme = a.docs.iter().position(|d| d == "README.md");
+    let note = a.docs.iter().position(|d| d == "docs/notes.md");
+    if let (Some(r), Some(n)) = (readme, note) {
+        assert!(r < n, "README must outrank a nested note: {:?}", a.docs);
+    }
+}
+
+#[test]
+fn page_prompts_require_mermaid_diagrams() {
+    // Diagrams were phrased as an optional ceiling, so the model mostly
+    // omitted them. Overview/architecture must now be MANDATORY.
+    assert!(PAGE_SYSTEM.contains("MUST contain at least one"));
+    assert!(PAGE_SYSTEM.contains("mermaid"));
+    assert!(SINGLE_SYSTEM.contains("MUST contain at least one"));
+    assert!(SINGLE_SYSTEM.contains("mermaid"));
+    // Both prompts must carry the edge-label quoting rule that a bare `(`
+    // in `-->|label(x)|` breaks the parse (the live failure this documents).
+    for prompt in [PAGE_SYSTEM, SINGLE_SYSTEM] {
+        assert!(prompt.contains("MERMAID SYNTAX") || prompt.contains("QUOTE every edge label"));
+        assert!(prompt.contains("<br/>"));
+    }
+}
 
 #[test]
 fn sanitize_slug_folds_to_kebab_and_caps_length() {
@@ -824,6 +870,7 @@ async fn malformed_one_pass_response_is_self_repaired_by_the_same_model() {
     // paying the N+1-call two-phase fallback immediately.
     let (_tmp, root) = sample_repo();
     let app = mock_wiki_app();
+    set_max_pages(&app, 8);
 
     let valid = serde_json::json!({
         "pages": [
@@ -1161,9 +1208,27 @@ fn direct_scripted(responses: &[String]) -> Caller {
 }
 
 #[tokio::test]
+async fn one_pass_path_is_skipped_above_the_page_cap() {
+    // Above the cap the build must go straight to the two-phase pipeline, so a
+    // page-shaped response is consumed as the OUTLINE and fails to yield pages
+    // — proving the one-pass path never ran. (At/below the cap the same input
+    // succeeds, covered by the single-call tests above.)
+    let (_tmp, root) = sample_repo();
+    let app = mock_wiki_app();
+    let err = run_build_with(&app, &root, direct_scripted(&[single_wiki_json()]))
+        .await
+        .unwrap_err();
+    assert!(
+        !err.is_empty(),
+        "a page-shaped response must not be accepted as an outline at the default cap"
+    );
+}
+
+#[tokio::test]
 async fn single_call_build_writes_every_page_in_one_pass() {
     let (_tmp, root) = sample_repo();
     let app = mock_wiki_app();
+    set_max_pages(&app, 8);
     let out = run_build_with(&app, &root, direct_scripted(&[single_wiki_json()]))
         .await
         .unwrap();
@@ -1210,6 +1275,7 @@ async fn single_call_page_update_rederives_from_claim_files() {
     // the freshness pass can still re-derive it after a commit.
     let (_tmp, root) = sample_repo();
     let app = mock_wiki_app();
+    set_max_pages(&app, 8);
     run_build_with(&app, &root, direct_scripted(&[single_wiki_json()]))
         .await
         .unwrap();

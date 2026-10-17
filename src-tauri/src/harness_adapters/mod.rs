@@ -851,6 +851,34 @@ pub fn resolve_binary_on_path(binary: &str) -> Option<std::path::PathBuf> {
     None
 }
 
+/// True when a live process is running the executable at `resolved`. Windows
+/// holds a running image open, so an in-place replacement (winget's portable
+/// upgrade, npm's file swap) dies with a bare "Access is denied" while a copy
+/// from that path is alive — callers use this to fail with the actual remedy
+/// ("close it first") instead of the updater's raw error. Always false off
+/// Windows: POSIX happily replaces a running binary.
+pub fn running_process_from(resolved: &std::path::Path) -> bool {
+    #[cfg(not(windows))]
+    {
+        let _ = resolved;
+        false
+    }
+    #[cfg(windows)]
+    {
+        use sysinfo::{ProcessesToUpdate, System};
+        // Extended-length prefixes (\\?\) appear on either side depending on
+        // who produced the path — normalize both before comparing.
+        let want = crate::util::strip_unc_prefix(&resolved.to_string_lossy());
+        let mut sys = System::new();
+        sys.refresh_processes(ProcessesToUpdate::All, true);
+        sys.processes().values().any(|p| {
+            p.exe().is_some_and(|exe| {
+                crate::util::strip_unc_prefix(&exe.to_string_lossy()).eq_ignore_ascii_case(&want)
+            })
+        })
+    }
+}
+
 /// Package id of a winget-portable install, e.g. "Anthropic.ClaudeCode" from
 /// `…\Microsoft\WinGet\Packages\Anthropic.ClaudeCode_Microsoft.Winget.Source_…\claude.exe`.
 /// Winget portables always live under that layout (the id is the directory
@@ -1101,6 +1129,20 @@ mod tests {
         let spec = resolve_for_spawn(&CommandSpec::new("cmd.exe", &["/C", "npm run dev"]));
         assert_eq!(spec.program, "cmd.exe");
         assert_eq!(spec.args, vec!["/C", "npm run dev"]);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn running_process_from_detects_the_test_binary() {
+        // The test binary itself is running, so its exe path must match —
+        // this is the same probe that catches a live opencode.exe locking a
+        // winget portable before an update replaces it.
+        let me = std::env::current_exe().expect("test exe path");
+        assert!(running_process_from(&me));
+        // A path nothing runs from must never match.
+        assert!(!running_process_from(std::path::Path::new(
+            "C:\\relay-test\\not-running-xyz-123.exe"
+        )));
     }
 
     #[test]

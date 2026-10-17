@@ -54,7 +54,7 @@ export function useLlmLogs(filters: LlmLogFilters) {
           llmLogStats(),
         ]);
         if (cancelled) return;
-        setRows(list);
+        setRows(Array.isArray(list) ? list : []);
         setStats(s);
         setError(null);
         hasDataRef.current = true;

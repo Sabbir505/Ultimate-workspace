@@ -10,7 +10,10 @@ use tauri::{AppHandle, State};
 use crate::browser_mcp::bound_port;
 use crate::browser_mcp_register;
 use crate::db;
-use crate::harness_adapters::{all_adapters, get_adapter, resolve_for_spawn, CommandSpec};
+use crate::harness_adapters::{
+    all_adapters, get_adapter, resolve_for_spawn, running_process_from, winget_portable_package_id,
+    CommandSpec,
+};
 use crate::secrets;
 use crate::types::{HarnessStatus, HarnessUpdateStatus};
 use crate::{DbState, PtyState};
@@ -416,6 +419,90 @@ async fn npm_latest_version(package: &str) -> Option<String> {
     json.get("version")?.as_str().map(str::to_string)
 }
 
+/// Latest version winget offers for a package id — the "Available" column of
+/// `winget list --id <id> --exact` — or None when nothing newer exists, the
+/// package vanished, or winget itself failed. Current winget releases have
+/// no machine-readable output, so the row is parsed as text; see
+/// `winget_row_available_version` for why that parse stays robust. Blocking
+/// (winget may refresh its sources on the way) — call off-thread.
+fn winget_available_version(package_id: &str) -> Option<String> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    let spec = resolve_for_spawn(&CommandSpec::new(
+        "winget",
+        &[
+            "list",
+            "--id",
+            package_id,
+            "--exact",
+            "--accept-source-agreements",
+            "--disable-interactivity",
+        ],
+    ));
+    let mut cmd = Command::new(&spec.program);
+    cmd.args(&spec.args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = cmd.spawn().ok()?;
+    // Poll-then-kill, same contract as installed_cli_version: a source
+    // refresh waiting on the network must not wedge the update check. Winget
+    // prints the table in one go at the end, so a killed run simply yields
+    // no parsable row.
+    let status = (0..200).find_map(|attempt| {
+        let done = child.try_wait().ok().flatten();
+        if done.is_none() && attempt < 199 {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        done
+    });
+    if status.is_none() {
+        crate::agent_sessions::kill_child_tree(&mut child);
+    }
+    // Read ALL bytes lossily: a localized (non-UTF-8) header byte would make
+    // read_to_string stop early and drop the data row that follows it.
+    let mut bytes = Vec::new();
+    if let Some(mut out) = child.stdout.take() {
+        let _ = out.read_to_end(&mut bytes);
+    }
+    winget_row_available_version(&String::from_utf8_lossy(&bytes), package_id)
+}
+
+/// "1.18.35"-style token test for the winget row parse (regex-free).
+fn looks_like_version(token: &str) -> bool {
+    token.contains('.')
+        && token
+            .split('.')
+            .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// Parse the single data row of `winget list --id <id> --exact`. After the id
+/// column come Version, [Available], Source — and only the first two are
+/// version-looking, so the SECOND version token after the id is the update
+/// target while a lone token means "already current". Reading columns by
+/// ORDER (never the header text) keeps this working on non-English Windows.
+fn winget_row_available_version(output: &str, package_id: &str) -> Option<String> {
+    let needle = package_id.to_ascii_lowercase();
+    let row = output
+        .lines()
+        .find(|line| line.to_ascii_lowercase().contains(&needle))?;
+    // ASCII case folding preserves byte indices, so the lowercase offset is
+    // valid in the original line.
+    let idx = row.to_ascii_lowercase().find(&needle)?;
+    let after = &row[idx + package_id.len()..];
+    let versions: Vec<&str> = after
+        .split_whitespace()
+        .filter(|t| looks_like_version(t))
+        .collect();
+    versions.get(1).map(|v| v.to_string())
+}
+
 /// For every installed harness with a known npm package: installed version
 /// (the CLI's own `--version` output) vs the registry's latest. Drives the
 /// Settings "Update" button (shown only when newer) and the boot-time
@@ -438,7 +525,8 @@ pub async fn check_harness_updates(force: Option<bool>) -> CmdResult<Vec<Harness
             .filter_map(|a| {
                 let package = harness_npm_package(a.id())?;
                 let installed = crate::harness_adapters::installed_cli_version(a.binary());
-                Some((a.id().to_string(), package, installed))
+                let resolved = crate::harness_adapters::resolve_binary_on_path(a.binary());
+                Some((a.id().to_string(), package, installed, resolved))
             })
             .collect::<Vec<_>>()
     })
@@ -446,7 +534,7 @@ pub async fn check_harness_updates(force: Option<bool>) -> CmdResult<Vec<Harness
     .map_err(|e| format!("harness update probe join failed: {e}"))?;
 
     let mut results = Vec::new();
-    for (id, package, installed_version) in checks {
+    for (id, package, installed_version, resolved) in checks {
         // Not installed (or --version failed) → nothing to update; skip the
         // registry call entirely so offline machines pay no network cost.
         let Some(installed_version) = installed_version else {
@@ -458,7 +546,22 @@ pub async fn check_harness_updates(force: Option<bool>) -> CmdResult<Vec<Harness
             });
             continue;
         };
-        let latest_version = npm_latest_version(package).await;
+        // A winget-portable copy can only be updated through winget (it
+        // shadows npm shims on PATH), and the winget manifest routinely lags
+        // the npm registry — comparing it against npm kept flagging an
+        // update winget cannot deliver, so the Settings row offered "Update"
+        // forever after every successful pass ("can't update opencode").
+        // Such copies check winget's own channel; direct/npm copies keep the
+        // npm registry comparison.
+        let latest_version = match resolved.as_deref().and_then(winget_portable_package_id) {
+            Some(package_id) => {
+                tauri::async_runtime::spawn_blocking(move || winget_available_version(&package_id))
+                    .await
+                    .ok()
+                    .flatten()
+            }
+            None => npm_latest_version(package).await,
+        };
         let update_available = latest_version
             .as_deref()
             .map(|latest| version_is_newer(latest, &installed_version))
@@ -604,6 +707,10 @@ pub async fn install_harness(harness_id: String) -> CmdResult<String> {
         Npm,
         Native(CommandSpec),
         NativeUnsupported,
+        /// The winget-portable copy about to be replaced is currently
+        /// running: winget's own uninstall step cannot delete a locked
+        /// image, so the upgrade dies mid-flight with "Access is denied".
+        Busy(PathBuf),
     }
     let resolver_adapter = adapter.clone();
     let target = tauri::async_runtime::spawn_blocking(move || {
@@ -612,6 +719,14 @@ pub async fn install_harness(harness_id: String) -> CmdResult<String> {
             // Not installed (or nothing resolvable) → npm install must work.
             return UpdateTarget::Npm;
         };
+        // Winget-portable replacements fail on a live exe — and the user's
+        // own opencode panes keep the process alive, so a Settings retry can
+        // never win that race; report the remedy up front instead. Other
+        // routes proceed: the kimi installer (and most native updaters) move
+        // the old binary aside first, which Windows permits while it runs.
+        if winget_portable_package_id(&resolved).is_some() && running_process_from(&resolved) {
+            return UpdateTarget::Busy(resolved);
+        }
         if binary_is_npm_managed(&resolved) {
             return UpdateTarget::Npm;
         }
@@ -624,6 +739,13 @@ pub async fn install_harness(harness_id: String) -> CmdResult<String> {
     .unwrap_or(UpdateTarget::Npm);
 
     let (spec, label, success_line) = match target {
+        UpdateTarget::Busy(running) => {
+            return Err(format!(
+                "{display_name} is currently running from {} — Windows can't replace a \
+                 running program. Close its panes/sessions, then press Update again.",
+                running.display()
+            ));
+        }
         UpdateTarget::NativeUnsupported => {
             return Err(format!(
                 "{display_name} is installed natively (not via npm) and has no in-app \
@@ -766,7 +888,7 @@ pub fn pty_subscribe(
 
 #[cfg(test)]
 mod tests {
-    use super::version_is_newer;
+    use super::{version_is_newer, winget_row_available_version};
 
     #[test]
     fn newer_when_latest_is_ahead() {
@@ -795,5 +917,43 @@ mod tests {
         assert!(!version_is_newer("", "1.0"));
         assert!(!version_is_newer("1.0", ""));
         assert!(!version_is_newer("abc", "1.0"));
+    }
+
+    #[test]
+    fn winget_row_with_available_column_yields_the_new_version() {
+        let out = "Name     Id           Version Available Source\n\
+                   ----------------------------------------------\n\
+                   opencode SST.opencode 1.18.7  1.18.35   winget\n";
+        assert_eq!(
+            winget_row_available_version(out, "SST.opencode"),
+            Some("1.18.35".to_string())
+        );
+    }
+
+    #[test]
+    fn winget_row_without_available_column_is_current() {
+        let out = "Name     Id           Version Available Source\n\
+                   ----------------------------------------------\n\
+                   opencode SST.opencode 1.18.35 winget\n";
+        assert_eq!(winget_row_available_version(out, "SST.opencode"), None);
+    }
+
+    #[test]
+    fn winget_row_ignores_header_text_and_localizes_nothing() {
+        // Column ORDER carries the meaning; the (localized) header must not
+        // be parsed, and the name column may contain anything.
+        let out = "Name        Id           Version Verfügbar Quelle\n\
+                   ------------------------------\n\
+                   opencode    SST.opencode 1.18.7  1.18.35   winget\n";
+        assert_eq!(
+            winget_row_available_version(out, "SST.opencode"),
+            Some("1.18.35".to_string())
+        );
+    }
+
+    #[test]
+    fn winget_row_missing_package_is_none() {
+        let out = "No installed package found matching input criteria.\n";
+        assert_eq!(winget_row_available_version(out, "SST.opencode"), None);
     }
 }

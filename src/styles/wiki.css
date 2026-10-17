@@ -408,8 +408,9 @@
   white-space: nowrap;
 }
 
-/* Sidebar pulse: a wiki build runs in the backend, so the Wiki nav entry
-   pulses from ANY view (leaving the wiki page never stops a build). */
+/* Wiki build pulse: a wiki build runs in the backend, so the Wiki nav entry
+   (bottom bar icon) pulses from ANY view (leaving the wiki page never stops
+   a build). */
 .sidebar-wiki-running {
   flex: 0 0 auto;
   width: 6px;
@@ -444,12 +445,6 @@
   opacity: 0.5;
   color: var(--text-dim);
   font-variant-numeric: tabular-nums;
-}
-
-/* Slim strip above the reader while a rebuild runs over existing pages. */
-.wiki-reader-live {
-  flex: 0 0 auto;
-  padding: 8px 14px 0;
 }
 
 /* Delete takes the page count's place on hover. It is absolutely positioned
@@ -1085,10 +1080,6 @@
    block on every progress event (the "shaking" build timeline). */
 .wiki-feed.running .wiki-feed-steps {
   height: 140px;
-}
-
-.wiki-feed.compact .wiki-feed-steps {
-  max-height: 200px;
 }
 
 .wiki-feed-step {

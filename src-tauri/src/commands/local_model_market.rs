@@ -1755,6 +1755,7 @@ pub async fn download_mmproj(
     registry: State<'_, Arc<DownloadRegistry>>,
     repo_id: String,
     mmproj_filename: Option<String>,
+    base_filename: Option<String>,
 ) -> CmdResult<()> {
     // Pull token up-front; no State<DbState> across await.
     let token = {
@@ -1838,8 +1839,19 @@ pub async fn download_mmproj(
     }
 
 
-    // Same sanitizer as the model download (audit M: DRY).
-    let safe_filename = sanitize_hf_filename(&sibling.rfilename);
+    // Same sanitizer as the model download (audit M: DRY). When the caller
+    // tells us which model file this projector is for, name it after that
+    // model (`<model-stem>.mmproj.gguf`) instead of keeping the repo's
+    // sibling name: scan-side pairing attributes projectors to models by
+    // filename, and names like `mmproj-model-f16.gguf` carry no
+    // attribution. `delete_downloaded_model` already expects this
+    // convention when cleaning up a model's companion.
+    let safe_filename = base_filename
+        .as_deref()
+        .and_then(|b| std::path::Path::new(b).file_stem().and_then(|s| s.to_str()))
+        .filter(|stem| !stem.is_empty())
+        .map(|stem| sanitize_hf_filename(&format!("{stem}.mmproj.gguf")))
+        .unwrap_or_else(|| sanitize_hf_filename(&sibling.rfilename));
     let final_path = dest_dir.join(&safe_filename);
     let partial_path = dest_dir.join(format!("{safe_filename}.partial"));
     let meta_path = partial_path.with_extension("partial.meta");

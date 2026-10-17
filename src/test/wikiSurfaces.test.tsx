@@ -239,15 +239,14 @@ describe("WikiView overlay", () => {
       });
     });
     await waitFor(() => {
-      // Progress rides the window title bar AND a compact live feed strip
-      // renders above the reader — the pill alone never said WHICH page was
-      // being written.
+      // Progress rides the WINDOW TITLE BAR only — the old slim feed strip
+      // above the reader was removed (it squeezed the layout); once a wiki
+      // exists, the pill is the single build indicator.
       expect(screen.getByTestId("wiki-titlebar-progress")).toBeTruthy();
-      expect(screen.getByTestId("wiki-feed")).toBeTruthy();
     });
     expect(screen.getByText(/Building wiki/)).toBeTruthy();
-    // The running page shows up in the feed's step rows.
-    expect(screen.getByText(/Wrote page: Overview/)).toBeTruthy();
+    // No in-view feed while the reader is up.
+    expect(screen.queryByTestId("wiki-feed")).toBeNull();
     // Header (testid) and feed both expose Cancel — use the testid one; it
     // cancels the project the view is following (the one being built).
     fireEvent.click(screen.getByTestId("wiki-cancel"));

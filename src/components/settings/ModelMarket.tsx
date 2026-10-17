@@ -34,6 +34,7 @@ import {
 } from "../../lib/ipc";
 import { formatBytes, formatRate } from "../../lib/format";
 import { Modal } from "../common/Modal";
+import { GlassSelect } from "../common/GlassSelect";
 
 type SortKey = ModelSort;
 
@@ -188,7 +189,9 @@ export function ModelMarket({ onDownloadComplete, localModels }: ModelMarketProp
             );
             if (card?.vision) {
               // Idempotent: backend short-circuits if already in-flight.
-              void downloadMmproj(card.repoId).catch((e) =>
+              // `filename` (the file that just finished) names the projector
+              // `<stem>.mmproj.gguf` so scan-side pairing can attribute it.
+              void downloadMmproj(card.repoId, undefined, filename).catch((e) =>
                 toastError(`Vision companion (mmproj) download failed for ${card.filename}`, e),
               );
             }
@@ -409,22 +412,21 @@ export function ModelMarket({ onDownloadComplete, localModels }: ModelMarketProp
         <div className="model-market-sort">
           <label>
             <span>Sort</span>
-            <select
+            {/* Never disabled while a fetch is in flight: HF latency runs to
+                seconds, and a dead dropdown reads as "sorting is broken".
+                doFetch's monotonic ticket drops out-of-order responses. */}
+            <GlassSelect<string>
+              ariaLabel="Sort"
               value={uiSort}
-              onChange={(e) => onSortChange(e.target.value as UiSortKey)}
-              /* NEVER disabled while a fetch is in flight. HF latency runs to
-                 seconds, and a dead dropdown reads as "sorting is broken" —
-                 the user has no way to retry a change that appeared to do
-                 nothing. doFetch's monotonic ticket drops out-of-order
-                 responses, so rapid flipping is safe. */
-            >
-              {(Object.keys(SORT_LABELS) as SortKey[]).map((k) => (
-                <option key={k} value={k}>
-                  {SORT_LABELS[k]}
-                </option>
-              ))}
-              <option value={FITS_SORT}>Fits my hardware</option>
-            </select>
+              options={[
+                ...(Object.keys(SORT_LABELS) as SortKey[]).map((k) => ({
+                  value: k,
+                  label: SORT_LABELS[k],
+                })),
+                { value: FITS_SORT, label: "Fits my hardware" },
+              ]}
+              onChange={(v) => onSortChange(v as UiSortKey)}
+            />
           </label>
         </div>
       </div>
@@ -509,7 +511,7 @@ export function ModelMarket({ onDownloadComplete, localModels }: ModelMarketProp
         {entries.length === 0 && !loading && !loadError && (
           <div className="empty-reserved">
             <span className="empty-text">
-              No models to show. Try a different search term or sort.
+              No models found. Try a different search or sort.
             </span>
           </div>
         )}
@@ -589,11 +591,11 @@ export function ModelMarket({ onDownloadComplete, localModels }: ModelMarketProp
           <div className="oversized-warning">
             <p>
               <strong>{oversizedConfirm.displayName || oversizedConfirm.filename}</strong> is{" "}
-              {formatBytes(oversizedConfirm.sizeBytes)}, which may exceed your detected{" "}
-              {memoryBudgetLabel} (~{formatBytes(memoryBudget)}). It may run slowly, cause
-              swapping, or fail to load at runtime.
+              {formatBytes(oversizedConfirm.sizeBytes)}, which exceeds your detected{" "}
+              {memoryBudgetLabel} (~{formatBytes(memoryBudget)}). It may run slowly or fail
+              to load.
             </p>
-            <p className="muted">You can still download it — this is just a heads-up.</p>
+            <p className="muted">You can still download it anyway.</p>
           </div>
         </Modal>
       )}

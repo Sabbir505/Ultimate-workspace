@@ -105,7 +105,10 @@ pub async fn set_chat_db_dir(
     // A relocated DB means the configured artifacts dir may be stale relative
     // to expectations, but that's independent — leave it. Sweep expired
     // artifacts against the (new) DB so retention runs on the moved file.
-    crate::chat::commands::sweep_expired_artifacts(&db.0);
+    // `artifacts_dir` resolves (and releases) the DB lock before the sweep
+    // re-takes it — never nested.
+    let artifacts_dir = crate::chat::dispatch::artifacts_dir(&app);
+    crate::chat::commands::sweep_expired_artifacts(&db.0, &artifacts_dir);
 
     Ok(())
 }

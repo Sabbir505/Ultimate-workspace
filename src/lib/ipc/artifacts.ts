@@ -488,6 +488,13 @@ export const forkChatSession = (chatSessionId: string, uptoMessageId?: number) =
     chatSessionId,
     uptoMessageId: uptoMessageId ?? null,
   });
+/** Open the sidechat of a chat (the `/sidechat` command / tool-panel entry):
+ *  a private sub-thread seeded with a snapshot of the chat's live history.
+ *  At most ONE sidechat per source chat — the backend reuses the existing
+ *  `side_of:<id>` row when one was already created. Returns the sidechat's
+ *  row. */
+export const openSidechatSession = (chatSessionId: string) =>
+  safeInvoke<ChatSession | null>("open_sidechat", { chatSessionId });
 /** Bind (or unbind with null) a chat session to a project, so it nests under
  *  that project's expandable sidebar row. */
 export const setChatSessionProject = (chatSessionId: string, projectId?: string | null) =>

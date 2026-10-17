@@ -411,9 +411,10 @@ export function InlineDiagram({
     return { height: 320, fitWidth: 0 };
   }, [intrinsic, containerW, measured]);
 
-  // Left-aligned at its natural size, centered once it's been fitted to the cap.
+  // The block centers itself (see .chat-diagram-block margin: auto); the
+  // fitted cap just narrows it so it never exceeds the measured width.
   const blockStyle: CSSProperties | undefined = fitWidth
-    ? { maxWidth: `${fitWidth}px`, marginLeft: "auto", marginRight: "auto" }
+    ? { maxWidth: `${fitWidth}px` }
     : undefined;
 
   if (error) {

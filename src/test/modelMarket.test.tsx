@@ -28,6 +28,20 @@ vi.mock("../lib/ipc", () => ({
   toastError: vi.fn(),
 }));
 
+// GlassSelect → a native <select> so the Sort picker stays a simple change
+// event (same trick automationTriggerForm.test.tsx uses).
+vi.mock("../components/common/GlassSelect", () => ({
+  GlassSelect: ({ value, options, onChange, ariaLabel, ...props }: any) => (
+    <select value={value} aria-label={ariaLabel} onChange={(e) => onChange(e.target.value)} {...props}>
+      {options.map((o: any) => (
+        <option key={o.value} value={o.value} disabled={o.disabled}>
+          {o.label}
+        </option>
+      ))}
+    </select>
+  ),
+}));
+
 function entry(partial: Partial<CatalogEntry>): CatalogEntry {
   return {
     id: `${partial.repoId ?? "a/b"}::${partial.filename ?? "m.gguf"}`,

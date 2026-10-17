@@ -68,9 +68,26 @@ impl HarnessAdapter for KimiCodeAdapter {
         CommandSpec::new("kimi", &[])
     }
 
-    /// The native installer (~/.kimi-code/bin) shadows any npm shim on PATH;
-    /// `kimi upgrade` updates whichever copy PATH resolves (verified 0.31).
+    /// The native installer (~/.kimi-code/bin) shadows any npm shim on PATH.
+    /// On Unix `kimi upgrade` updates whichever copy PATH resolves. On
+    /// Windows the native build cannot self-update: `kimi upgrade` prints
+    /// "Auto-update is not supported on this platform", exits 0 and changes
+    /// nothing — the backend toasted SUCCESS while the version never moved,
+    /// leaving the Update button up forever. The official Windows path is
+    /// the installer script, so that is what the Update button runs there.
     fn native_update_command(&self, _resolved: &std::path::Path) -> Option<CommandSpec> {
+        if cfg!(windows) {
+            return Some(CommandSpec::new(
+                "powershell",
+                &[
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    "irm https://code.kimi.com/kimi-code/install.ps1 | iex",
+                ],
+            ));
+        }
         Some(CommandSpec::new("kimi", &["upgrade"]))
     }
 
@@ -311,6 +328,27 @@ mod tests {
     #[test]
     fn new_command_has_no_args() {
         assert_eq!(KimiCodeAdapter.spawn_new_command().args, Vec::<String>::new());
+    }
+
+    #[test]
+    fn native_update_command_matches_platform() {
+        // Windows native installs cannot self-update (`kimi upgrade` prints
+        // "Auto-update is not supported on this platform" and exits 0), so
+        // the updater is the official installer script; Unix keeps the CLI's
+        // own update subcommand.
+        let spec = KimiCodeAdapter
+            .native_update_command(Path::new("kimi"))
+            .expect("kimi always has an update route");
+        if cfg!(windows) {
+            assert_eq!(spec.program, "powershell");
+            assert!(spec
+                .args
+                .iter()
+                .any(|a| a.contains("code.kimi.com/kimi-code/install.ps1")));
+        } else {
+            assert_eq!(spec.program, "kimi");
+            assert_eq!(spec.args, vec!["upgrade"]);
+        }
     }
 
     #[test]

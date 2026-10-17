@@ -1,5 +1,5 @@
-// The wiki-build pulse in the Sidebar, and the hook-order trap it walked into:
-// `wikiBuilding` used to be TWO `useWikiStore` calls joined by `||`. A build
+// The wiki-build pulse, and the hook-order trap it walked into: `wikiBuilding`
+// used to be TWO `useWikiStore` calls joined by `||` in the Sidebar. A build
 // starting flips the first selector to true, JS short-circuits the right
 // operand, and the second HOOK is skipped for that render — the component's
 // hook count changes mid-life, so every later hook lands one slot off. The
@@ -9,9 +9,13 @@
 // the root ErrorBoundary, which is exactly the report from the field (the app
 // died the moment a wiki build started).
 //
-// This test walks the transition that used to crash: mount the sidebar with
+// The Vault / Wiki / Bots entries (and with them the pulse) moved from the
+// Sidebar to the bottom bar, so the guard now mounts BottomBar — same trap,
+// new home.
+//
+// This test walks the transition that used to crash: mount the bar with
 // the wiki idle, then start a build (status.jobRunning, then progress
-// running) and assert the sidebar keeps rendering its pulse.
+// running) and assert the bar keeps rendering its pulse.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import React from "react";
@@ -50,7 +54,7 @@ vi.mock("../lib/ipc", () => {
   return stub;
 });
 
-import { Sidebar } from "../components/sidebar/Sidebar";
+import { BottomBar } from "../components/common/BottomBar";
 import { useChatStore } from "../state/chat";
 import { useProjectsStore } from "../state/projects";
 import { useWikiStore } from "../state/wiki";
@@ -85,9 +89,9 @@ beforeEach(() => {
   });
 });
 
-describe("sidebar wiki-build pulse", () => {
+describe("bottom-bar wiki-build pulse", () => {
   it("survives the idle → running transition (hook order is stable)", async () => {
-    render(<Sidebar />);
+    render(<BottomBar />);
     expect(document.querySelector(".sidebar-wiki-running")).toBeNull();
 
     // The exact field sequence: the view starts a build; the store's status
@@ -100,13 +104,13 @@ describe("sidebar wiki-build pulse", () => {
     await waitFor(() =>
       expect(document.querySelector(".sidebar-wiki-running")).toBeTruthy(),
     );
-    // Still the sidebar, still rendering — no crash panel, no unmount.
-    expect(screen.getByText("Wiki")).toBeTruthy();
+    // Still the bar, still rendering — no crash panel, no unmount.
+    expect(screen.getByLabelText(/wiki build is running/i)).toBeTruthy();
   });
 
   it("keeps the pulse when only the status snapshot knows about the job", async () => {
     useWikiStore.setState((s) => ({ status: { ...(s.status ?? {}), jobRunning: true } }) as never);
-    render(<Sidebar />);
+    render(<BottomBar />);
     await waitFor(() =>
       expect(document.querySelector(".sidebar-wiki-running")).toBeTruthy(),
     );

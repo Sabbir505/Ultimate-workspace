@@ -37,6 +37,21 @@ vi.mock("@tauri-apps/plugin-opener", () => ({
   openUrl: vi.fn().mockResolvedValue(undefined),
 }));
 
+// GlassSelect → a native <select> so the embedding picker stays a simple
+// change event (same trick automationTriggerForm.test.tsx uses). The real
+// component's popover behavior is covered by glassSelectAction.test.tsx.
+vi.mock("../components/common/GlassSelect", () => ({
+  GlassSelect: ({ value, options, onChange, ariaLabel, ...props }: any) => (
+    <select value={value} aria-label={ariaLabel} onChange={(e) => onChange(e.target.value)} {...props}>
+      {options.map((o: any) => (
+        <option key={o.value} value={o.value} disabled={o.disabled}>
+          {o.label}
+        </option>
+      ))}
+    </select>
+  ),
+}));
+
 vi.mock("../lib/ipc", () => ({
   docsEmbeddingStatus: (...a: unknown[]) => docsEmbeddingStatusMock(...a),
   docsListCorpora: (...a: unknown[]) => docsListCorporaMock(...a),

@@ -150,6 +150,7 @@ fn adapt_automation(spec: &AutomationSpec) -> AutomationInput {
         // Default policy: each proposed run gets its own chat session. The
         // spec schema carries no chat preference.
         chat_mode: None,
+        bot_id: None,
     }
 }
 

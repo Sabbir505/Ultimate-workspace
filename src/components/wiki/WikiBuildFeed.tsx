@@ -1,8 +1,9 @@
 // Shared live build feed for the project wiki (§6.15) — the chat "Working…"
 // process-block language applied to wiki generation: one row per step
 // (explore → outline → per-page write), a spinner on the running row, a
-// subtle progress bar, and cancel inline. Used by BOTH the tool-panel tab
-// and the overlay reader.
+// subtle progress bar, and cancel inline. Shown in the wiki view's empty
+// state while a first build runs — once a wiki exists, progress lives in the
+// title-bar pill only.
 import { useEffect, useRef } from "react";
 import { Check, Loader2, X } from "lucide-react";
 import type { WikiStep } from "../../state/wiki";
@@ -15,7 +16,6 @@ export function WikiBuildFeed({
   pagesDone,
   pagesTotal,
   onCancel,
-  compact,
 }: {
   steps: WikiStep[];
   state: "running" | "done" | "cancelled" | "error";
@@ -24,7 +24,6 @@ export function WikiBuildFeed({
   pagesDone: number;
   pagesTotal: number;
   onCancel?: () => void;
-  compact?: boolean;
 }) {
   const feedRef = useRef<HTMLDivElement>(null);
   const running = state === "running";
@@ -37,7 +36,7 @@ export function WikiBuildFeed({
 
   return (
     <div
-      className={`wiki-feed${compact ? " compact" : ""}${running ? " running" : ""}`}
+      className={`wiki-feed${running ? " running" : ""}`}
       data-testid="wiki-feed"
     >
       <div className="wiki-feed-head">

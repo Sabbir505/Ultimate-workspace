@@ -64,9 +64,17 @@ export function getSyntaxTheme(scope: "root" | "chat-block" = "root"): SyntaxSty
 
   const v = (name: string, fallback: string): string => cssVar(name) || fallback;
 
+  // Base (untokenized) code text. The chat's code blocks are fixed-dark, and
+  // their body text is pure white by design — the theme's variable/editor
+  // foreground (a light grey, or a blue-ish token hue depending on theme)
+  // left the plain text looking washed against the near-black card. Other
+  // scopes (doc blocks) keep the theme's own foreground.
+  const baseText =
+    scope === "chat-block" ? "#ffffff" : v("--syntax-variable", v("--editor-fg", "#e4e4e4"));
+
   const style: SyntaxStyle = {
     "code[class*=\"language-\"]": {
-      color: v("--syntax-variable", v("--editor-fg", "#e4e4e4")),
+      color: baseText,
       fontFamily: "var(--font-mono)",
       fontSize: "12px",
       lineHeight: 1.5,
@@ -80,7 +88,7 @@ export function getSyntaxTheme(scope: "root" | "chat-block" = "root"): SyntaxSty
       background: "transparent",
     },
     "pre[class*=\"language-\"]": {
-      color: v("--syntax-variable", v("--editor-fg", "#e4e4e4")),
+      color: baseText,
       fontFamily: "var(--font-mono)",
       fontSize: "12px",
       lineHeight: 1.5,

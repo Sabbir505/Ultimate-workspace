@@ -26,10 +26,10 @@ type ModelRow = { id: string; label: string };
 /** Clamp to the range `max_pages_from` accepts in Rust (2..=60), falling
  *  back to its default. The backend silently ignores an out-of-range or
  *  unparseable value, so typing "500" persisted something that then read as
- *  "20" with no indication anything was wrong. */
+ *  "30" with no indication anything was wrong. */
 export function normalizeMaxPages(raw: string | null): string {
   const n = Number.parseInt(raw ?? "", 10);
-  if (!Number.isFinite(n) || n < 2 || n > 60) return "20";
+  if (!Number.isFinite(n) || n < 2 || n > 60) return "30";
   return String(n);
 }
 
@@ -59,7 +59,7 @@ export function WikiPanel() {
         setModel(m ?? "");
         setAutoUpdate(a == null || a.trim() !== "false");
         setLayerIndex(l == null || l.trim() !== "false");
-        setMaxPages(mp ?? "20");
+        setMaxPages(mp ?? "30");
       })
       .catch((e) => toastError("Failed to load wiki settings", e));
     return () => {
@@ -135,9 +135,8 @@ export function WikiPanel() {
       <div className="settings-section">
         <div className="settings-section-title">Build model</div>
         <p className="settings-section-hint">
-          Writes the pages. Harness CLIs build with their own login — subscriptions and
-          free-tier models work. Empty source = the first configured cloud provider
-          (anthropic → openai → openrouter).
+          Writes the pages. Harness CLIs use their own login. Empty source = the first
+          configured cloud provider (anthropic → openai → openrouter).
         </p>
         <div className="settings-row" style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <select
@@ -207,7 +206,7 @@ export function WikiPanel() {
               {autoUpdate == null
                 ? "Loading…"
                 : autoUpdate
-                  ? "Relay re-checks each wiki's HEAD every minute; pages regenerate only when their cited sources changed — a clean repo costs nothing."
+                  ? "Re-checks each wiki's HEAD every minute; pages regenerate only when their cited sources changed."
                   : "Update manually with the Update button in the Wiki tab."}
             </span>
           </div>
@@ -230,7 +229,7 @@ export function WikiPanel() {
               {layerIndex == null
                 ? "Loading…"
                 : layerIndex
-                  ? "Chats and harness sessions see the page index (capped, firewalled) beside AGENTS.md, and pull pages via the search_wiki / read_wiki_page tools."
+                  ? "Chats and harness sessions see the page index beside AGENTS.md and pull pages via the search_wiki / read_wiki_page tools."
                   : "Agents discover the wiki only through the tools."}
             </span>
           </div>
@@ -246,7 +245,7 @@ export function WikiPanel() {
           <div className="settings-toggle-label">
             <span className="settings-toggle-name">Page cap</span>
             <span className="settings-toggle-desc">
-              Maximum pages per build (2–60). Monorepos: fewer, broader pages stay fresher.
+              Maximum pages per build (2–60). Raise it for large monorepos.
             </span>
           </div>
           <input

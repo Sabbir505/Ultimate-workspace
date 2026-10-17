@@ -468,14 +468,14 @@ export function ImageGenPanel() {
       </div>
 
       <p className="settings-note">
-        Local text-to-image on a stable-diffusion.cpp server — open weights, no
-        cloud. The agent gets a <code className="mono">generate_image</code> tool
-        once an engine build and the models below are installed.
+        Local text-to-image on a stable-diffusion.cpp server. The agent gets a
+        <code className="mono">generate_image</code> tool once an engine build
+        and the models below are installed.
       </p>
 
       {!status ? (
         <div className="settings-note" style={{ color: "var(--text-dim)" }}>
-          Image generation status unavailable (app backend not reachable).
+          Status unavailable (backend not reachable).
         </div>
       ) : (
         <>
@@ -498,8 +498,8 @@ export function ImageGenPanel() {
                 </>
               ) : (
                 <span style={{ color: "var(--warn, #d29922)" }}>
-                  sd-server binary not found — install an engine build below, or
-                  point at an existing build.
+                  sd-server binary not found — install an engine build below or
+                  set a path.
                 </span>
               )}
             </div>
@@ -563,14 +563,14 @@ export function ImageGenPanel() {
             </div>
             <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 6 }}>
               {status.device === "auto"
-                ? "Auto picks the CUDA build on NVIDIA GPUs, Vulkan on AMD/Intel, and falls back to CPU."
+                ? "Auto uses CUDA on NVIDIA, Vulkan on AMD/Intel, else CPU."
                 : status.device === "vulkan"
                   ? status.vulkanAvailable
-                    ? "Image generation runs on the Vulkan build — works across NVIDIA, AMD and Intel GPUs."
-                    : "No Vulkan build installed yet — install it above; until then Auto/CPU builds are used."
+                    ? "Runs on the Vulkan build (NVIDIA, AMD, Intel)."
+                    : "No Vulkan build installed — install it above; Auto/CPU is used until then."
                   : status.cpuAvailable
-                    ? "Image generation runs on the CPU build — works everywhere, but a 1024px image takes minutes."
-                    : "No CPU build installed yet — install it above, or use Auto."}
+                    ? "Runs on the CPU build — a 1024px image takes minutes."
+                    : "No CPU build installed — install it above or use Auto."}
             </div>
           </div>
 
@@ -584,9 +584,8 @@ export function ImageGenPanel() {
             <div className="settings-note" style={{ marginTop: 4 }}>
               <div style={{ fontWeight: 600, marginBottom: 2 }}>Model packages</div>
               <div style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 10 }}>
-                One click sets up the whole pipeline. Components shared between
-                packages — and any matching file already in your models folder —
-                are reused, not downloaded twice.
+                One click sets up the whole pipeline; shared components and
+                matching files already on disk are reused, not re-downloaded.
               </div>
 
               {/* One best per GPU tier: click = activate (downloading what's
@@ -698,7 +697,7 @@ export function ImageGenPanel() {
                       )}
                       {isDisk && p.layout === "split" && p.deps.some((d) => d.action === "download") && (
                         <div style={{ fontSize: 10, color: "var(--warn, #d29922)", marginTop: 4 }}>
-                          missing encoder/VAE — Install &amp; use will download them
+                          missing encoder/VAE — Install &amp; use downloads them
                         </div>
                       )}
 
@@ -738,29 +737,29 @@ export function ImageGenPanel() {
             {
               role: "diffusion" as ImageModelRole,
               title: "Diffusion models",
-              hint: "The model that paints. Full checkpoints (SD 1.5 / SDXL) load alone; split models also need one text encoder and one VAE from the groups below.",
+              hint: "The model that paints. Full checkpoints load alone; split models also need a text encoder and VAE below.",
               selectLabel: "Set default",
               selectedLabel: "✓ Default",
               rows: diffusionRows,
-              empty: "No diffusion model yet — download one or move a file here with the kind dropdown.",
+              empty: "No diffusion model yet — download one or move a file here.",
             },
             {
               role: "text-encoder" as ImageModelRole,
               title: "Text encoders",
-              hint: "Needed by split models (Z-Image & friends). Nothing selected = the catalog encoder, wherever it sits.",
+              hint: "Needed by split models. Nothing selected = the catalog encoder.",
               selectLabel: "Use",
               selectedLabel: "✓ In use",
               rows: encoderRows,
-              empty: "No text encoder — split models can't start. Download the catalog one or move a file here.",
+              empty: "No text encoder — split models can't start. Download the catalog one.",
             },
             {
               role: "vae" as ImageModelRole,
               title: "VAE",
-              hint: "Decodes the latent into a PNG. Needed by split models. Nothing selected = the catalog VAE.",
+              hint: "Decodes the latent into a PNG for split models. Nothing selected = the catalog VAE.",
               selectLabel: "Use",
               selectedLabel: "✓ In use",
               rows: vaeRows,
-              empty: "No VAE — split models can't start. Download the catalog one or move a file here.",
+              empty: "No VAE — split models can't start. Download the catalog one.",
             },
           ].map((group) => (
             <div className="settings-note" style={{ marginTop: 4 }} key={group.role}>
@@ -980,8 +979,8 @@ export function ImageGenPanel() {
                 </div>
                 {busy && (
                   <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 8 }}>
-                    Rendering — the first image after a cold start takes longer
-                    (the GPU compiles its kernels once).
+                    Rendering — the first image after a cold start is slower
+                    (kernels compile once).
                   </div>
                 )}
                 {tryImage && (
@@ -993,7 +992,7 @@ export function ImageGenPanel() {
                     />
                     <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>
                       {tryImage.width}×{tryImage.height} — the agent produces the
-                      same thing with the generate_image tool.
+                      same with the generate_image tool.
                     </div>
                   </div>
                 )}
@@ -1056,7 +1055,7 @@ export function ImageGenPanel() {
               </div>
             </div>
             <p className="model-detail-desc">
-              {detail.note}. Downloads run through the app's model engine into{" "}
+              {detail.note}. Downloads go into{" "}
               <code className="mono">{status?.imageDir ?? "<models>/image-gen"}</code>.
             </p>
             {detailActive && (

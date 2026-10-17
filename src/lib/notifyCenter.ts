@@ -32,7 +32,7 @@ export interface RelayNotifyOptions {
   /** Terminal pane to focus from the bell panel. */
   paneId?: string;
   /** Overlay view to open from the bell panel. */
-  view?: "automations" | "cost" | "settings";
+  view?: "automations" | "cost" | "settings" | "bots";
   /** Settings category to preselect when `view` is "settings". */
   settingsCategory?: string;
   /** Show an OS toast (DND-gated). Default false — completions only toast

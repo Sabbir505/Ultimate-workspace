@@ -4,8 +4,12 @@
 // attribution — zero model calls), and this strip reports what was
 // mechanically verified instead of implying perfection.
 //
-// Styling lives in chat.css (.citation-report-strip*) — single compact row:
-// health dot · label · counts, with the hint as a truncating muted tail.
+// Styling lives in chat.css (.citation-report-strip*): a notch tab like the
+// goal notch — the wrapper carries the composer dock's column geometry
+// (.plan-preview) and the strip itself wears the composer card's liquid glass
+// with a flat bottom, so it fuses onto the card seam. The wrapper lives HERE
+// (not at the call site) so the null state renders nothing at all — an empty
+// notch container would still add its seam padding to the dock.
 import { useChatStore } from "../../state/chat";
 
 /** Overall health bucket: green = everything resolved and attributed,
@@ -51,32 +55,34 @@ export function CitationReportStrip({
   if (report.orphanCount > 0) counts.push(`${report.orphanCount} orphan${report.orphanCount === 1 ? "" : "s"}`);
 
   return (
-    <div
-      className={`citation-report-strip is-${level}`}
-      role="status"
-      title={`Mechanical citation lint against the session's source ledger — ${HINTS[level]}`}
-    >
-      <span className="citation-report-strip-dot" aria-hidden />
-      <span className="citation-report-strip-label">Citation check</span>
-      <span className="citation-report-strip-counts">
-        {counts.map((c) => (
-          <span key={c}>
-            <span className="citation-report-strip-sep">·</span>
-            {c}
-          </span>
-        ))}
-      </span>
-      <span className="citation-report-strip-hint">{HINTS[level]}</span>
-      {onFix && level !== "ok" && (
-        <button
-          type="button"
-          className="citation-report-strip-fix"
-          onClick={() => onFix(chatSessionId)}
-          title="Send a repair pass: the model re-cites or drops the flagged claims and regenerates the report"
-        >
-          Fix citations
-        </button>
-      )}
+    <div className="plan-preview">
+      <div
+        className={`citation-report-strip is-${level}`}
+        role="status"
+        title={`Mechanical citation lint against the session's source ledger — ${HINTS[level]}`}
+      >
+        <span className="citation-report-strip-dot" aria-hidden />
+        <span className="citation-report-strip-label">Citation check</span>
+        <span className="citation-report-strip-counts">
+          {counts.map((c) => (
+            <span key={c}>
+              <span className="citation-report-strip-sep">·</span>
+              {c}
+            </span>
+          ))}
+        </span>
+        <span className="citation-report-strip-hint">{HINTS[level]}</span>
+        {onFix && level !== "ok" && (
+          <button
+            type="button"
+            className="citation-report-strip-fix"
+            onClick={() => onFix(chatSessionId)}
+            title="Send a repair pass: the model re-cites or drops the flagged claims and regenerates the report"
+          >
+            Fix citations
+          </button>
+        )}
+      </div>
     </div>
   );
 }

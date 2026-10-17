@@ -661,7 +661,7 @@ export function ArtifactExportMenu({ preview, path, filename, variant = "toolbar
                     by side, the label and the four scale chips fought over
                     the menu's 176px and the label wrapped. */}
                 <div className="artifact-kebab-option-row" role="group" aria-label="PNG export scale">
-                  <span className="artifact-kebab-option-label">PNG scale</span>
+                  <span className="artifact-kebab-option-label">PNG scale · {scale}×</span>
                   <div className="artifact-kebab-scale-seg">
                     {EXPORT_SCALES.map((s) => (
                       <button
@@ -685,7 +685,7 @@ export function ArtifactExportMenu({ preview, path, filename, variant = "toolbar
                   disabled={busy !== null}
                   onClick={() => setTransparent((t) => !t)}
                 >
-                  <span className="artifact-kebab-check">{transparent ? "✓" : ""}</span>
+                  {transparent && <span className="artifact-kebab-check">✓</span>}
                   Transparent background
                 </button>
               </>

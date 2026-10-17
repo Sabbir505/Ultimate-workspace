@@ -87,11 +87,14 @@ pub async fn delete_all_artifacts(app: AppHandle, db: State<'_, DbState>) -> Cmd
             }
         }
         // Sweep leftover files (no DB row) — strictly inside the resolved
-        // artifacts dir (the walk never escapes it).
+        // artifacts dir (the walk never escapes it). `_backups` holds the
+        // 30-day-expiry recovery zips and is deliberately preserved: clearing
+        // the gallery must not destroy the safety net.
         if let Ok(canon_dir) = dir.canonicalize() {
             for entry in walkdir::WalkDir::new(&canon_dir)
                 .min_depth(1)
                 .into_iter()
+                .filter_entry(|e| e.file_name() != std::ffi::OsStr::new("_backups"))
                 .filter_map(|e| e.ok())
             {
                 if entry.file_type().is_file() && std::fs::remove_file(entry.path()).is_ok() {
@@ -105,6 +108,75 @@ pub async fn delete_all_artifacts(app: AppHandle, db: State<'_, DbState>) -> Cmd
     .map_err(|e| e.to_string())
 }
 
+/// Back up the artifact files about to expire into
+/// `<artifacts_dir>/_backups/expired-<date>.zip` so the sweep never silently
+/// destroys something the user later wants to check. Best-effort: files that
+/// no longer exist (or the zip write itself) are skipped rather than aborting
+/// the sweep. Multiple sweeps on the same day get a numeric suffix instead of
+/// overwriting the earlier backup. Returns the zip path when at least one file
+/// was archived.
+fn backup_expired_artifacts(
+    artifacts_dir: &std::path::Path,
+    paths: &[String],
+) -> Option<std::path::PathBuf> {
+    use std::io::Write;
+    use std::path::Path;
+    use zip::write::SimpleFileOptions;
+
+    // Read the doomed files first; a missing/unreadable one is simply not
+    // backed up (same silent-skip contract as `download_artifacts_zip`).
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    for p in paths {
+        if let Ok(bytes) = std::fs::read(p) {
+            let name = Path::new(p)
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "file".to_string());
+            files.push((name, bytes));
+        }
+    }
+    if files.is_empty() {
+        return None;
+    }
+
+    let backup_dir = artifacts_dir.join("_backups");
+    std::fs::create_dir_all(&backup_dir).ok()?;
+
+    let stamp = chrono::Local::now().format("%Y-%m-%d");
+    let mut dest = backup_dir.join(format!("expired-{stamp}.zip"));
+    let mut n = 1;
+    while dest.exists() {
+        dest = backup_dir.join(format!("expired-{stamp}_{n}.zip"));
+        n += 1;
+    }
+
+    let file = std::fs::File::create(&dest).ok()?;
+    let mut zip = zip::ZipWriter::new(file);
+    let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (base, data) in &files {
+        let mut name = base.clone();
+        let mut dup = 1;
+        while used.contains(&name) {
+            let (stem, ext) = match base.rsplit_once('.') {
+                Some((s, e)) => (s.to_string(), format!(".{e}")),
+                None => (base.clone(), String::new()),
+            };
+            name = format!("{stem} ({dup}){ext}");
+            dup += 1;
+        }
+        used.insert(name.clone());
+        if zip.start_file(name, opts).is_err() {
+            continue;
+        }
+        if zip.write_all(data).is_err() {
+            continue;
+        }
+    }
+    zip.finish().ok()?;
+    Some(dest)
+}
+
 /// Sweep artifacts past their 30-day expiry, removing both rows and files.
 /// Also purges rows for transient scratch files (lock files, tmp
 /// intermediates) that the temp filter now blocks from being recorded —
@@ -113,7 +185,15 @@ pub async fn delete_all_artifacts(app: AppHandle, db: State<'_, DbState>) -> Cmd
 /// are removed for temp entries: their files live in the user's project
 /// dirs. Called on startup (and Settings → Data); returns the number of
 /// artifacts removed.
-pub fn sweep_expired_artifacts(db: &Arc<parking_lot::Mutex<rusqlite::Connection>>) -> usize {
+///
+/// Expired files are archived to `_backups/` inside `artifacts_dir` BEFORE the
+/// unlink (see [`backup_expired_artifacts`]), so the user can still recover
+/// something a later check needs. The caller resolves `artifacts_dir` (it must
+/// NOT re-lock `DbState` here — see `dispatch::artifacts_dir`).
+pub fn sweep_expired_artifacts(
+    db: &Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    artifacts_dir: &std::path::Path,
+) -> usize {
     let (paths, temp_removed) = {
         let conn = db.lock();
         let paths = db::delete_expired_artifacts(&conn).unwrap_or_default();
@@ -125,6 +205,20 @@ pub fn sweep_expired_artifacts(db: &Arc<parking_lot::Mutex<rusqlite::Connection>
         (paths, temp_removed)
     };
     let n = paths.len() + temp_removed;
+    if !paths.is_empty() {
+        match backup_expired_artifacts(artifacts_dir, &paths) {
+            Some(zip) => crate::relay_eprintln!(
+                "[artifacts] backed up {} expired artifact(s) to {}",
+                paths.len(),
+                zip.display()
+            ),
+            None => crate::relay_eprintln!(
+                "[artifacts] no expired artifact backup written for {} path(s) \
+                 (missing/unreadable files or write failure)",
+                paths.len()
+            ),
+        }
+    }
     for p in paths {
         let _ = std::fs::remove_file(p);
     }
@@ -198,5 +292,53 @@ pub async fn download_artifacts_zip(paths: Vec<String>, dest: String) -> CmdResu
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("relay-artifacts-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn expired_files_are_zipped_into_backups() {
+        let dir = tmp_dir("backup");
+        let a = dir.join("report.docx");
+        let b = dir.join("diagram.svg");
+        std::fs::write(&a, b"doc").unwrap();
+        std::fs::write(&b, b"<svg/>").unwrap();
+
+        let zip = backup_expired_artifacts(
+            &dir,
+            &[a.to_string_lossy().to_string(), b.to_string_lossy().to_string()],
+        )
+        .expect("a backup zip should be written");
+
+        // Lives under <artifacts>/_backups/ and holds both files.
+        assert_eq!(zip.parent().and_then(|p| p.file_name()), Some(std::ffi::OsStr::new("_backups")));
+        let mut archive =
+            zip::ZipArchive::new(std::fs::File::open(&zip).unwrap()).unwrap();
+        let mut names: Vec<String> =
+            (0..archive.len()).map(|i| archive.by_index(i).unwrap().name().to_string()).collect();
+        names.sort();
+        assert_eq!(names, vec!["diagram.svg".to_string(), "report.docx".to_string()]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn backup_skips_missing_files_and_reports_none() {
+        let dir = tmp_dir("backup-missing");
+        // A row whose file already vanished must not produce an empty zip.
+        assert!(backup_expired_artifacts(&dir, &[dir.join("gone.pdf").to_string_lossy().to_string()])
+            .is_none());
+        assert!(!dir.join("_backups").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 

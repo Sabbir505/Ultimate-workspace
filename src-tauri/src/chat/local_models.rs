@@ -390,7 +390,11 @@ pub fn scan_folder(dir: &Path, source: &str) -> Vec<GgufFile> {
     // companion model. The mmproj file usually lives in the same directory as
     // the model with a predictable name (mmproj-<model>.gguf or mmproj.gguf).
     let mut model_files: Vec<(walkdir::DirEntry, GgufMeta)> = Vec::new();
-    let mut mmproj_paths: std::collections::HashMap<String, PathBuf> =
+    // Vision projectors per directory: (filename, path). A directory can
+    // hold several candidates (f16 + q8 variants, or another model's
+    // companion); attribution to one specific model happens in the second
+    // pass — see pick_mmproj_for_model.
+    let mut mmproj_candidates: std::collections::HashMap<String, Vec<(String, PathBuf)>> =
         std::collections::HashMap::new();
     // Directories that hold image-generation components (diffusion weights,
     // text encoders, VAEs). NONE of their GGUFs are chat models — even when
@@ -420,12 +424,16 @@ pub fn scan_folder(dir: &Path, source: &str) -> Vec<GgufFile> {
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default();
 
-        // Detect vision-projector companion files (mmproj-*.gguf or mmproj.gguf).
-        // These are CLIP vision encoders that llama-server loads via --mmproj.
-        // We store them keyed by directory so models in the same dir can find
-        // their companion.
-        if name.starts_with("mmproj") || matches!(meta.architecture.as_deref(), Some("clip")) {
-            mmproj_paths.insert(dir_key, path.to_path_buf());
+        // Detect vision-projector companion files (mmproj-*.gguf,
+        // <model>.mmproj.gguf, mmproj.gguf — or anything carrying the CLIP
+        // arch). These are projectors that llama-server loads via --mmproj.
+        // Stored per directory as candidates; the second pass attributes
+        // each one to its own model by filename.
+        if name.contains("mmproj") || matches!(meta.architecture.as_deref(), Some("clip")) {
+            mmproj_candidates
+                .entry(dir_key)
+                .or_default()
+                .push((entry.file_name().to_string_lossy().to_string(), path.to_path_buf()));
             continue;
         }
 
@@ -487,18 +495,38 @@ pub fn scan_folder(dir: &Path, source: &str) -> Vec<GgufFile> {
         !image_component_dirs.contains(&dir)
     });
 
-    // Second pass: build GgufFile entries, attaching the mmproj companion when
-    // one was found in the same directory.
+    // Second pass: build GgufFile entries, attaching the mmproj companion
+    // that belongs to THIS model. A directory can hold several projectors
+    // (variants, or another model's companion), so attribution is by
+    // filename — see pick_mmproj_for_model.
+    let mut models_per_dir: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for (entry, _) in &model_files {
+        let dir = entry
+            .path()
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        *models_per_dir.entry(dir).or_insert(0) += 1;
+    }
     for (entry, meta) in model_files {
         let path = entry.path();
         let dir_key = path
             .parent()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default();
-        let (has_vision, mmproj_path) = if let Some(mp) = mmproj_paths.get(&dir_key) {
-            (true, Some(mp.to_string_lossy().to_string()))
-        } else {
-            (false, None)
+        let (has_vision, mmproj_path) = match mmproj_candidates.get(&dir_key) {
+            Some(candidates) if !candidates.is_empty() => {
+                match pick_mmproj_for_model(
+                    entry.file_name().to_string_lossy().as_ref(),
+                    candidates,
+                    models_per_dir.get(&dir_key).copied().unwrap_or(1),
+                ) {
+                    Some(mp) => (true, Some(mp.to_string_lossy().to_string())),
+                    None => (false, None),
+                }
+            }
+            _ => (false, None),
         };
 
         let meta_info = match path.metadata() {
@@ -532,6 +560,57 @@ pub fn scan_folder(dir: &Path, source: &str) -> Vec<GgufFile> {
         });
     }
     files
+}
+
+/// Normalize a GGUF file name to a fuzzy-match key: the stem, lowercased,
+/// ASCII-alphanumeric only (separators and quant casing vary between
+/// conversions: `MiniCPM-V-4_7-1B` vs `minicpm_v_4_7_1b`).
+fn normalize_gguf_stem(filename: &str) -> String {
+    let stem = filename
+        .strip_suffix(".gguf")
+        .or_else(|| filename.strip_suffix(".GGUF"))
+        .unwrap_or(filename);
+    stem.chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+/// Pair a directory's mmproj projector candidates with ONE model.
+///
+/// Nothing in GGUF metadata links a projector to its model — the only
+/// signal is the filename (`mmproj-<model-stem>.gguf`,
+/// `<model-stem>.mmproj.gguf`, or any name embedding the model stem).
+/// Directory-scoped pairing without a name match used to flag every
+/// folder-mate as vision and spawn models with a projector their runtime
+/// can't load (a folder-mate's companion killed startup).
+///
+/// Returns a name-matched candidate if any; otherwise a generically-named
+/// projector (`mmproj-model-f16.gguf`) only when the directory holds
+/// exactly one chat model (unambiguous by isolation). None = nothing is
+/// attributable to this model.
+fn pick_mmproj_for_model<'a>(
+    model_filename: &str,
+    candidates: &'a [(String, PathBuf)],
+    models_in_dir: usize,
+) -> Option<&'a PathBuf> {
+    let model_norm = normalize_gguf_stem(model_filename);
+    if model_norm.len() >= 4 {
+        for (cand_name, cand_path) in candidates {
+            // Strip the literal "mmproj" token: what remains is the model
+            // attribution when the file was named after its model.
+            let cand_base = normalize_gguf_stem(cand_name).replace("mmproj", "");
+            if cand_base.len() >= 4
+                && (model_norm.contains(&cand_base) || cand_base.contains(&model_norm))
+            {
+                return Some(cand_path);
+            }
+        }
+    }
+    if models_in_dir == 1 && candidates.len() == 1 {
+        return Some(&candidates[0].1);
+    }
+    None
 }
 
 /// Scan the default locations where GGUF files commonly live.
@@ -1028,6 +1107,9 @@ impl LocalModelRegistry {
         // Build the attempt ladder (deduped: a user/last-good ngl that is
         // already a fallback rung mustn't be tried twice).
         let attempt_ngls: Vec<i32> = build_ngl_ladder(ngl);
+        // Set once an attempt fails because `--mmproj` couldn't load; the
+        // drop sticks (args_template is mutated) for every later rung.
+        let mut mmproj_dropped = false;
 
         for (attempt_idx, try_ngl) in attempt_ngls.iter().enumerate() {
             let try_ngl = *try_ngl;
@@ -1221,6 +1303,33 @@ impl LocalModelRegistry {
                         );
                         continue;
                     }
+                }
+                // Incompatible vision projector: llama-server exits during
+                // startup when `--mmproj` can't be loaded — an unparsable
+                // projector type (a file newer than this llama.cpp build) or
+                // a misattributed folder-mate's companion. A text-only
+                // sidecar beats a dead model: drop `--mmproj` (and its
+                // value) and retry; the mutation sticks for later rungs.
+                let mmproj_failed = !mmproj_dropped
+                    && args_template.iter().any(|a| a == "--mmproj")
+                    && [
+                        "Failed to load CLIP model",
+                        "failed to load multimodal model",
+                        "unknown projector type",
+                    ]
+                    .iter()
+                    .any(|marker| output.contains(marker));
+                if mmproj_failed {
+                    mmproj_dropped = true;
+                    if let Some(pos) = args_template.iter().position(|a| a == "--mmproj")
+                    {
+                        args_template.drain(pos..pos + 2);
+                    }
+                    crate::relay_eprintln!(
+                        "[local-models] mmproj failed to load; retrying without --mmproj (text-only). Snippet: {}",
+                        stderr.lines().take(1).collect::<String>()
+                    );
+                    continue;
                 }
                 return Err(format!(
                     "llama-server exited during startup with --n-gpu-layers={}.\n{}",
@@ -2672,6 +2781,123 @@ mod scanner_tests {
         let found = scan_folder(dir.path(), "user");
         assert_eq!(found.len(), 1, "should detect .gguf by extension");
         assert_eq!(found[0].filename, "model.Q4_K_M.gguf");
+    }
+
+    /// Directory with two chat models + one GENERICALLY-named projector:
+    /// nothing links the projector to either model, so none gets flagged
+    /// vision. Regression: directory-wide pairing attached it to EVERY
+    /// folder-mate and startup then died on the unloadable projector.
+    #[test]
+    fn generic_mmproj_in_shared_dir_pairs_with_no_model() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, bytes) in [
+            ("Gemma-4-E4B-Uncensored.gguf", tiny_gguf_bytes()),
+            ("MiniCPM-V-4_7-1B.gguf", tiny_gguf_bytes()),
+            ("mmproj-model-f16-4x.gguf", gguf_bytes_with_arch("clip")),
+        ] {
+            fs::File::create(dir.path().join(name))
+                .unwrap()
+                .write_all(&bytes)
+                .unwrap();
+        }
+        let found = scan_folder(dir.path(), "user");
+        assert_eq!(found.len(), 2);
+        for f in &found {
+            assert!(!f.has_vision, "{} must not be flagged vision", f.filename);
+            assert!(
+                f.mmproj_path.is_none(),
+                "{} must not pair a projector",
+                f.filename
+            );
+        }
+    }
+
+    /// `<stem>.mmproj.gguf` — the convention the market download and the
+    /// delete path use — attaches to its model ONLY, even when the
+    /// directory holds other models AND another (generic) projector.
+    #[test]
+    fn stem_named_mmproj_attaches_only_to_its_model() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, bytes) in [
+            ("MiniCPM-V-4_7-1B-Q8_0.gguf", tiny_gguf_bytes()),
+            ("Gemma-4-E4B.gguf", tiny_gguf_bytes()),
+            ("MiniCPM-V-4_7-1B-Q8_0.mmproj.gguf", gguf_bytes_with_arch("clip")),
+            ("mmproj-model-f16-4x.gguf", gguf_bytes_with_arch("clip")),
+        ] {
+            fs::File::create(dir.path().join(name))
+                .unwrap()
+                .write_all(&bytes)
+                .unwrap();
+        }
+        let found = scan_folder(dir.path(), "user");
+        let minicpm = found
+            .iter()
+            .find(|f| f.filename.starts_with("MiniCPM"))
+            .expect("MiniCPM model found");
+        let gemma = found
+            .iter()
+            .find(|f| f.filename.starts_with("Gemma"))
+            .expect("Gemma model found");
+        assert!(minicpm.has_vision);
+        assert!(minicpm
+            .mmproj_path
+            .as_deref()
+            .unwrap()
+            .ends_with("MiniCPM-V-4_7-1B-Q8_0.mmproj.gguf"));
+        assert!(
+            !gemma.has_vision,
+            "Gemma must not inherit MiniCPM's projector"
+        );
+        assert!(gemma.mmproj_path.is_none());
+    }
+
+    /// `mmproj-<stem>.gguf` (the HF sibling convention) matches too —
+    /// including when the projector name omits the quant suffix.
+    #[test]
+    fn dash_prefixed_mmproj_matches_by_stem() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, bytes) in [
+            ("Nanbeige_Nanbeige4.2-3B-Q4_K_M.gguf", tiny_gguf_bytes()),
+            ("mmproj-Nanbeige4.2-3B.gguf", gguf_bytes_with_arch("clip")),
+            ("Other-7B.gguf", tiny_gguf_bytes()),
+        ] {
+            fs::File::create(dir.path().join(name))
+                .unwrap()
+                .write_all(&bytes)
+                .unwrap();
+        }
+        let found = scan_folder(dir.path(), "user");
+        let nanbeige = found
+            .iter()
+            .find(|f| f.filename.starts_with("Nanbeige"))
+            .expect("Nanbeige found");
+        let other = found
+            .iter()
+            .find(|f| f.filename.starts_with("Other"))
+            .expect("Other found");
+        assert!(nanbeige.has_vision);
+        assert!(nanbeige.mmproj_path.is_some());
+        assert!(!other.has_vision, "folder-mate must stay text-only");
+    }
+
+    /// A lone chat model + a generically-named projector is unambiguous:
+    /// pairing by isolation keeps single-model vision folders working.
+    #[test]
+    fn generic_mmproj_pairs_when_sole_model_in_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, bytes) in [
+            ("MiniCPM-V-4_7-1B-Q8_0.gguf", tiny_gguf_bytes()),
+            ("mmproj-model-f16-4x.gguf", gguf_bytes_with_arch("clip")),
+        ] {
+            fs::File::create(dir.path().join(name))
+                .unwrap()
+                .write_all(&bytes)
+                .unwrap();
+        }
+        let found = scan_folder(dir.path(), "user");
+        assert_eq!(found.len(), 1);
+        assert!(found[0].has_vision);
+        assert!(found[0].mmproj_path.is_some());
     }
 
     #[test]

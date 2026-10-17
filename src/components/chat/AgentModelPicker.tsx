@@ -20,7 +20,7 @@
 // drives the right pane; clicking a model row COMMITS the selection
 // (agent + provider + model together), so a pick can never land the session
 // on an agent with another agent's model attached.
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { listHarnesses, listAcpAgents, listHarnessModels, listChatModels, scanLocalModels, listChatInstances, providerKindOf, type ChatInstancePayload, type GgufModel, type HarnessModelConfig, type LlamaOverrides } from "../../lib/ipc";
 import { ModelToolBadge } from "../common/ModelToolBadge";
@@ -29,6 +29,7 @@ import { fuzzyFilter, type FuzzyResult } from "../../lib/fuzzy";
 import { shortModelName } from "../../lib/modelLabel";
 import { CLOUD_PROVIDER_IDS as PROVIDER_IDS } from "../../lib/agents";
 import { useSettingsStore } from "../../state/settings";
+import { useUiStore } from "../../state/ui";
 import {
   acpIdOf,
   dedupeIds,
@@ -144,6 +145,11 @@ interface Props {
    *  with it, and point the session at that model. */
   onLoadLocalModel?: (model: string, overrides: LlamaOverrides) => void;
 }
+
+/** The popup's CSS width (pickers.css) — the pre-mount clamp fallback. */
+const POPUP_WIDTH = 284;
+/** Minimum gap between the popup and the viewport edges. */
+const POPUP_MARGIN = 8;
 
 interface RailEntry {
   key: string;
@@ -412,26 +418,37 @@ export function AgentModelPickerInner({
   // Viewport anchor for the portaled popup (re-measured while open so the
   // popup tracks the chip on window resizes and layout scrolls).
   const [popupPos, setPopupPos] = useState<{ left: number; bottom: number } | null>(null);
+  const popupRef = useRef<HTMLDivElement | null>(null);
+  const measure = useCallback(() => {
+    const rect = rootRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    // Clamp horizontally so the popup can never hang off the window: the
+    // chip sits inside a chat pane, and with the right tool panel (or a
+    // split) open that pane narrows until a popup anchored at the chip's
+    // left edge runs past the viewport edge — the same clamp the
+    // context-meter panel applies, for the same reason. The width comes
+    // from the mounted popup when readable (narrow windows shrink it via
+    // CSS); the constant covers the first pre-mount pass (reading a
+    // portal's offsetWidth pre-layout returns 0 — see ContextMeter).
+    const width = popupRef.current?.offsetWidth || POPUP_WIDTH;
+    const maxLeft = Math.max(POPUP_MARGIN, window.innerWidth - width - POPUP_MARGIN);
+    const next = {
+      left: Math.min(Math.max(rect.left, POPUP_MARGIN), maxLeft),
+      // Open UPWARD from the chip's top edge (same anchor the old absolute
+      // positioning expressed as bottom: calc(100% + 6px)).
+      bottom: Math.max(8, window.innerHeight - rect.top + 6),
+    };
+    // Scroll events fire constantly while the model list scrolls — skip
+    // no-op updates.
+    setPopupPos((prev) =>
+      prev && prev.left === next.left && prev.bottom === next.bottom ? prev : next,
+    );
+  }, []);
   useLayoutEffect(() => {
     if (!open) {
       setPopupPos(null);
       return;
     }
-    const measure = () => {
-      const rect = rootRef.current?.getBoundingClientRect();
-      if (!rect) return;
-      const next = {
-        left: rect.left,
-        // Open UPWARD from the chip's top edge (same anchor the old absolute
-        // positioning expressed as bottom: calc(100% + 6px)).
-        bottom: Math.max(8, window.innerHeight - rect.top + 6),
-      };
-      // Scroll events fire constantly while the model list scrolls — skip
-      // no-op updates.
-      setPopupPos((prev) =>
-        prev && prev.left === next.left && prev.bottom === next.bottom ? prev : next,
-      );
-    };
     measure();
     window.addEventListener("resize", measure);
     // Capture: the transcript scrolls inside a nested container.
@@ -440,7 +457,47 @@ export function AgentModelPickerInner({
       window.removeEventListener("resize", measure);
       window.removeEventListener("scroll", measure, true);
     };
-  }, [open]);
+  }, [open, measure]);
+  // Second pass once the portal is mounted: the first measure ran before the
+  // popup existed, so a narrow window (where the CSS override shrinks the
+  // popup to calc(100vw − 24px)) only gets its exact clamp here.
+  useLayoutEffect(() => {
+    if (open && popupPos) measure();
+  }, [open, popupPos, measure]);
+
+  // Vertical safety net: the popup opens UPWARD from the chip, so on a short
+  // window its top would leave the viewport (the anchor only guarantees the
+  // BOTTOM edge stays on-screen). Same contract as the context-meter panel's
+  // clamp: measure the mounted height and pull the bottom edge in. The CSS
+  // caps the height at calc(100vh − 32px), so the fully-clamped box always
+  // fits. 0 = pre-layout read, skip.
+  useLayoutEffect(() => {
+    if (!open || !popupPos) return;
+    const el = popupRef.current;
+    if (!el || el.offsetHeight === 0) return;
+    const maxBottom = Math.max(
+      window.innerHeight - el.offsetHeight - POPUP_MARGIN,
+      POPUP_MARGIN,
+    );
+    const bottom = Math.min(Math.max(popupPos.bottom, POPUP_MARGIN), maxBottom);
+    if (bottom !== popupPos.bottom) {
+      setPopupPos({ ...popupPos, bottom });
+    }
+  }, [open, popupPos]);
+
+  // While the popup is open it must paint over any native browser webview in
+  // the right tool panel (they float above ALL DOM — no z-index can win), so
+  // it rides the same occlusion flag the context-meter panel and the chip
+  // tooltips use. Per-instance id: the picker renders once per chat pane, and
+  // a shared boolean let one pane's popup closing clear the flag while
+  // another pane's popup was still up.
+  const popupOwnerId = useId();
+  const setContextTipOpen = useUiStore((s) => s.setContextTipOpen);
+  useEffect(() => {
+    if (!open) return;
+    setContextTipOpen(popupOwnerId, true);
+    return () => setContextTipOpen(popupOwnerId, false);
+  }, [open, setContextTipOpen, popupOwnerId]);
 
   // ---- rail entries --------------------------------------------------------
   // The rail is icon-only (~50px); each icon's tooltip carries the agent
@@ -827,6 +884,7 @@ export function AgentModelPickerInner({
         createPortal(
           <div
             className="agent-model-popup"
+            ref={popupRef}
             role="menu"
             aria-label="Agent and model"
             style={popupPos ?? undefined}

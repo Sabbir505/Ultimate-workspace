@@ -17,7 +17,7 @@ import { petLine, type PetLineTrigger } from "../lib/pets/lines";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
-export type PetSpecies = "cat" | "axolotl" | "robot";
+export type PetSpecies = "cat" | "axolotl" | "robot" | "fox" | "panda" | "dragon";
 export type PetMood =
   | "idle"
   | "walk" // strolling within its strip
@@ -420,8 +420,12 @@ function loadPersistedSettings(): PetSettings {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return fallback;
     const parsed = JSON.parse(raw) as Partial<PetSettings>;
-    const species: PetSpecies =
-      parsed.species === "axolotl" || parsed.species === "robot" ? parsed.species : "cat";
+    // Whitelist, not a cast: an unknown persisted value (or one from a future
+    // species this build predates) silently falls back to the cat.
+    const known: PetSpecies[] = ["cat", "axolotl", "robot", "fox", "panda", "dragon"];
+    const species: PetSpecies = known.includes(parsed.species as PetSpecies)
+      ? (parsed.species as PetSpecies)
+      : "cat";
     return {
       species,
       name:

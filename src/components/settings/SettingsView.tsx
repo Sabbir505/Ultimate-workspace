@@ -12,7 +12,7 @@ import { runLoginFlow } from "../../lib/sessionLauncher";
 import type { HarnessId } from "../../types";
 import { shortModelName } from "../../lib/modelLabel";
 import { useProjectsStore } from "../../state/projects";
-import { useSettingsStore, type ThemeSetting } from "../../state/settings";
+import { useSettingsStore, type ThemeSetting, type PetMode, PET_LIGHTING_MIN, PET_LIGHTING_MAX } from "../../state/settings";
 import { useUiStore } from "../../state/ui";
 import { GlassSelect } from "../common/GlassSelect";
 import { useChatStore } from "../../state/chat";
@@ -40,49 +40,135 @@ import { RemotePanel } from "./RemotePanel";
 import { ConnectorIcon, FamilyIcon, FAMILY_NAMES } from "./ConnectorIcon";
 import { formatBytes } from "../../lib/format";
 import { LocalModelsPanel, K_SYSTEM_PROMPT, K_COMMIT_PROVIDER, K_COMMIT_MODEL, PROMPT_PRESETS } from "./LocalModelsPanel";
+import { CompactionPanel } from "./CompactionPanel";
 import { GitPanel } from "./GitPanel";
 import { ApiKeysPanel } from "./ApiKeysPanel";
 import { ConnectorsPanel } from "./ConnectorsPanel";
 import { DataPanel } from "./DataPanel";
 import { ToggleSwitch } from "./ToggleSwitch";
-import { usePetStore } from "../../state/pet";
-import { AnimatedSprite } from "../pet/PetActor";
+import { PetPreviewGrid } from "../pet/PetPreviewGrid";
+import { detectPetHardware, recommendedPetModes } from "../../lib/pets/hardware";
 
-/** Companion pet section (Appearance): the single on/off switch plus a live
- *  preview of the three pets, each mid-animation. Placement is automatic —
- *  the pet teleports between the sidebar and the composer on its own. */
-function CompanionPetSection() {
-  const enabled = usePetStore((s) => s.enabled);
-  const setEnabled = usePetStore((s) => s.setEnabled);
+/** The four quality/lighting presets, shared by both pickers. */
+const PET_MODE_OPTIONS: { value: PetMode; label: string }[] = [
+  { value: "auto", label: "Auto" },
+  { value: "low", label: "Low" },
+  { value: "medium", label: "Medium" },
+  { value: "high", label: "High" },
+];
+const PET_MODE_LABEL: Record<string, string> = Object.fromEntries(
+  PET_MODE_OPTIONS.map((o) => [o.value, o.label]),
+);
+
+/** Bot pets section (Appearance): a LIVE 3D preview of the six companions a bot
+ *  can wear, plus the render-quality / lighting / brightness controls that drive
+ *  every pet's stage. Pets are assigned per bot in the editor — the single
+ *  global "companion" is retired in favour of per-bot pets. */
+function BotPetsSection() {
+  const renderMode = useSettingsStore((s) => s.petRenderMode);
+  const lightingMode = useSettingsStore((s) => s.petLightingMode);
+  const lightingIntensity = useSettingsStore((s) => s.petLightingIntensity);
+  const setRenderMode = useSettingsStore((s) => s.setPetRenderMode);
+  const setLightingMode = useSettingsStore((s) => s.setPetLightingMode);
+  const setLightingIntensity = useSettingsStore((s) => s.setPetLightingIntensity);
+
+  // Probe once (cached in lib/pets/hardware) to show what we detected and offer
+  // a one-click return to the hardware-matched presets.
+  const [hw] = useState(() => detectPetHardware());
+  const recommended = recommendedPetModes(hw);
+
+  const modePicker = (label: string, value: PetMode, onPick: (mode: PetMode) => void) => (
+    <div className="pet-mode-chips" role="group" aria-label={label}>
+      {PET_MODE_OPTIONS.map((o) => (
+        <button
+          key={o.value}
+          type="button"
+          className={`pet-mode-chip${value === o.value ? " active" : ""}`}
+          aria-pressed={value === o.value}
+          onClick={() => onPick(o.value)}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+
   return (
     <div className="settings-section">
-      <div className="settings-section-title">Companion pet</div>
+      <div className="settings-section-title">Bot pets</div>
       <p className="settings-section-hint">
-        A small pixel companion that reacts to your agents — strolls, watches chats, celebrates
-        finished turns and automations, naps when you're away. It lives above the search or above
-        the composer and teleports between them. It never nags and costs nothing.
+        Every bot can wear one of six 3D companions that mirror its state, docked above the search
+        bar or composer. Assign one when you create or edit a bot.
       </p>
-      <div className="pet-settings-previews">
-        <figure className="pet-settings-preview">
-          <AnimatedSprite species="cat" mood="walk" />
-          <figcaption>cat · strolling</figcaption>
-        </figure>
-        <figure className="pet-settings-preview">
-          <AnimatedSprite species="axolotl" mood="celebrate" />
-          <figcaption>axolotl · celebrating</figcaption>
-        </figure>
-        <figure className="pet-settings-preview">
-          <AnimatedSprite species="robot" mood="work" />
-          <figcaption>robot · working</figcaption>
-        </figure>
+
+      {/* Detected hardware + the presets matched to it. */}
+      <div className="pet-hw-note">
+        <Cpu size={13} strokeWidth={1.8} aria-hidden />
+        <span className="pet-hw-text">
+          Detected <b>{hw.renderer || (hw.software ? "software rendering" : "your hardware")}</b>
+          {hw.cores ? <> · {hw.cores} cores</> : null}
+          {hw.memoryGb ? <> · {hw.memoryGb} GB</> : null}
+          {" — "}recommended <b>{PET_MODE_LABEL[recommended.render]}</b>
+        </span>
+        <button
+          type="button"
+          className="pet-hw-apply"
+          onClick={() => {
+            setRenderMode(recommended.render);
+            setLightingMode(recommended.lighting);
+          }}
+        >
+          Use recommended
+        </button>
       </div>
-      <div className="settings-toggle-row">
-        <div className="settings-toggle-label">
-          <span className="settings-toggle-name">Enabled</span>
-          <span className="settings-toggle-desc">Show the companion in Relay.</span>
+
+      {/* Real 3D preview (not flat chips) so quality + lighting read live. */}
+      <PetPreviewGrid />
+      <p className="pet-preview-caption">Live preview — these use the settings below.</p>
+
+      <div className="pet-render-card">
+        <div className="pet-render-row">
+          <div className="pet-render-meta">
+            <span className="pet-render-label">Render quality</span>
+            <span className="pet-render-desc">Pixel density, shadows and fur detail.</span>
+          </div>
+          {modePicker("Render quality", renderMode, setRenderMode)}
         </div>
-        <ToggleSwitch checked={enabled} onChange={setEnabled} />
+
+        <div className="pet-render-row">
+          <div className="pet-render-meta">
+            <span className="pet-render-label">Lighting</span>
+            <span className="pet-render-desc">Key light, rim light and the environment glow.</span>
+          </div>
+          {modePicker("Lighting", lightingMode, setLightingMode)}
+        </div>
+
+        <div className="pet-render-row">
+          <div className="pet-render-meta">
+            <span className="pet-render-label">Brightness</span>
+            <span className="pet-render-desc">Overall lighting intensity.</span>
+          </div>
+          <div className="pet-light-slider">
+            <Sun size={13} strokeWidth={1.8} className="pet-light-icon dim" aria-hidden />
+            <input
+              type="range"
+              min={PET_LIGHTING_MIN}
+              max={PET_LIGHTING_MAX}
+              step={0.05}
+              value={lightingIntensity}
+              onChange={(e) => setLightingIntensity(Number(e.target.value))}
+              aria-label="Pet lighting brightness"
+            />
+            <Sun size={15} strokeWidth={1.8} className="pet-light-icon" aria-hidden />
+            <span className="pet-light-value">{Math.round(lightingIntensity * 100)}%</span>
+          </div>
+        </div>
       </div>
+
+      <p className="settings-section-hint pet-render-note">
+        Changes apply immediately. Lower quality eases GPU load; Auto steps each pet's engine down
+        when frames drop.
+      </p>
     </div>
   );
 }
@@ -116,8 +202,10 @@ import {
   Bell,
   MessageSquareText,
   Sparkles,
+  Sun,
   Users,
   Network,
+  Minimize2,
   ChevronRight,
 } from "lucide-react";
 
@@ -132,6 +220,7 @@ type Category =
   | "subagents"
   | "mesh"
   | "localmodels"
+  | "compaction"
   | "apikeys"
   | "websearch"
   | "connectors"
@@ -156,6 +245,7 @@ const CATEGORY_KEYS: Category[] = [
   "subagents",
   "mesh",
   "localmodels",
+  "compaction",
   "apikeys",
   "websearch",
   "connectors",
@@ -188,6 +278,7 @@ function SettingsNavIcon({ category }: { category: Category }) {
     case "apikeys": return <KeyRound {...props} />;
     case "websearch": return <Globe {...props} />;
     case "localmodels": return <Cpu {...props} />;
+    case "compaction": return <Minimize2 {...props} />;
     case "harnesses": return <TerminalSquare {...props} />;
     case "subagents": return <Users {...props} />;
     case "mesh": return <Network {...props} />;
@@ -232,6 +323,7 @@ const NAV_SECTIONS: Array<{ title: string; items: CategoryDef[] }> = [
       { key: "apikeys", label: "API Keys", sub: "Chat provider keys" },
       { key: "websearch", label: "Web Search", sub: "Keyless or BYO-key engine" },
       { key: "localmodels", label: "Local Models", sub: "GGUF via llama-server" },
+      { key: "compaction", label: "Compaction", sub: "Folding long context" },
     ],
   },
   {
@@ -293,7 +385,7 @@ function AppearancePanel() {
 
       <div className="settings-section">
         <div className="settings-section-title">Theme mode</div>
-        <p className="settings-section-hint">Choose how the app looks. System follows your OS appearance setting.</p>
+        <p className="settings-section-hint">System follows your OS appearance setting.</p>
         <div className="theme-card-grid">
           {THEME_CARDS.map((t) => (
             <button
@@ -332,17 +424,16 @@ function AppearancePanel() {
       {/* UI + mono font pickers. */}
       <FontSettingsPanel />
 
-      {/* Companion pet: the pixel mascot above the search + composer. Full
-          customization (name/species/hats) lives in the pet panel itself —
-          click the paw button beside the pet. */}
-      <CompanionPetSection />
+      {/* Bot pets: the six 3D companions a bot can wear. Assignment lives in
+          the bot editor — there is no global companion setting. */}
+      <BotPetsSection />
 
       <div className="settings-section">
         <div className="settings-section-title">Behavior</div>
         <div className="settings-toggle-row">
           <div className="settings-toggle-label">
             <span className="settings-toggle-name">Watch mode</span>
-            <span className="settings-toggle-desc">Visual pacing for browser actions (~600ms delay) so you can follow what the agent is doing. Only applies when the browser pane is visible.</span>
+            <span className="settings-toggle-desc">Slows browser actions (~600ms) so you can follow along; only applies when the browser pane is visible.</span>
           </div>
           <ToggleSwitch checked={watchMode} onChange={setWatchMode} />
         </div>
@@ -367,12 +458,12 @@ function NotificationsPanel() {
 
       <div className="settings-section">
         <div className="settings-section-title">System notifications</div>
-        <p className="settings-section-hint">Control how and when the app notifies you about agent activity.</p>
+        <p className="settings-section-hint">Control how the app notifies you about agent activity.</p>
 
         <div className="settings-toggle-row">
           <div className="settings-toggle-label">
             <span className="settings-toggle-name">Do Not Disturb</span>
-            <span className="settings-toggle-desc">Suppress OS notifications when agents finish. In-app badges still update so you can see results when you return.</span>
+            <span className="settings-toggle-desc">Suppress OS notifications when agents finish; in-app badges still update.</span>
           </div>
           <ToggleSwitch checked={dnd} onChange={setDnd} />
         </div>
@@ -380,7 +471,7 @@ function NotificationsPanel() {
         <div className="settings-toggle-row">
           <div className="settings-toggle-label">
             <span className="settings-toggle-name">Notification sound</span>
-            <span className="settings-toggle-desc">Play a subtle chime when a PTY notification fires.</span>
+            <span className="settings-toggle-desc">Play a chime when a PTY notification fires.</span>
           </div>
           <ToggleSwitch checked={notifySound} onChange={setNotifySound} />
         </div>
@@ -450,6 +541,24 @@ export function SettingsView() {
   const settingsCategory = useUiStore((s) => s.settingsCategory);
   const setSettingsCategory = useUiStore((s) => s.setSettingsCategory);
   const [category, setCategory] = useState<Category>("appearance");
+  // Shell-first render: the modal chrome (header + nav) commits on the first
+  // frame; the category PANEL — the heaviest part of the first mount, and the
+  // reason the very first Settings open cost ~130 ms — mounts one paint later.
+  // The window appears instantly and its content fills in a frame after, so the
+  // open stays smooth even on the cold (JIT-unwarmed) first open.
+  const [panelReady, setPanelReady] = useState(false);
+  useEffect(() => {
+    // Mount the panel one task after the post-commit effect, so the modal
+    // chrome paints first. A microtask (not rAF) keeps this deterministic for
+    // tests, whose `act()` flush drains it.
+    let cancelled = false;
+    Promise.resolve().then(() => {
+      if (!cancelled) setPanelReady(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   // Search filter for the nav (VS Code / Raycast pattern). Empty = grouped
   // nav; non-empty = flat filtered list hiding section titles.
   const [navQuery, setNavQuery] = useState("");
@@ -572,6 +681,8 @@ export function SettingsView() {
             </nav>
 
             <div className="settings-panel">
+              {panelReady && (
+                <>
               {category === "appearance" && <AppearancePanel />}
               {category === "notifications" && <NotificationsPanel />}
 
@@ -598,7 +709,7 @@ export function SettingsView() {
                     <div className="empty-reserved">
                       <span className="empty-icon">⏳</span>
                       <span className="empty-text">
-                        Detecting harnesses… This requires the desktop backend to be running.
+                        Detecting harnesses… requires the desktop backend.
                       </span>
                     </div>
                   ) : (
@@ -674,6 +785,7 @@ export function SettingsView() {
               )}
 
               {category === "localmodels" && <LocalModelsPanel />}
+              {category === "compaction" && <CompactionPanel />}
 
               {category === "subagents" && <SubagentModelPanel />}
 
@@ -700,6 +812,8 @@ export function SettingsView() {
               {category === "data" && <DataPanel />}
 
               {category === "remote" && <RemotePanel />}
+                </>
+              )}
             </div>
           </div>
         </div>
@@ -778,7 +892,7 @@ function AssistantPanel() {
               </span>
             </div>
             <div className="assistant-card-sub">
-              Sent at the start of every chat turn to shape tone, format and behavior.
+              Sent at the start of every chat turn.
             </div>
           </div>
           {hasPrompt && (
@@ -852,7 +966,7 @@ const SEARCH_PROVIDER_HELP: Record<string, string> = {
   tavily:
     "Agent-native search with news/recency filters. 1,000 free credits monthly — get a key at tavily.com.",
   brave:
-    "Independent web index. Metered (~$5/mo at hobby scale) — get a key at brave.com/search/api. Note: Brave's terms restrict caching, so Brave-only results are never stored locally.",
+    "Independent web index. Metered (~$5/mo at hobby scale) — get a key at brave.com/search/api. Brave-only results are never stored locally (terms restrict caching).",
 };
 
 function WebSearchPanel() {
@@ -969,9 +1083,8 @@ function WebSearchPanel() {
         </div>
       </div>
       <p className="settings-section-hint">
-        Keyless search merges DuckDuckGo, Mojeek and Wikipedia — free, no setup,
-        works offline of any account. A paid engine below upgrades the index
-        quality for research mode; Wikipedia stays as a supplement either way.
+        Keyless search merges DuckDuckGo, Mojeek and Wikipedia — free, no setup. A paid engine
+        upgrades the index quality for research mode; Wikipedia stays as a supplement either way.
       </p>
       {provider !== "" && (
         <div className="settings-form-row settings-form-row-pair">
@@ -1031,10 +1144,9 @@ function WebSearchPanel() {
         </div>
       </div>
       <p className="settings-section-hint">
-        Lets Anthropic run web searches on its own servers and return cited
-        results inline (replaces Relay’s keyless scraping in Anthropic chats;
-        usage bills on Anthropic’s side). Applies to native Anthropic API
-        chats only — other providers keep the engine above.
+        Lets Anthropic run web searches on its servers and return cited results
+        inline (bills on Anthropic's side). Native Anthropic API chats only —
+        other providers keep the engine above.
       </p>
       <div className="settings-form-row settings-form-row-pair">
         <div className="settings-form-field">
@@ -1057,10 +1169,9 @@ function WebSearchPanel() {
       </div>
       <p className="settings-section-hint">
         Sends <code>web_search_options</code> on native OpenAI chat requests so
-        search-preview models (e.g. gpt-4o-search-preview) run the search on
-        OpenAI’s servers instead of Relay scraping. Plain OpenAI models reject
-        the parameter — keep this off unless your model is a search-preview
-        one. Compatible endpoints and OpenRouter keep the engine above.
+        search-preview models (e.g. gpt-4o-search-preview) search on OpenAI's
+        servers. Plain OpenAI models reject the parameter — keep this off unless
+        your model is a search-preview one.
       </p>
     </>
   );

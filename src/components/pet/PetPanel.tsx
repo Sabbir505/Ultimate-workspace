@@ -28,7 +28,7 @@ import {
   type PetSpecies,
 } from "../../state/pet";
 
-const SPECIES: PetSpecies[] = ["cat", "axolotl", "robot"];
+const SPECIES: PetSpecies[] = ["cat", "axolotl", "robot", "fox", "panda", "dragon"] as PetSpecies[];
 const PANEL_W = 264;
 
 function HatChip({ hat }: { hat: PetHatKey }) {

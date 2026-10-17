@@ -8,6 +8,7 @@ import { DEFAULT_BROWSER_URL } from "../lib/browserHistory";
 import { parseThemeList, type CustomTheme } from "../lib/themes";
 import { DEFAULT_MONO_FONT, DEFAULT_UI_FONT } from "../lib/fonts";
 import { CLOUD_PROVIDER_IDS } from "../lib/agents";
+import { detectPetHardware, recommendedPetModes } from "../lib/pets/hardware";
 
 export type ThemeSetting = "light" | "dark" | "system";
 
@@ -47,6 +48,22 @@ const K_CLOUD_COMPACTION_THRESHOLD = "chat.cloud.compaction_threshold";
 const K_CLOUD_PIN_EXCHANGES = "chat.cloud.compaction_pin_exchanges";
 export const DEFAULT_CLOUD_COMPACTION_THRESHOLD = 0.75;
 export const DEFAULT_CLOUD_PIN_EXCHANGES = 6;
+
+// Idle compaction (advanced): proactively summarize long built-in threads the
+// user has stepped away from, so the next turn doesn't re-send the whole
+// history (mirrors Claude Code's idle compaction). The background sweep lives
+// in chat/idle_compact.rs and reads these same keys; defaults + clamps are
+// pinned in lockstep by compactionSettings.test.ts.
+const K_IDLE_COMPACTION_ENABLED = "chat.idle_compaction.enabled";
+const K_IDLE_COMPACTION_MINUTES = "chat.idle_compaction.idle_minutes";
+const K_IDLE_COMPACTION_MIN_TOKENS = "chat.idle_compaction.min_tokens";
+const K_IDLE_COMPACTION_MAX_PER_PASS = "chat.idle_compaction.max_per_pass";
+export const DEFAULT_IDLE_COMPACTION_ENABLED = true;
+export const DEFAULT_IDLE_COMPACTION_MINUTES = 60;
+export const DEFAULT_IDLE_COMPACTION_MIN_TOKENS = 200_000;
+export const DEFAULT_IDLE_COMPACTION_MAX_PER_PASS = 3;
+export const MIN_IDLE_COMPACTION_MINUTES = 5;
+export const MAX_IDLE_COMPACTION_MINUTES = 1440;
 
 // Cloud context-limit override: cap the EFFECTIVE window below what the
 // model advertises (cost control, or a remapped backend that serves less
@@ -91,6 +108,21 @@ export const APP_ZOOM_MAX = 2;
 // (--font-mono). Values are ids resolved to CSS stacks via lib/fonts.ts.
 const K_UI_FONT = "fonts.ui";
 const K_MONO_FONT = "fonts.mono";
+
+// 3D pet render + lighting (Settings → Appearance → Bot pets). The render mode
+// maps to PetStage's QUALITY presets (pixel ratio / shadows / fur / fps); the
+// lighting mode to its LIGHTING presets; the slider scales overall brightness.
+// Applied to the live stage by usePetStageSettings.
+export type PetMode = "auto" | "low" | "medium" | "high";
+const K_PET_RENDER_MODE = "pets.renderMode";
+const K_PET_LIGHTING_MODE = "pets.lightingMode";
+const K_PET_LIGHTING_INTENSITY = "pets.lightingIntensity";
+export const DEFAULT_PET_LIGHTING_INTENSITY = 1;
+export const PET_LIGHTING_MIN = 0.4;
+export const PET_LIGHTING_MAX = 1.8;
+function isPetMode(v: string | null | undefined): v is PetMode {
+  return v === "auto" || v === "low" || v === "medium" || v === "high";
+}
 
 // Per-provider curated model lists: provider id -> ordered entries with an
 // optional per-model context-window pin (0 = auto). A non-empty list IS the
@@ -177,6 +209,16 @@ interface SettingsState {
    *  (the model's own — dynamic where the API publishes it, registry else).
    *  A cap only SHRINKS; it never raises a model above its real window. */
   cloudContextLimit: number;
+  /** Idle compaction: master switch — background summarize of long idle
+   *  threads (chat.idle_compaction.enabled). */
+  idleCompactionEnabled: boolean;
+  /** Idle compaction: idle age in minutes before a thread becomes a candidate. */
+  idleCompactionMinutes: number;
+  /** Idle compaction: active-history token floor below which a thread is left
+   *  alone (the cost gate; mirrors Claude Code's 200k default). */
+  idleCompactionMinTokens: number;
+  /** Idle compaction: maximum threads compacted per 60s sweep. */
+  idleCompactionMaxPerPass: number;
   /** Auto model routing cost/quality preference: "quality" | "balanced"
    *  | "economy" (the Auto pane footer in the composer picker). */
   autoBias: "quality" | "balanced" | "economy";
@@ -204,6 +246,14 @@ interface SettingsState {
   uiFont: string;
   /** Mono font family id (lib/fonts.ts MONO_FONT_OPTIONS) — code + terminals. */
   monoFont: string;
+  /** 3D pet render quality (PetStage QUALITY presets). "auto" lets the engine's
+   *  governor step down when frames get slow. */
+  petRenderMode: PetMode;
+  /** 3D pet lighting preset (PetStage LIGHTING presets). "auto" tracks the
+   *  render-quality level. */
+  petLightingMode: PetMode;
+  /** Overall pet lighting brightness multiplier (PET_LIGHTING_MIN–MAX). */
+  petLightingIntensity: number;
 
   load: () => Promise<void>;
   setTheme: (theme: ThemeSetting) => void;
@@ -242,6 +292,14 @@ interface SettingsState {
   setCloudCompactionThreshold: (threshold: number) => void;
   setCloudPinExchanges: (exchanges: number) => void;
   setCloudContextLimit: (limit: number) => void;
+  /** Toggle idle compaction (persisted as chat.idle_compaction.enabled). */
+  setIdleCompactionEnabled: (enabled: boolean) => void;
+  /** Set the idle-age threshold in minutes (clamped 5–1440). */
+  setIdleCompactionMinutes: (minutes: number) => void;
+  /** Set the active-history token floor (clamped 1k–5M). */
+  setIdleCompactionMinTokens: (tokens: number) => void;
+  /** Set the per-sweep compaction cap (clamped 1–50). */
+  setIdleCompactionMaxPerPass: (count: number) => void;
   /** Replace a provider's curated model list (persisted + in-memory). */
   setProviderModels: (provider: string, models: ProviderModelEntry[]) => void;
   /** The pinned window for a specific provider+model, 0 when unset. */
@@ -256,6 +314,12 @@ interface SettingsState {
   setUiFont: (id: string) => void;
   /** Set the mono font family id and persist it. */
   setMonoFont: (id: string) => void;
+  /** Set the 3D pet render quality and persist it. */
+  setPetRenderMode: (mode: PetMode) => void;
+  /** Set the 3D pet lighting preset and persist it. */
+  setPetLightingMode: (mode: PetMode) => void;
+  /** Set the pet lighting brightness (clamped to PET_LIGHTING_MIN–MAX) and persist it. */
+  setPetLightingIntensity: (value: number) => void;
 }
 
 /** Fire-and-forget persistence write. The in-memory store is authoritative,
@@ -293,6 +357,10 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   cloudCompactionThreshold: DEFAULT_CLOUD_COMPACTION_THRESHOLD,
   cloudPinExchanges: DEFAULT_CLOUD_PIN_EXCHANGES,
   cloudContextLimit: 0,
+  idleCompactionEnabled: DEFAULT_IDLE_COMPACTION_ENABLED,
+  idleCompactionMinutes: DEFAULT_IDLE_COMPACTION_MINUTES,
+  idleCompactionMinTokens: DEFAULT_IDLE_COMPACTION_MIN_TOKENS,
+  idleCompactionMaxPerPass: DEFAULT_IDLE_COMPACTION_MAX_PER_PASS,
   autoBias: "balanced",
   subagentModel: "",
   composerPredictions: true,
@@ -304,9 +372,12 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   appZoom: DEFAULT_APP_ZOOM,
   uiFont: DEFAULT_UI_FONT,
   monoFont: DEFAULT_MONO_FONT,
+  petRenderMode: "auto",
+  petLightingMode: "auto",
+  petLightingIntensity: DEFAULT_PET_LIGHTING_INTENSITY,
 
   load: async () => {
-    const [theme, dnd, notifySound, watchMode, kbJson, urlsJson, paneStateJson, threshold, pin, themesJson, customThemeId, worktreeDefault, checkpointsEnabled, cloudEnabled, cloudThreshold, cloudPin, summarizer, rebuildRaw, cloudContextLimit, autoBiasRaw, chatZoomRaw, appZoomRaw, uiFontRaw, monoFontRaw, subagentModelRaw, composerPredictionsRaw, composerPredictionsModelRaw] = await Promise.all([
+    const [theme, dnd, notifySound, watchMode, kbJson, urlsJson, paneStateJson, threshold, pin, themesJson, customThemeId, worktreeDefault, checkpointsEnabled, cloudEnabled, cloudThreshold, cloudPin, summarizer, rebuildRaw, cloudContextLimit, autoBiasRaw, chatZoomRaw, appZoomRaw, uiFontRaw, monoFontRaw, subagentModelRaw, composerPredictionsRaw, composerPredictionsModelRaw, petRenderRaw, petLightingRaw, petLightingIntensityRaw, idleEnabled, idleMinutes, idleMinTokens, idleMaxPerPass] = await Promise.all([
       getSetting(K_THEME),
       getSetting(K_DND),
       getSetting(K_NOTIFY_SOUND),
@@ -334,6 +405,13 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       getSetting(K_SUBAGENT_MODEL),
       getSetting(K_COMPOSER_PREDICTIONS),
       getSetting(K_COMPOSER_PREDICTIONS_MODEL),
+      getSetting(K_PET_RENDER_MODE),
+      getSetting(K_PET_LIGHTING_MODE),
+      getSetting(K_PET_LIGHTING_INTENSITY),
+      getSetting(K_IDLE_COMPACTION_ENABLED),
+      getSetting(K_IDLE_COMPACTION_MINUTES),
+      getSetting(K_IDLE_COMPACTION_MIN_TOKENS),
+      getSetting(K_IDLE_COMPACTION_MAX_PER_PASS),
     ]);
     // Per-provider curated model lists: the index names the providers that
     // have one; each list is then read from its own key. A missing or
@@ -367,6 +445,13 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         } catch { /* skip malformed list */ }
       }
     } catch { /* no index — nothing curated */ }
+    // Hardware-recommended pet presets — only probed when a mode was never
+    // stored, so an explicit user choice is never overridden and a settled
+    // machine pays for no extra GL probe on later boots.
+    const petHardware =
+      petRenderRaw == null || petLightingRaw == null
+        ? recommendedPetModes(detectPetHardware())
+        : { render: "auto" as PetMode, lighting: "auto" as PetMode };
     set((state) => {
       const next = { ...state, loaded: true };
       if (theme === "light" || theme === "dark" || theme === "system") next.theme = theme;
@@ -449,6 +534,25 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         const v = Number(cloudPin);
         if (Number.isInteger(v) && v >= 1 && v <= 50) next.cloudPinExchanges = v;
       }
+      // Idle compaction: same forgiving/clamping contract as the Rust loader.
+      // Default ON — only the literal "false" disables.
+      if (idleEnabled != null) {
+        next.idleCompactionEnabled = !["false", "0", "off"].includes(idleEnabled.trim());
+      }
+      if (idleMinutes) {
+        const v = Number(idleMinutes);
+        if (Number.isInteger(v) && v >= MIN_IDLE_COMPACTION_MINUTES && v <= MAX_IDLE_COMPACTION_MINUTES) {
+          next.idleCompactionMinutes = v;
+        }
+      }
+      if (idleMinTokens) {
+        const v = Number(idleMinTokens);
+        if (Number.isInteger(v) && v >= 1_000 && v <= 5_000_000) next.idleCompactionMinTokens = v;
+      }
+      if (idleMaxPerPass) {
+        const v = Number(idleMaxPerPass);
+        if (Number.isInteger(v) && v >= 1 && v <= 50) next.idleCompactionMaxPerPass = v;
+      }
       if (autoBiasRaw === "economy" || autoBiasRaw === "quality" || autoBiasRaw === "balanced") {
         next.autoBias = autoBiasRaw;
       }
@@ -469,6 +573,26 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       }
       if (uiFontRaw) next.uiFont = uiFontRaw;
       if (monoFontRaw) next.monoFont = monoFontRaw;
+      // Pet 3D render + lighting. A value the user has never set falls back to
+      // the HARDWARE-RECOMMENDED tier (probe: GPU string + cores + memory), so
+      // a weak machine starts on a preset it can actually push; unknown values
+      // keep the "auto" default.
+      if (isPetMode(petRenderRaw)) {
+        next.petRenderMode = petRenderRaw;
+      } else if (petRenderRaw == null) {
+        next.petRenderMode = petHardware.render;
+      }
+      if (isPetMode(petLightingRaw)) {
+        next.petLightingMode = petLightingRaw;
+      } else if (petLightingRaw == null) {
+        next.petLightingMode = petHardware.lighting;
+      }
+      if (petLightingIntensityRaw) {
+        const v = Number(petLightingIntensityRaw);
+        if (Number.isFinite(v) && v >= PET_LIGHTING_MIN && v <= PET_LIGHTING_MAX) {
+          next.petLightingIntensity = v;
+        }
+      }
       return next;
     });
   },
@@ -642,6 +766,29 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     persistSetting(K_CLOUD_CONTEXT_LIMIT, String(v));
   },
 
+  setIdleCompactionEnabled: (enabled) => {
+    set({ idleCompactionEnabled: enabled });
+    persistSetting(K_IDLE_COMPACTION_ENABLED, String(enabled));
+  },
+
+  setIdleCompactionMinutes: (minutes) => {
+    if (!Number.isInteger(minutes) || minutes < MIN_IDLE_COMPACTION_MINUTES || minutes > MAX_IDLE_COMPACTION_MINUTES) return;
+    set({ idleCompactionMinutes: minutes });
+    persistSetting(K_IDLE_COMPACTION_MINUTES, String(minutes));
+  },
+
+  setIdleCompactionMinTokens: (tokens) => {
+    if (!Number.isInteger(tokens) || tokens < 1_000 || tokens > 5_000_000) return;
+    set({ idleCompactionMinTokens: tokens });
+    persistSetting(K_IDLE_COMPACTION_MIN_TOKENS, String(tokens));
+  },
+
+  setIdleCompactionMaxPerPass: (count) => {
+    if (!Number.isInteger(count) || count < 1 || count > 50) return;
+    set({ idleCompactionMaxPerPass: count });
+    persistSetting(K_IDLE_COMPACTION_MAX_PER_PASS, String(count));
+  },
+
   setProviderModels: (provider, models) => {
     const cleaned = models
       .filter((e) => e && typeof e.id === "string" && e.id.trim())
@@ -707,5 +854,21 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   setMonoFont: (id) => {
     set({ monoFont: id });
     persistSetting(K_MONO_FONT, id);
+  },
+
+  setPetRenderMode: (mode) => {
+    set({ petRenderMode: mode });
+    persistSetting(K_PET_RENDER_MODE, mode);
+  },
+
+  setPetLightingMode: (mode) => {
+    set({ petLightingMode: mode });
+    persistSetting(K_PET_LIGHTING_MODE, mode);
+  },
+
+  setPetLightingIntensity: (value) => {
+    const clamped = Math.max(PET_LIGHTING_MIN, Math.min(PET_LIGHTING_MAX, value));
+    set({ petLightingIntensity: clamped });
+    persistSetting(K_PET_LIGHTING_INTENSITY, String(clamped));
   },
 }));

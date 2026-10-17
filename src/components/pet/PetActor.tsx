@@ -1,10 +1,16 @@
-// PetActor — renders the companion pet: one mood-driven animation frame of
-// the species sprite sheet, facing left/right, with the cosmetic hat overlay,
-// the active speech bubble, dozing Zzz and petting hearts.
+// PetActor — renders the companion pet: a real 3D animal (src/lib/pets) in
+// the six species the pets ship with, with the active speech bubble, dozing
+// Zzz, petting hearts and level-up confetti layered around it.
 //
-// Frame timing runs on a 100ms local clock (well under the slowest sheet fps)
-// so both pet homes and the panel preview stay in sync off store state alone.
-// `prefers-reduced-motion` freezes the frame at 0 — moods still change poses.
+// The sprite-sheet renderer is still here as the FALLBACK: jsdom (tests) and
+// machines without WebGL get the 2D sprite exactly as before, and the three
+// species without a sheet (fox / panda / dragon) draw an emoji chip there.
+// Hats are a sprite cosmetic — they render in the fallback only.
+//
+// Frame timing for the fallback runs on a 100ms local clock (well under the
+// slowest sheet fps) so both pet homes and the panel preview stay in sync off
+// store state alone. `prefers-reduced-motion` freezes the fallback's frame at
+// 0 — moods still change poses.
 import { useEffect, useRef, useState } from "react";
 
 import {
@@ -19,6 +25,10 @@ import {
   type PetHatKey,
 } from "../../lib/pets/manifest";
 import { usePetStore, type PetMood } from "../../state/pet";
+import { PET_EMOJI } from "../../lib/pets/manifest";
+import { PetAvatar } from "./PetAvatar";
+import { webglAvailable } from "../../lib/pets/stage";
+import type { PetState as EnginePetState } from "../../lib/pets/stage";
 
 export const PET_SCALE = 3;
 const SIZE = PET_FRAME * PET_SCALE;
@@ -38,6 +48,35 @@ const MOOD_ANIM: Record<PetMood, PetAnimKey> = {
   focus: "idle",
   caught: "happy", // dangling in the hand — the paws-up row + the carrier's wriggle
 };
+
+/** Mood → what the 3D pet should be doing. `watching`/`focus` read as idle
+ *  (the engine's idle already glances around); `concerned` sits close to
+ *  idle too — there is no worried state in the engine. */
+const MOOD_STATE: Record<PetMood, EnginePetState> = {
+  idle: "idle",
+  walk: "strolling",
+  watching: "idle",
+  work: "working",
+  celebrate: "celebrating",
+  concerned: "idle",
+  doze: "sleeping",
+  happy: "celebrating",
+  zoomies: "strolling",
+  focus: "idle",
+  caught: "strolling",
+};
+
+/** Whether the 3D renderer is live for this webview. Computed once per module
+ *  load: a webview that has WebGL today will have it for the session, and the
+ *  probe is cheap but not free. */
+let cached3d: boolean | null = null;
+function use3d(): boolean {
+  const [ok] = useState(() => {
+    if (cached3d === null) cached3d = webglAvailable();
+    return cached3d;
+  });
+  return ok;
+}
 
 function useReducedMotion(): boolean {
   const [reduced, setReduced] = useState(() => {
@@ -83,6 +122,7 @@ export function PetActor({ animOverride }: { animOverride?: "teleout" | "telein"
   const phase = useRef({ mood, at: now });
   if (phase.current.mood !== mood) phase.current = { mood, at: now };
 
+  const threeD = use3d();
   const def = PET_SPECIES[species];
   const anim = PET_ANIMS[animOverride ?? MOOD_ANIM[mood]];
   const elapsed = now - phase.current.at;
@@ -142,19 +182,41 @@ export function PetActor({ animOverride }: { animOverride?: "teleout" | "telein"
 
   return (
     <div className="pet-actor" data-mood={mood} title={name}>
-      <div
-        className="pet-sprite"
-        data-mood={mood}
-        style={{
-          width: SIZE,
-          height: SIZE,
-          backgroundImage: `url(${def.sheet})`,
-          backgroundSize: `${PET_SHEET_COLS * 100}% ${PET_SHEET_ROWS * 100}%`,
-          backgroundPosition: `${posX}% ${posY}%`,
-          transform: facing === -1 ? "scaleX(-1)" : undefined,
-        }}
-      />
-      {hatStyle && <div className="pet-hat" style={hatStyle} />}
+      {threeD ? (
+        /* The living pet. Size matches the sprite box so every layout that
+           ever measured the actor keeps measuring the same box. */
+        <PetAvatar
+          species={species}
+          size={SIZE}
+          state={animOverride === "teleout" ? "sleeping" : MOOD_STATE[mood]}
+          className="pet-actor-3d"
+        />
+      ) : def.sheet ? (
+        <div
+          className="pet-sprite"
+          data-mood={mood}
+          style={{
+            width: SIZE,
+            height: SIZE,
+            backgroundImage: `url(${def.sheet})`,
+            backgroundSize: `${PET_SHEET_COLS * 100}% ${PET_SHEET_ROWS * 100}%`,
+            backgroundPosition: `${posX}% ${posY}%`,
+            transform: facing === -1 ? "scaleX(-1)" : undefined,
+          }}
+        />
+      ) : (
+        /* A sheetless species on the fallback renderer: an emoji chip in the
+           same box (fox / panda / dragon have no sprite sheet). */
+        <div
+          className="pet-sprite pet-sprite-emoji"
+          data-mood={mood}
+          style={{ width: SIZE, height: SIZE, fontSize: SIZE * 0.62 }}
+          aria-hidden
+        >
+          {PET_EMOJI[species] ?? "🐾"}
+        </div>
+      )}
+      {!threeD && hatStyle && <div className="pet-hat" style={hatStyle} />}
       {/* Hit box hugs the art, not the 16×16 frame — so the pet never swallows
           clicks meant for things it overlaps (the paw button, the search). */}
       <div className="pet-hit" />
@@ -188,21 +250,12 @@ export function PetActor({ animOverride }: { animOverride?: "teleout" | "telein"
   );
 }
 
-/** A static (frame 0, facing right) miniature for panel pickers. */
+/** A still miniature for panel pickers: the real 3D pet when the stage is up
+ *  (it is, on every desktop with WebGL), an emoji chip when it is not. */
 export function PetActorMini({ species, size = 32 }: { species: PetActorSpecies; size?: number }) {
-  const def = PET_SPECIES[species];
   return (
     <div className="pet-actor" style={{ width: size, height: size }}>
-      <div
-        className="pet-sprite"
-        style={{
-          width: size,
-          height: size,
-          backgroundImage: `url(${def.sheet})`,
-          backgroundSize: `${PET_SHEET_COLS * 100}% ${PET_SHEET_ROWS * 100}%`,
-          backgroundPosition: "0% 0%",
-        }}
-      />
+      <PetAvatar species={species} size={size} className="pet-actor-mini-3d" />
     </div>
   );
 }
@@ -228,6 +281,28 @@ export function AnimatedSprite({
   const def = PET_SPECIES[species];
   const anim = PET_ANIMS[MOOD_ANIM[mood]];
   const frame = Math.floor((now - phase.current.at) / (1000 / anim.fps)) % anim.frames;
+  const threeD = use3d();
+  if (threeD) {
+    return (
+      <PetAvatar
+        species={species}
+        size={size}
+        state={MOOD_STATE[mood]}
+        className="pet-actor-animated-3d"
+      />
+    );
+  }
+  if (!def.sheet) {
+    return (
+      <span
+        className="pet-sprite pet-sprite-emoji"
+        style={{ position: "relative", inset: "auto", width: size, height: size, fontSize: size * 0.62 }}
+        aria-hidden
+      >
+        {PET_EMOJI[species] ?? "🐾"}
+      </span>
+    );
+  }
   return (
     <div
       className="pet-sprite"

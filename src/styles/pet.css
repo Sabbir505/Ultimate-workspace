@@ -653,37 +653,202 @@ button.pet-panel-pet-btn:active { transform: scale(0.94); }
 }
 .pet-panel-close:hover { color: inherit; background: rgba(120, 128, 148, 0.14); }
 
-/* ── Settings preview row: the three pets mid-animation ───────────────── */
-.pet-settings-previews {
+/* ── Settings: LIVE 3D pet preview (the six companions) ───────────────── */
+.pet-preview-grid {
+  position: relative;
   display: flex;
-  gap: 10px;
-  margin: 10px 0 12px;
   flex-wrap: wrap;
+  gap: 10px;
+  margin: 12px 0 4px;
 }
-.pet-settings-preview {
+/* The preview canvas fills the grid and sits ABOVE the cell backgrounds but
+   BELOW the captions — the pets are scissored into each .pet-preview-slot. */
+.pet-preview-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 1;
+  pointer-events: none;
+}
+.pet-preview-cell {
+  position: relative;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 2px;
-  padding: 10px 16px 6px;
+  gap: 0;
   margin: 0;
-  border-radius: 10px;
+  padding: 6px 10px 4px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
   background:
-    linear-gradient(45deg, rgba(120, 128, 148, 0.07) 25%, transparent 25%, transparent 75%, rgba(120, 128, 148, 0.07) 75%),
-    linear-gradient(45deg, rgba(120, 128, 148, 0.07) 25%, transparent 25%, transparent 75%, rgba(120, 128, 148, 0.07) 75%);
-  background-size: 12px 12px;
-  background-position: 0 0, 6px 6px;
-  border: 1px solid rgba(120, 128, 148, 0.2);
+    radial-gradient(120% 90% at 50% 12%, color-mix(in srgb, var(--surface-glass-2) 70%, transparent), transparent 70%),
+    linear-gradient(45deg, rgba(120, 128, 148, 0.06) 25%, transparent 25%, transparent 75%, rgba(120, 128, 148, 0.06) 75%),
+    linear-gradient(45deg, rgba(120, 128, 148, 0.06) 25%, transparent 25%, transparent 75%, rgba(120, 128, 148, 0.06) 75%);
+  background-size: auto, 12px 12px, 12px 12px;
+  background-position: 0 0, 0 0, 6px 6px;
+  transition: border-color 0.15s var(--ease);
 }
-.pet-settings-preview .pet-sprite {
-  image-rendering: pixelated;
+.pet-preview-cell:hover {
+  border-color: var(--border-strong);
 }
-.pet-settings-preview figcaption {
-  font-size: 10px;
-  color: #8a92a8;
+.pet-preview-slot {
+  display: block;
+  width: 84px;
+  height: 78px;
 }
-[data-theme="dark"] .pet-settings-preview figcaption {
-  color: #9aa3ba;
+.pet-preview-cell figcaption {
+  position: relative;
+  z-index: 2;
+  margin-top: -2px;
+  font-size: 11px;
+  color: var(--text-dim);
+  text-transform: capitalize;
+}
+/* Flat fallback (no WebGL): the chip stands in for the 3D pet. */
+.pet-preview-grid.is-flat .pet-preview-cell {
+  padding-bottom: 8px;
+}
+.pet-preview-grid.is-flat .pet-preview-cell .pet-avatar.is-flat .pet-avatar-fallback {
+  opacity: 1;
+  line-height: 1;
+}
+.pet-preview-caption {
+  margin: 2px 0 14px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+/* ── Settings: pet render + lighting controls ─────────────────────────── */
+.pet-hw-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0 2px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+.pet-hw-note > svg {
+  flex: 0 0 auto;
+  opacity: 0.8;
+}
+.pet-hw-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pet-hw-text b {
+  color: var(--text);
+  font-weight: 600;
+}
+.pet-hw-apply {
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  font-size: 11.5px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.15s var(--ease), border-color 0.15s var(--ease);
+}
+.pet-hw-apply:hover {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+.pet-render-card {
+  display: flex;
+  flex-direction: column;
+  padding: 4px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--glass-card-2, var(--surface-2));
+}
+.pet-render-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+.pet-render-row:last-child {
+  border-bottom: none;
+}
+.pet-render-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.pet-render-label {
+  font-size: 12.5px;
+  color: var(--text);
+}
+.pet-render-desc {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.pet-mode-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+.pet-mode-chip {
+  padding: 5px 12px;
+  font-size: 12px;
+  color: var(--text-dim);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.15s var(--ease), border-color 0.15s var(--ease), color 0.15s var(--ease);
+}
+.pet-mode-chip:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+.pet-mode-chip.active {
+  color: var(--text);
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+.pet-light-slider {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  width: 240px;
+  max-width: 46%;
+}
+.pet-light-slider input[type="range"] {
+  flex: 1;
+  height: 4px;
+  accent-color: var(--accent);
+}
+.pet-light-icon {
+  flex: 0 0 auto;
+  color: var(--text-dim);
+}
+.pet-light-icon.dim {
+  opacity: 0.55;
+}
+.pet-light-value {
+  width: 38px;
+  text-align: right;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.pet-render-note {
+  margin-top: 10px;
 }
 
 /* ── Focus buddy ───────────────────────────────────────────────────────── */

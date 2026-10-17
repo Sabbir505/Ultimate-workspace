@@ -44,10 +44,34 @@ export interface PetSpeciesDef {
   defaultName: string;
 }
 
-export const PET_SPECIES: Record<"cat" | "axolotl" | "robot", PetSpeciesDef> = {
+/**
+ * The six species the pets ship with (src/lib/pets/adePets.ts renders them in
+ * 3D). The three newer ones have no sprite sheet: `sheet: ""` means the
+ *  sprite-based fallbacks (PetActorMini / AnimatedSprite) draw the emoji chip
+ *  instead — everything that matters goes through the 3D stage, which covers
+ *  all six identically.
+ */
+export const PET_SPECIES: Record<
+  "cat" | "axolotl" | "robot" | "fox" | "panda" | "dragon",
+  PetSpeciesDef
+> = {
   cat: { sheet: "/pets/cat.png", hatAnchor: { x: 8, y: 2 }, hatAnchorDoze: { x: 8, y: 8 }, hatAnchorCelebrate: { x: 8, y: 5 }, defaultName: "Mochi" },
   axolotl: { sheet: "/pets/axolotl.png", hatAnchor: { x: 8, y: 3 }, hatAnchorDoze: { x: 8, y: 8 }, hatAnchorCelebrate: { x: 8, y: 6 }, defaultName: "Bloop" },
   robot: { sheet: "/pets/robot.png", hatAnchor: { x: 8, y: 1 }, hatAnchorDoze: { x: 8, y: 6 }, hatAnchorCelebrate: { x: 8, y: 4 }, defaultName: "Bolt" },
+  fox: { sheet: "", hatAnchor: { x: 8, y: 3 }, hatAnchorDoze: { x: 8, y: 8 }, hatAnchorCelebrate: { x: 8, y: 6 }, defaultName: "Rusty" },
+  panda: { sheet: "", hatAnchor: { x: 8, y: 2 }, hatAnchorDoze: { x: 8, y: 8 }, hatAnchorCelebrate: { x: 8, y: 5 }, defaultName: "Bao" },
+  dragon: { sheet: "", hatAnchor: { x: 8, y: 3 }, hatAnchorDoze: { x: 8, y: 8 }, hatAnchorCelebrate: { x: 8, y: 5 }, defaultName: "Ember" },
+};
+
+/** Emoji per species — the fallback chip everywhere 3D or sprites are
+ *  unavailable. */
+export const PET_EMOJI: Record<string, string> = {
+  cat: "🐱",
+  axolotl: "🦎",
+  robot: "🤖",
+  fox: "🦊",
+  panda: "🐼",
+  dragon: "🐲",
 };
 
 export const PET_HATS = {

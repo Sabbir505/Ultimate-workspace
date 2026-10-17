@@ -118,8 +118,7 @@ const handleRemove = async (id: string) => {
           <div className="perm-info-title">Skip the approval prompt for trusted paths</div>
           <div className="perm-info-body">
             A rule auto-runs a filesystem tool when its name AND the target path glob match.
-            Deletes and moves stay bounded by project scope — a rule can never grant access outside
-            your enabled directories.
+            Rules never grant access outside your enabled directories.
           </div>
         </div>
       </div>
@@ -189,8 +188,7 @@ const handleRemove = async (id: string) => {
         <div className="empty-reserved">
           <ShieldOff className="empty-icon" size={22} />
           <div className="empty-text">
-            No approval rules yet. Add one above, or use the "Always allow" box on an approval card
-            to capture it from a live request.
+            No approval rules yet. Add one above, or use the "Always allow" box on an approval card.
           </div>
         </div>
       ) : (

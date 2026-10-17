@@ -35,11 +35,10 @@ export function MeshPanel() {
     <div className="settings-panel" data-testid="mesh-panel">
       <h2>Session Mesh</h2>
       <p className="settings-sub">
-        Cross-session awareness: every chat (built-in and CLI harness) can list, read, and
-        search the other sessions, message them, and spawn child sessions — through the
-        <code className="mono"> relay-tools </code> MCP bridge, with hard caps and a full
-        mail audit trail. The mesh rail in the git sidebar shows incoming mail and spawned
-        children.
+        Every chat (built-in and CLI harness) can list, read, and search other sessions,
+        message them, and spawn children via the
+        <code className="mono"> relay-tools </code> MCP bridge. The mesh rail in the git
+        sidebar shows incoming mail and spawned children.
       </p>
 
       <section className="improve-engine" aria-label="Session Mesh switch">
@@ -51,7 +50,7 @@ export function MeshPanel() {
                 ? "Loading…"
                 : enabled
                   ? "On — sessions advertise peers and accept mesh mail."
-                  : "Off — the mesh tools report disabled and no mail is accepted."}
+                  : "Off — mesh tools report disabled and no mail is accepted."}
             </span>
           </div>
           <button
@@ -71,10 +70,10 @@ export function MeshPanel() {
       <section className="settings-card" style={{ padding: 16, borderRadius: 8 }} aria-label="Mesh hooks">
         <h3>Mesh hooks</h3>
         <p className="settings-note">
-          Two lifecycle hook events fire for mesh traffic (configure them under
-          Hooks): <code className="mono">mesh_message</code> when a mesh mail is
-          delivered into a session, and <code className="mono">mesh_turn_complete</code>{" "}
-          when the watched turn ends (answered or expired). Payloads carry{" "}
+          Two lifecycle hooks fire for mesh traffic (configure under Hooks):{" "}
+          <code className="mono">mesh_message</code> when mail is delivered, and{" "}
+          <code className="mono">mesh_turn_complete</code>{" "}
+          when the watched turn ends. Payloads carry{" "}
           <code className="mono">from_session</code>, <code className="mono">mail_id</code>,{" "}
           <code className="mono">mode</code>, and a reply preview.
         </p>
@@ -92,16 +91,15 @@ export function MeshPanel() {
         <p className="settings-note">
           8k chars per mail · 10 mails/hour per sender · queue depth 5 · spawn depth 2 ·
           3 children per parent per day · 8 active spawned sessions. Plans can't be
-          approved through the mesh, and write tools stay behind the normal approval
-          gate.
+          approved through the mesh; write tools stay gated.
         </p>
       </section>
 
       <section className="settings-card" style={{ padding: 16, borderRadius: 8 }} aria-label="Spawned session model">
         <h3>Spawned-session model</h3>
         <p className="settings-note">
-          Mesh-spawned children run on the orchestration default configured under
-          Subagents — not the parent's own model.
+          Mesh-spawned children run on the orchestration default under Subagents,
+          not the parent's model.
         </p>
         <button
           className="ghost"

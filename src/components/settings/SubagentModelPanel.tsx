@@ -176,12 +176,9 @@ export function SubagentModelPanel() {
       <div className="settings-section">
         <div className="settings-section-title">Default model for spawned agents</div>
         <p className="muted" style={{ marginTop: 0 }}>
-          Task subagents and chat sessions spawned through the Session Mesh run
-          on this model (or CLI engine + model) instead of the parent chat's
-          own — e.g. a cheap model for mechanical sub-work while you keep a
-          frontier model for the main conversation, or spawned work on Claude
-          Code while you chat through the API. The agent can still pick a
-          per-task model itself; that choice wins over this default.
+          Task subagents and Session Mesh–spawned sessions run on this model (or
+          CLI engine + model) instead of the parent chat's. An agent can still
+          pick a per-task model, which wins over this default.
         </p>
 
         <div className="settings-row" style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -245,15 +242,15 @@ export function SubagentModelPanel() {
 
         <span className="muted" style={{ display: "block", marginTop: 8 }}>
           {source === "inherit" &&
-            "Subagents run on whichever model the parent chat uses (today's behavior)."}
+            "Subagents run on whichever model the parent chat uses."}
           {source === "bare" &&
-            "Keeps each chat's own provider and runs subagents on this model id. Harness CLIs read it as their own --model value."}
+            "Keeps each chat's own provider and runs subagents on this model id."}
           {groupOf(source) === "harness" &&
-            "Spawned sessions run on this CLI engine + model no matter what the parent chat runs — a cheap-harness worker alongside a frontier-model main chat. Built-in Task subagents can't launch CLIs; they keep API models and only mesh-spawned sessions take this pick."}
+            "Spawned sessions run on this CLI engine + model regardless of the parent chat. Built-in Task subagents can't launch CLIs and only take API models."}
           {groupOf(source) === "api" &&
-            "Cross-provider picks need an API key saved for that provider (Settings → API Keys); without one the parent's model is used instead. CLI-harness children keep their own provider and ignore this pick."}
+            "Cross-provider picks need an API key saved for that provider (Settings → API Keys); without one the parent's model is used."}
           {groupOf(source) === "local" &&
-            "Runs spawned sessions on the local sidecar — the model must be loaded (or loadable) in Settings → Local Models when the spawn fires; otherwise the parent's model is used. CLI-harness children ignore this pick."}
+            "Runs spawned sessions on the local sidecar; the model must be loaded (or loadable) when the spawn fires, or the parent's model is used."}
         </span>
       </div>
 
@@ -264,7 +261,7 @@ export function SubagentModelPanel() {
             <tr>
               <td>1 · Per-task choice</td>
               <td className="muted">
-                The agent passes <code>model</code> on its task/spawn tool call.
+                The agent passes <code>model</code> on its task/spawn call.
               </td>
             </tr>
             <tr>
@@ -274,7 +271,7 @@ export function SubagentModelPanel() {
             <tr>
               <td>3 · Parent's model</td>
               <td className="muted">
-                Whatever the chat that spawned the work is running.
+                The model the spawning chat is running.
               </td>
             </tr>
           </tbody>

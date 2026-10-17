@@ -85,7 +85,7 @@ function TestReport({ report }: { report: HookTestReport }) {
   if (report.gateDenied) {
     return (
       <div className="settings-note" style={{ color: "var(--danger, #f85149)" }}>
-        Not allowed to run — the exec-gate dialog was dismissed. Allow it to trust this hook.
+        Not allowed to run — the exec-gate dialog was dismissed.
       </div>
     );
   }
@@ -95,7 +95,7 @@ function TestReport({ report }: { report: HookTestReport }) {
   if (report.spawnFailed) {
     return (
       <div className="settings-note" style={{ color: "var(--danger, #f85149)" }}>
-        Failed to start — check the command (does the executable exist, is it on PATH?).
+        Failed to start — check the command exists and is on PATH.
       </div>
     );
   }
@@ -288,12 +288,10 @@ export function HooksPanel() {
             A <span className="mono">before</span> hook can block a tool call (exit 2, or JSON
             {" "}<span className="mono">{`{"decision":"deny"}`}</span> on stdout), request approval, or rewrite
             arguments (<span className="mono">updatedInput</span>). An <span className="mono">after</span> hook can
-            annotate the result (<span className="mono">additionalContext</span>). The command receives one JSON
-            event on stdin and runs directly — never through a shell. The first run of each command asks via a
-            native dialog. Leave the origin checkboxes empty to run everywhere, or pick the origins a hook
-            should fire for — scoping a <span className="mono">before</span> hook to a subagent
-            (<span className="mono">agent:&lt;id&gt;</span>) is the guardrail for agents Relay can't otherwise
-            restrain.
+            annotate the result (<span className="mono">additionalContext</span>). The command gets one JSON event
+            on stdin, never through a shell; the first run asks via a native dialog. Leave origins empty to run
+            everywhere, or scope a <span className="mono">before</span> hook to a subagent
+            (<span className="mono">agent:&lt;id&gt;</span>).
           </div>
         </div>
       </div>
@@ -395,8 +393,7 @@ export function HooksPanel() {
         <div className="perm-add-row">
           {isLifecycle(draft.event) ? (
             <div className="settings-note" style={{ flex: 1 }}>
-              Fires for every turn, whoever started it — turn/session events carry no
-              origin, so they are always global.
+              Fires for every turn — turn/session events carry no origin, so they are always global.
             </div>
           ) : (
             <>
@@ -465,8 +462,7 @@ export function HooksPanel() {
         <div className="empty-reserved">
           <Zap className="empty-icon" size={22} />
           <div className="empty-text">
-            No hooks yet. Add one above — for example a formatter that runs after every edit, or a
-            guard that blocks writes to protected paths.
+            No hooks yet. Add one above — for example a formatter that runs after every edit.
           </div>
         </div>
       ) : (

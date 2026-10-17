@@ -12,6 +12,7 @@ import { CostQualityPanel } from "./CostQualityPanel";
 import { BudgetPanel } from "./BudgetPanel";
 import { UsageLimitsPanel } from "./UsageLimitsPanel";
 import { ArtifactCostPanel } from "./ArtifactCostPanel";
+import { BotsCostPanel } from "./BotsCostPanel";
 
 export function CostDashboard() {
   const closeOverlay = useUiStore(s => s.closeOverlay);
@@ -156,6 +157,9 @@ export function CostDashboard() {
                 <CostQualityPanel q={rollups.costQuality} cacheSavingsUsd={rollups.costQuality.cacheSavingsUsd} />
               </div>
               <BudgetPanel perProject={rollups.perProject} />
+              {/* What each bot costs in this range (conversations + runs).
+                  Renders nothing until a bot exists. */}
+              <BotsCostPanel rangeDays={rangeDays} />
               {/* Improvements engine P3: what each self-improving artifact
                   costs (live runs + the engine's own eval turns). Renders
                   nothing until an artifact has attributed spend. */}

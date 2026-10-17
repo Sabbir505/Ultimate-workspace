@@ -420,7 +420,7 @@ export function ApiKeysPanel() {
         <aside className="api-provider-rail" aria-label="API providers">
           <div className="api-provider-rail-items">
             {savedProviders !== null && addedInstances.length === 0 && (
-              <div className="api-provider-rail-empty">No APIs yet — add one to get started.</div>
+              <div className="api-provider-rail-empty">No APIs yet — add one.</div>
             )}
             {addedInstances.map((inst) => {
               const label = railLabel(inst);
@@ -706,6 +706,7 @@ export function ApiKeysPanel() {
                           .map((m) => ({ value: m.id, label: m.id }))]}
                         onChange={(v) => setAddId(v)}
                         aria-label="Model to add"
+                        matchWidth="content"
                       />
                     ) : (
                       <input

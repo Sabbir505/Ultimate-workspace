@@ -319,15 +319,15 @@ export function McpGalleryPanel() {
           </span>
         )}
       </div>
-      <p className="mcp-lede">Give the built-in chat extra tools by installing MCP servers.</p>
+      <p className="mcp-lede">Install MCP servers to give chat extra tools.</p>
 
       <details className="mcp-details">
         <summary>How MCP tools work in chat</summary>
         <ul>
-          <li>Enabled servers attach to every tool-enabled conversation automatically.</li>
+          <li>Enabled servers attach to every tool-enabled chat.</li>
           <li>
-            Their tools appear to the model as <code>mcp_&lt;server&gt;_&lt;tool&gt;</code>; writes go
-            through the same approval flow as connectors.
+            Tools surface as <code>mcp_&lt;server&gt;_&lt;tool&gt;</code>; writes use the same approval
+            flow as connectors.
           </li>
           <li>
             <code>npx</code>-based servers need Node.js on PATH; <code>uvx</code>-based ones need{" "}
@@ -349,7 +349,7 @@ export function McpGalleryPanel() {
           <Puzzle size={20} strokeWidth={1.5} aria-hidden />
           <div>
             <strong>No servers yet</strong>
-            <span>Pick one from the gallery below — installing takes one click.</span>
+            <span>Pick one below — installing takes one click.</span>
           </div>
         </div>
       ) : (
@@ -593,7 +593,7 @@ export function McpGalleryPanel() {
               value={customEnv}
               onChange={(e) => setCustomEnv(e.target.value)}
             />
-            <small>One KEY=value per line — passed to the server process.</small>
+            <small>One KEY=value per line.</small>
           </label>
           <div className="mcp-form-foot">
             <button type="button" className="ghost" onClick={() => setCustomOpen(false)}>

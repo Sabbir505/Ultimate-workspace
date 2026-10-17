@@ -146,8 +146,8 @@ const checkpointsEnabled = useSettingsStore((s) => s.checkpointsEnabled);
       <div className="settings-section">
         <div className="settings-section-title">Commit message model</div>
         <p className="settings-section-hint">
-          Auto-generates commit messages in the commit modal. Pick a small/fast model
-          (<code>gpt-4o-mini</code>, <code>claude-haiku</code>) — leave blank to use the active
+          Auto-generates commit messages. Pick a small fast model
+          (<code>gpt-4o-mini</code>, <code>claude-haiku</code>); blank uses the active
           chat model.
         </p>
         <div className="settings-form-row settings-form-row-pair">
@@ -225,9 +225,9 @@ const checkpointsEnabled = useSettingsStore((s) => s.checkpointsEnabled);
       <div className="settings-section">
         <div className="settings-section-title">Worktree-per-session isolation</div>
         <p className="settings-section-hint">
-          Each git-bound chat works in its own isolated worktree (branch{" "}
-          <code>relay/&lt;id&gt;</code>), so agents never collide. Deleting a chat removes it
-          best-effort — committed work is never lost.
+          Each git-bound chat gets its own worktree (branch{" "}
+          <code>relay/&lt;id&gt;</code>), so agents never collide. Deleting a chat
+          removes it best-effort; committed work is never lost.
         </p>
         <div className="settings-toggle-row">
           <div className="settings-toggle-label">
@@ -240,12 +240,10 @@ const checkpointsEnabled = useSettingsStore((s) => s.checkpointsEnabled);
       <div className="settings-section">
         <div className="settings-section-title">GitHub authentication</div>
         <p className="settings-section-hint">
-          The Pull Requests and Issues panels use the GitHub OAuth connector
-          (Settings → Connectors) when it is connected. Without it, Relay falls
-          back to a Personal Access Token — paste one with <code>repo</code>
-          scope (classic) or <code>repo</code> + <code>issues</code> (fine-grained)
-          to cover pulls, reviews, checks, and issues. The value goes to the OS
-          keychain and never comes back to the UI.
+          Uses the GitHub OAuth connector (Settings → Connectors) when connected,
+          else a Personal Access Token with <code>repo</code> scope (classic) or{" "}
+          <code>repo</code> + <code>issues</code> (fine-grained). Stored in the OS
+          keychain, never shown again.
         </p>
         <div className="settings-form-row settings-form-row-pair">
           <div className="settings-form-field">
@@ -273,8 +271,8 @@ const checkpointsEnabled = useSettingsStore((s) => s.checkpointsEnabled);
       <div className="settings-section">
         <div className="settings-section-title">Per-turn checkpoints</div>
         <p className="settings-section-hint">
-          Each file-changing turn gets a hidden git snapshot, shown as a restore chip under the
-          reply. Restoring rolls files back and trims the chat to that turn, with one-click undo.
+          Each file-changing turn gets a hidden git snapshot, shown as a restore chip
+          under the reply; restoring rolls files back and trims the chat to that turn.
         </p>
         <div className="settings-toggle-row">
           <div className="settings-toggle-label">

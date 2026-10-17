@@ -12,6 +12,7 @@ if (!Element.prototype.scrollIntoView) {
 
 import { ChatComposer } from "../components/chat/ChatComposer";
 import { parseAttachments } from "../components/chat/MessageAttachments";
+import { useChatStore } from "../state/chat";
 
 afterEach(cleanup);
 
@@ -65,6 +66,64 @@ describe("slash menu applies the picked command", () => {
     fireEvent.change(ta, { target: { value: "about cancer" } });
     fireEvent.keyDown(ta, { key: "Enter", shiftKey: false });
     expect(onSend).toHaveBeenCalledWith("/research about cancer", [], undefined);
+  });
+});
+
+describe("/sidechat command", () => {
+  it("intercepts the command, opens the sidechat, and asks trailing text in it", async () => {
+    const open = vi
+      .spyOn(useChatStore.getState(), "openSidechat")
+      .mockResolvedValue("sc1");
+    const send = vi
+      .spyOn(useChatStore.getState(), "sendMessage")
+      .mockResolvedValue(undefined);
+    try {
+      const { onSend, ta } = renderComposer();
+      fireEvent.change(ta, { target: { value: "/side" } });
+      fireEvent.keyDown(ta, { key: "Enter" });
+      expect(pill()?.textContent).toContain("Sidechat");
+      fireEvent.change(ta, { target: { value: "explain the build failure" } });
+      fireEvent.keyDown(ta, { key: "Enter", shiftKey: false });
+      // The command is client-intercepted: nothing went to the main chat...
+      expect(onSend).not.toHaveBeenCalled();
+      expect(ta.value).toBe("");
+      expect(open).toHaveBeenCalledWith("s1");
+      // ...the trailing question is asked IN the sidechat instead.
+      await vi.waitFor(() =>
+        expect(send).toHaveBeenCalledWith(
+          "explain the build failure",
+          undefined,
+          undefined,
+          "sc1",
+        ),
+      );
+    } finally {
+      open.mockRestore();
+      send.mockRestore();
+    }
+  });
+
+  it("just opens the sidechat when the command has no trailing text", async () => {
+    const open = vi
+      .spyOn(useChatStore.getState(), "openSidechat")
+      .mockResolvedValue("sc1");
+    const send = vi
+      .spyOn(useChatStore.getState(), "sendMessage")
+      .mockResolvedValue(undefined);
+    try {
+      const { onSend, ta } = renderComposer();
+      fireEvent.change(ta, { target: { value: "/sidechat" } });
+      // First Enter applies the menu item (pill); second sends the command.
+      fireEvent.keyDown(ta, { key: "Enter" });
+      expect(pill()?.textContent).toContain("Sidechat");
+      fireEvent.keyDown(ta, { key: "Enter" });
+      expect(open).toHaveBeenCalledWith("s1");
+      expect(send).not.toHaveBeenCalled();
+      expect(onSend).not.toHaveBeenCalled();
+    } finally {
+      open.mockRestore();
+      send.mockRestore();
+    }
   });
 });
 

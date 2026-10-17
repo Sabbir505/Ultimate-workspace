@@ -119,10 +119,9 @@ export function AcpAgentsPanel() {
         <h3>ACP agents</h3>
       </div>
       <p className="settings-note">
-        ACP agents speak the Agent Client Protocol over stdio (Zed/Devin ecosystem).
+        ACP agents speak the Agent Client Protocol over stdio.
         <strong> Zed</strong> and <strong>Devin</strong> are built in — add your own here.
-        The command must be on PATH (or an absolute path); a user entry with the same id
-        overrides a built-in one.
+        The command must be on PATH (or absolute); an entry with the same id overrides a built-in one.
       </p>
 
       {note && <div className="settings-note acp-note-ok">{note}</div>}
@@ -203,7 +202,7 @@ export function AcpAgentsPanel() {
       {/* User-defined agents */}
       {agents.length === 0 ? (
         <div className="empty-reserved">
-          <div className="empty-text">No custom agents yet. Add one above.</div>
+          <div className="empty-text">No custom agents yet.</div>
         </div>
       ) : (
         <div className="acp-list">

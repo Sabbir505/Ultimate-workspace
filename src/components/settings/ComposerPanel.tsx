@@ -182,15 +182,15 @@ export function ComposerPanel() {
 
       <div className="settings-section">
         <p className="settings-section-hint">
-          After each reply, a guess at your next message appears as ghost text
-          in an empty composer. Tab fills it in; Enter still sends.
+          After each reply, a guess at your next message appears as ghost text in
+          the composer; Tab fills it in.
         </p>
 
         <div className="settings-toggle-row">
           <div className="settings-toggle-label">
             <span className="settings-toggle-name">Show predictions</span>
             <span className="settings-toggle-desc">
-              On by default, in memory only — never written to the chat.
+              On by default; never written to the chat.
             </span>
           </div>
           <ToggleSwitch
@@ -204,8 +204,8 @@ export function ComposerPanel() {
       <div className="settings-section">
         <div className="settings-section-title">Prediction model</div>
         <p className="settings-section-hint">
-          Defaults to the chat's own model/agent; overrides send the recent
-          messages to that model instead.
+          Defaults to the chat's own model; overrides use the chosen model
+          instead.
         </p>
 
         <div className="settings-row" style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -269,15 +269,15 @@ export function ComposerPanel() {
 
         <span className="muted" style={{ display: "block", marginTop: 8 }}>
           {source === "chat" &&
-            "Follows the chat — ACP chats skip predictions unless you pick a model here."}
+            "Follows the chat; ACP chats skip predictions unless you pick a model."}
           {source === "bare" &&
             "Keeps each chat's provider; this model writes the prediction."}
           {groupOf(source) === "harness" &&
-            "Runs the CLI once per reply — a few seconds."}
+            "Runs the CLI once per reply, a few seconds."}
           {groupOf(source) === "api" &&
-            "Needs an API key for that provider; otherwise predictions are skipped."}
+            "Needs an API key for that provider."}
           {groupOf(source) === "local" &&
-            "Needs the model running in Local Models; otherwise predictions are skipped."}
+            "Needs the model running in Local Models."}
         </span>
       </div>
     </>

@@ -79,8 +79,8 @@ export function SidebarArtPanel() {
     <div className="settings-section">
       <div className="settings-section-title">Sidebar art</div>
       <p className="settings-section-hint">
-        A background image behind the sidebar header. It fades out toward the
-        bottom, and a dark shade keeps the text readable.
+        A background image behind the sidebar header. It fades toward the bottom,
+        with a dark shade keeping text readable.
       </p>
 
       {/* Live mini preview — the real header's markup, miniaturized. */}

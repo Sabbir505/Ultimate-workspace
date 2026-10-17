@@ -51,7 +51,7 @@ export function FontSettingsPanel() {
       )}
       {group(
         "Code & terminal font",
-        "Used by code blocks, diffs and terminal panes.",
+        "Used by code blocks, diffs and terminals.",
         MONO_FONT_OPTIONS,
         monoFont,
         setMonoFont,

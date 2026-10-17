@@ -290,17 +290,14 @@ export function TtsPanel() {
 
       <p className="settings-note">
         Read assistant answers and text artifacts aloud with Kokoro-82M — an
-        open-weights model (Apache-2.0) that runs entirely on this machine. No
-        cloud, no API key, nothing leaves the device. Speech is synthesized on
-        the CPU, so it never competes with a model loaded on your GPU.
+        open-weights model (Apache-2.0) that runs entirely on this machine,
+        with no cloud or API key.
       </p>
       <p className="settings-note" style={{ fontSize: 11 }}>
-        Synthesis runs at roughly playback speed on a typical laptop CPU, so a
-        long answer keeps a sentence or two buffered ahead rather than being
-        ready instantly — playback starts as soon as the first sentence is
-        voiced. Prefer the non-int8 models: int8 is a third of the download but
-        is <em>slower</em> unless your CPU has int8 acceleration (roughly Ice
-        Lake / Zen 4 and newer).
+        Playback starts as soon as the first sentence is voiced. Prefer the
+        non-int8 models: int8 is a third of the download but is <em>slower</em>{" "}
+        unless your CPU has int8 acceleration (roughly Ice Lake / Zen 4 and
+        newer).
       </p>
 
       <div className="settings-note">
@@ -358,8 +355,8 @@ export function TtsPanel() {
             optionAction={(o) => <VoiceAuditionButton voice={o.value} />}
           />
           <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 6 }}>
-            {tts.voices.length} voices, from the model itself. The subtitle is the
-            language each one speaks. Press play on a row to hear that voice.
+            {tts.voices.length} voices, from the model itself. Press play on a row
+            to hear one; the subtitle is its language.
           </div>
         </div>
       )}
@@ -408,17 +405,15 @@ export function TtsPanel() {
         <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 6 }}>
           {tts.device === "gpu" ? (
             <>
-              GPU synthesis runs the CUDA build of the voice engine as a separate
-              process: about <strong>3x faster</strong> at the synthesis itself
-              (measured 4.6x vs 1.5x realtime), but every read pays a few seconds
-              to start that process — so long texts benefit most. CPU mode loads
-              the model once and starts playing sooner.
+              GPU synthesis runs the CUDA build as a separate process: about{" "}
+              <strong>3x faster</strong>, but every read pays a few seconds to
+              start it — so long texts benefit most.
             </>
           ) : (
             <>
               CPU synthesis runs in-process: nothing to install, and audio starts
-              on the first sentence. GPU is roughly 3x faster at synthesizing, at
-              the cost of a few seconds of start-up per read.
+              on the first sentence. GPU is about 3x faster but adds a few seconds
+              per read.
             </>
           )}
         </div>
@@ -466,10 +461,10 @@ export function TtsPanel() {
       </div>
       <div className="settings-note" style={{ fontSize: 11, color: "var(--text-dim)" }}>
         {tts.device === "gpu"
-          ? "Not available on GPU. The CUDA engine ships as a command-line program with no server mode, so each read launches it fresh (about 4.5s) and there is no long-lived engine to hold in memory. Switch to CPU if you want the model kept resident between reads."
+          ? "Not available on GPU: the CUDA engine runs as a command-line program with no server mode, so each read launches it fresh (about 4.5s). Switch to CPU to keep the model resident."
           : tts.keepLoaded
-            ? "The model loads when Relay starts and is released when it closes, so the first answer plays with no loading pause."
-            : "The model loads on first use and stays in memory until Relay closes. Turn this on to load it at startup instead."}
+            ? "The model loads when Relay starts and is released when it closes."
+            : "The model loads on first use and stays in memory until Relay closes."}
       </div>
 
       <div
@@ -497,7 +492,7 @@ export function TtsPanel() {
       {tts.autoRead && (
         <div className="settings-note" style={{ fontSize: 11, color: "var(--text-dim)" }}>
           Browsers only allow audio after you interact with the page once — press
-          play on any message first, and auto-read takes over from there.
+          play on any message first.
         </div>
       )}
 

@@ -97,7 +97,7 @@ describe("composer paste-to-attach", () => {
     renderComposer();
     const textarea = screen.getByPlaceholderText(/Write a message/);
     pasteFiles(textarea, [
-      new File([new Uint8Array(15 * 1024 * 1024 + 1)], "huge.png", { type: "image/png" }),
+      new File([new Uint8Array(25 * 1024 * 1024 + 1)], "huge.png", { type: "image/png" }),
     ]);
     expect(await screen.findByText(/huge\.png is too large/)).toBeTruthy();
   });

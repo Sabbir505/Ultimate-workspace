@@ -35,6 +35,8 @@ interface Props<T extends string> {
   title?: string;
   /** Extra class on the trigger button (e.g. size variant). */
   className?: string;
+  /** Inline style for the TRIGGER (widths/min-widths from the old <select>). */
+  style?: React.CSSProperties;
   /** Locked control (e.g. a provider's protocol kind is fixed after add):
    *  trigger renders disabled and the popover can't open. */
   disabled?: boolean;
@@ -55,6 +57,7 @@ export function GlassSelect<T extends string>({
   ariaLabel,
   title,
   className,
+  style,
   disabled,
   matchWidth = "trigger",
   optionAction,
@@ -205,6 +208,7 @@ export function GlassSelect<T extends string>({
         ref={triggerRef}
         type="button"
         className={`glass-select-trigger${className ? ` ${className}` : ""}${disabled ? " is-disabled" : ""}`}
+        style={style}
         title={title}
         aria-label={ariaLabel}
         aria-haspopup="listbox"

@@ -71,6 +71,21 @@
      needs more body for contrast). */
   --glass-card: color-mix(in srgb, var(--surface-glass) 55%, transparent);
   --glass-card-2: color-mix(in srgb, var(--surface-glass) 80%, transparent);
+  /* Shared shell-chrome glass — ONE recipe for every structural surface
+     (sidebar, projects rail, title bar, bottom bar) so they tint identically
+     instead of each blending --bg-tint / --surface-glass / accent on its own.
+     The backdrop under all of them is the same flat --bg-tint (the ambient
+     accent wash that used to gradient-tint the top of the window is gone), so
+     an identical recipe renders an identical color in every theme. Light
+     overrides live in the light scope below. */
+  --shell-glass-top: color-mix(in srgb, var(--surface-glass) 45%, transparent);
+  --shell-glass-bottom: color-mix(in srgb, var(--surface-glass) 25%, transparent);
+  /* No saturate() here: the chrome's backdrop is the flat --bg-tint canvas, so
+     a saturation bump would make every frosted surface read more vivid than the
+     chat view (which has no backdrop-filter), i.e. "brighter" in tinted themes.
+     Plain blur keeps the frost over content (the title bar) without tinting the
+     flat canvases away from each other. */
+  --shell-blur: blur(24px);
   --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
 
   /* Theme switch transition â€” color/bg only, no layout-affecting props.
@@ -278,6 +293,10 @@
      white glass on a bright backdrop reads as no card at all. */
   --glass-card: color-mix(in srgb, var(--surface-glass) 72%, transparent);
   --glass-card-2: color-mix(in srgb, var(--surface-glass) 90%, transparent);
+  /* Light needs a touch more body so chrome text keeps contrast on bright
+     backdrops (same bump the composer card uses). */
+  --shell-glass-top: color-mix(in srgb, var(--surface-glass) 55%, transparent);
+  --shell-glass-bottom: color-mix(in srgb, var(--surface-glass) 38%, transparent);
   --surface-1: #f0f0f0;
   --surface-3: #e8e8e8;
   --bg-elevated: rgba(0, 0, 0, 0.04);

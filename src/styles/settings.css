@@ -3320,3 +3320,50 @@
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
+
+/* ---- Compaction panel (Settings → Compaction) ---------------------------------
+   A labeled field grid under each trigger section. Rows are switches
+   (.settings-toggle-row); numeric tunables sit in this compact auto-fit grid so
+   three-of-a-kind fields share one line at wide widths and stack when narrow. */
+.compaction-field-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+/* A section whose master switch is off dims + disables its fields without
+   removing them (keeps the layout stable as you toggle). */
+.compaction-field-grid.is-disabled {
+  opacity: 0.5;
+  pointer-events: none;
+}
+.compaction-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.compaction-field-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+}
+.compaction-field input[type="number"] {
+  width: 100%;
+  padding: 6px 8px;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--surface-raised, var(--surface));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs, 8px);
+}
+.compaction-field input[type="number"]:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.compaction-field-hint {
+  font-size: 11px;
+  color: var(--text-dim);
+  opacity: 0.75;
+  line-height: 1.4;
+}

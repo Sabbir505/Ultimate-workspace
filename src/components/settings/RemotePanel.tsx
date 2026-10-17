@@ -248,8 +248,8 @@ export function RemotePanel() {
         </span>
       </div>
       <p className="muted" style={{ marginBottom: 16 }}>
-        Connect your phone to this desktop over the Tailnet (cross-network) or via a USB bridge
-        (same machine). Scan the QR with the mobile app to pair automatically.
+        Connect your phone over the Tailnet (cross-network) or a USB bridge (same machine).
+        Scan the QR with the mobile app to pair.
       </p>
 
       {/* Relay controls */}
@@ -343,10 +343,9 @@ export function RemotePanel() {
                 </span>
               </div>
               <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>
-                Pairing proofs are bound to a per-connection challenge, so a
-                captured proof can't be replayed. Older phone builds still send
-                the legacy static proof — leave this off until every paired
-                device has updated, then enable it to refuse them.
+                Pairing proofs are bound to a per-connection challenge, so a captured proof can't be
+                replayed. Leave this off until every phone has updated, then enable it to refuse older
+                builds.
               </div>
             </div>
             {isServing && tsQr && (
@@ -361,7 +360,7 @@ export function RemotePanel() {
         </div>
       ) : info?.running ? (
         <p className="muted" style={{ marginBottom: 20 }}>
-          Relay is running but no pairing token is available. Restart the relay.
+          Relay is running but no token is available. Restart the relay.
         </p>
       ) : (
         <p className="muted" style={{ marginBottom: 20 }}>
@@ -386,14 +385,14 @@ export function RemotePanel() {
           <div>
             <p className="muted" style={{ marginBottom: 8 }}>
               Install <a href="https://tailscale.com/download" target="_blank" rel="noreferrer">Tailscale</a> on this machine and your phone,
-              then log in to connect across different networks. The relay stays loopback-only; Tailscale fronts it with TLS.
+              then log in to connect across networks. The relay stays loopback-only; Tailscale adds TLS.
             </p>
           </div>
         ) : !ts.loggedIn ? (
           <div>
             <p className="muted" style={{ marginBottom: 8 }}>
-              Tailscale is installed but not logged in. Click <strong>Log in</strong> to open the browser,
-              complete the login, then return here — serve enables automatically.
+              Tailscale is installed but not logged in. Click <strong>Log in</strong>, finish in the browser,
+              then return here — serve enables automatically.
             </p>
             {ts.dnsName && (
               <p className="muted" style={{ fontSize: 12 }}>
@@ -417,7 +416,7 @@ export function RemotePanel() {
             {isServing ? (
               <div>
                 <p className="muted" style={{ marginBottom: 8 }}>
-                  <strong>Serve is active.</strong> Your phone can connect from any network over the tailnet.
+                  <strong>Serve is active.</strong> Your phone can connect from any network.
                 </p>
                 <button className="ghost" disabled={busy} onClick={() => void handleDisableServe()}>
                   Disable serve
@@ -426,8 +425,8 @@ export function RemotePanel() {
             ) : (
               <div>
                 <p className="muted" style={{ marginBottom: 8 }}>
-                  Enable <code className="mono-text">tailscale serve</code> to expose the relay at a stable HTTPS
-                  URL on your tailnet. TLS is terminated by tailscaled.
+                  Enable <code className="mono-text">tailscale serve</code> to expose the relay at a stable
+                  HTTPS URL on your tailnet.
                 </p>
                 <button className="ghost" disabled={busy || !info?.running} onClick={() => void handleEnableServe()}>
                   {info?.running ? "Enable serve" : "Start relay first"}
@@ -443,10 +442,10 @@ export function RemotePanel() {
         <summary style={{ cursor: "pointer", color: "var(--text-muted)" }}>Connection methods</summary>
         <div style={{ marginTop: 8, color: "var(--text-muted)", fontSize: 13, lineHeight: 1.6 }}>
           <p><strong>Cross-network (Tailscale):</strong> Install Tailscale on both devices, log in to the same tailnet,
-          enable serve above, then scan the QR on your phone. Works from any network — no port forwarding needed.</p>
+          enable serve above, then scan the QR on your phone — no port forwarding needed.</p>
           <p><strong>Same machine (USB bridge):</strong> Run <code className="mono-text">adb reverse tcp:{info?.port ?? "<port>"} tcp:{info?.port ?? "<port>"}</code> then
           use the local URL with <code className="mono-text">ws://localhost:{info?.port ?? "<port>"}/#token</code>.</p>
-          <p>The relay never binds 0.0.0.0 — all remote traffic flows through Tailscale's encrypted tunnel.</p>
+          <p>The relay never binds 0.0.0.0 — remote traffic flows through Tailscale's encrypted tunnel.</p>
         </div>
       </details>
     </div>

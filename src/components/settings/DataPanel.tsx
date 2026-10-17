@@ -203,7 +203,7 @@ export function DataPanel() {
       <div className="settings-section">
         <div className="settings-section-title">Welcome</div>
         <p className="settings-section-hint">
-          Replay the first-run welcome setup — theme, chat model, and agent harness checks.
+          Replay the first-run welcome setup: theme, chat model, and harness checks.
         </p>
         <button className="ghost" onClick={openOnboarding}>
           Replay welcome
@@ -214,21 +214,19 @@ export function DataPanel() {
       <div className="settings-section">
         <div className="settings-section-title">Backup</div>
         <p className="settings-section-hint">
-          Export a project's chats to a <code>.zip</code>, or restore a previous backup.
-          Imported chats are added fresh — nothing is overwritten.
+          Export a project's chats to a <code>.zip</code> or restore a backup;
+          imports are added fresh, never overwriting.
         </p>
         <div className="data-backup-row">
-          <select
+          <GlassSelect<string>
+            ariaLabel="Project to back up"
             value={selectedProjectForBackup ?? ""}
-            onChange={(e) => setSelectedProjectForBackup(e.target.value || null)}
-          >
-            <option value="">Select project…</option>
-            {(backupProjects ?? []).map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-          </select>
+            options={[
+              { value: "", label: "Select project…" },
+              ...(backupProjects ?? []).map((p) => ({ value: p.id, label: p.name })),
+            ]}
+            onChange={(v) => setSelectedProjectForBackup(v || null)}
+          />
           <button
             className="primary cta-strong"
             onClick={() => void handleBackupProject()}
@@ -287,7 +285,7 @@ export function DataPanel() {
         <div className="settings-section-title">Danger zone</div>
         <div className="data-danger">
           <span className="data-danger-text">
-            Permanently delete all chat sessions or all generated artifacts. This cannot be undone.
+            Permanently delete all chat sessions or generated artifacts. Cannot be undone.
           </span>
           <div className="data-danger-actions">
             <button className="danger" onClick={() => setConfirm("chats")} disabled={busy}>
@@ -317,8 +315,8 @@ export function DataPanel() {
         >
           <p>
             {confirm === "chats"
-              ? "This permanently deletes every chat session and all of their messages. Generated artifacts are kept."
-              : "This permanently deletes every generated artifact (files and diagrams). Chat history is kept."}
+              ? "Permanently deletes every chat session and its messages. Artifacts are kept."
+              : "Permanently deletes every generated artifact (files and diagrams). Chat history is kept."}
           </p>
         </Modal>
       )}

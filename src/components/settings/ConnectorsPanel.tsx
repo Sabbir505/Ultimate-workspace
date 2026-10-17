@@ -167,8 +167,8 @@ export function ConnectorsPanel() {
         <div>
           <div className="conn-info-title">Connect third-party accounts</div>
           <div className="conn-info-body">
-            After connecting, the model can use tools like search, read, create, and send on your
-            behalf. Read actions run automatically; write/create/delete/send follow the conversation&apos;s
+            After connecting, the model can search, read, create, and send on your
+            behalf. Reads run automatically; writes follow the conversation&apos;s
             approval mode.
           </div>
         </div>
@@ -291,7 +291,7 @@ export function ConnectorsPanel() {
         >
           <p className="estimate-note">
             {openFam.members.length > 1
-              ? "One OAuth consent covers every product below — use the card's Connect all / Connect rest, or connect each product here."
+              ? "One OAuth consent covers every product below — or connect each one here."
               : "Manage this connection."}
           </p>
           <div className="conn-modal-list">

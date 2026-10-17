@@ -90,9 +90,8 @@ export function WallpaperPanel() {
     <div className="settings-section">
       <div className="settings-section-title">App wallpaper</div>
       <p className="settings-section-hint">
-        A background image behind the whole app. It's blurred and dimmed so
-        text stays readable, and shows through the chat, sidebar and other
-        glass surfaces.
+        A background image behind the whole app, blurred and dimmed so text stays
+        readable. Shows through the glass surfaces.
       </p>
 
       {/* Live preview — the wallpaper + scrim exactly as the shell paints it,

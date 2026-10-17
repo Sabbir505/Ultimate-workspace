@@ -142,7 +142,7 @@ export function ThemeGalleryPanel() {
       </div>
 
       <p className="settings-section-hint" style={{ marginBottom: 16 }}>
-        A theme is a JSON file with a <code>name</code>, optional <code>base: "light" | "dark"</code>, and a <code>colors</code> map that restyles the app on top of the built-in palette. Tokens you don't set fall back to the built-in theme.
+        A theme is a JSON file with a <code>name</code>, optional <code>base</code>, and a <code>colors</code> map. Unset tokens fall back to the built-in palette.
       </p>
 
       {error && (
@@ -259,9 +259,9 @@ export function ThemeGalleryPanel() {
         <div className="theme-token-docs-content">
           <div className="theme-token-docs-header">
             <p>
-              Themes override a subset of the <strong>core CSS variables</strong> defined in
-              <code>src/styles/tokens.css</code>. Any token you omit falls back to the
-              built-in Light/Dark palette (whichever matches your <code>base</code> mode).
+              Themes override a subset of the <strong>core CSS variables</strong> in
+              <code>src/styles/tokens.css</code>; omitted tokens fall back to the
+              built-in Light/Dark palette.
             </p>
             <div className="theme-token-docs-actions">
               <button className="ghost" onClick={copyTemplate} title="Copy JSON template to clipboard">
@@ -285,9 +285,9 @@ export function ThemeGalleryPanel() {
           </div>
 
           <p className="theme-token-note">
-            The full surface also includes the editor, sidebar, activity/status bar, tab,
-            input, button, scrollbar, tooltip and <code>syntax-*</code> token families —
-            see <code>src/styles/tokens.css</code>. Unknown keys in an imported file are ignored.
+            The full surface also covers editor, sidebar, activity/status bar, tab,
+            input, button, scrollbar and tooltip tokens — see <code>src/styles/tokens.css</code>.
+            Unknown keys are ignored.
           </p>
         </div>
       </details>

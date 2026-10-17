@@ -163,8 +163,7 @@ export function SttPanel() {
 
       <p className="settings-note">
         Voice input for the composer mic runs on a local whisper.cpp server —
-        open weights, no cloud. Download a model below, then start the server
-        (or let it auto-start with the app).
+        download a model below, then start the server (or enable auto-start).
       </p>
 
       {!stt ? (
@@ -194,7 +193,7 @@ export function SttPanel() {
               ) : (
                 <span style={{ color: "var(--warn, #d29922)" }}>
                   whisper-server binary not found — install it in Server builds
-                  below, or point at an existing build.
+                  below.
                 </span>
               )}
             </div>
@@ -305,21 +304,17 @@ export function SttPanel() {
                 ) : (
                   <>
                     A CUDA build of whisper.cpp is installed — switch to GPU for
-                    faster transcription, or stay on CPU to keep the GPU free for
-                    a loaded model.
+                    faster transcription.
                   </>
                 )
               ) : stt.device === "gpu" ? (
                 <span style={{ color: "var(--warn, #d29922)" }}>
                   GPU is selected but no CUDA whisper.cpp build was found —
-                  install it in Server builds above, or switch back to CPU.
+                  install it in Server builds above.
                 </span>
               ) : (
                 <>
                   No CUDA build of whisper.cpp found, so only CPU is available.
-                  Install the CUDA build (Server builds above) for faster
-                  transcription; CPU is fine for short dictation and leaves the
-                  GPU free for a loaded model.
                 </>
               )}
             </div>
@@ -517,8 +512,7 @@ export function SttPanel() {
             </div>
             <p className="model-detail-desc">
               {detail.note}. After download, set it as the default and start the
-              server (or enable auto-start) — the composer mic then transcribes
-              locally, no cloud involved.
+              server (or enable auto-start).
             </p>
             {detailActive && (
               <div className="model-market-grid">

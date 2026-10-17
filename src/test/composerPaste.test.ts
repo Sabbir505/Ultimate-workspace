@@ -77,11 +77,21 @@ describe("fileToAttachment", () => {
     await expect(fileToAttachment(file)).rejects.toThrow(/not a supported attachment type/);
   });
 
-  it("enforces the per-kind size caps with a readable message", async () => {
-    // Image cap is 15 MB (docs 10 MB, text 512 KB) — a paste never bypasses it.
-    const huge = new File([new Uint8Array(15 * 1024 * 1024 + 1)], "huge.png", {
+  it("accepts a text-like file well past the old 512 KB cap", async () => {
+    // .html classifies as text; the cap now matches the 25 MB backend cap, so
+    // a multi-MB flashcards page attaches instead of being refused.
+    const flashcards = new File(["x".repeat(2 * 1024 * 1024)], "HSK4_flashcards.html", {
+      type: "text/html",
+    });
+    const attachment = await fileToAttachment(flashcards);
+    expect(attachment.kind).toBe("text");
+    expect(attachment.text?.length).toBe(2 * 1024 * 1024);
+  });
+
+  it("enforces the single 25 MB cap with a readable message", async () => {
+    const huge = new File([new Uint8Array(25 * 1024 * 1024 + 1)], "huge.png", {
       type: "image/png",
     });
-    await expect(fileToAttachment(huge)).rejects.toThrow("huge.png is too large (max 15 MB)");
+    await expect(fileToAttachment(huge)).rejects.toThrow("huge.png is too large (max 25 MB)");
   });
 });

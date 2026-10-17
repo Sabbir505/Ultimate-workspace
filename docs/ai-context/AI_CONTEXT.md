@@ -92,7 +92,7 @@ Automations (automation_cmds::):       list_automations, create_automation, upda
 Automation task (automation_task::):   get_run_while_closed, set_run_while_closed,
                                        test_automation_webhook
 Chat (chat_cmds::):                    list_chat_sessions, create_chat_session,
-                                       fork_chat_session,
+                                       fork_chat_session, open_sidechat,
                                        delete_chat_session, delete_all_chat_sessions,
                                        delete_chat_message, delete_empty_chat_sessions,
                                        update_chat_session_title, generate_chat_title,
@@ -763,6 +763,9 @@ From BUILD_LOG.md and source inspection:
 | ACP agents | `src-tauri/src/acp/{mod,events}.rs` + `src-tauri/src/acp_agents.rs` + `src/components/settings/AcpAgentsPanel.tsx` |
 | Session Mesh | `src-tauri/src/session_fabric/mod.rs` + `src-tauri/src/db/session_fabric.rs` + `src/state/chat/slices/meshSlice.ts` (design: `SESSION_MESH_DESIGN_ARCHITECTURE.md`) |
 | Conversational artifacts | `src-tauri/src/artifacts/` (8 modules) + `src-tauri/src/commands/artifact_cmds.rs` + `src/components/chat/{ArtifactProposalCard,ArtifactTypeSelector}.tsx` |
+| Bots (named persistent agents) | `src-tauri/src/bot_runs.rs` (run executor: `begin_run`/`execute_run`/`start_run_async`/`ask_bot`, running-guard, notifications) + `src-tauri/src/db/bots.rs` (CRUD, `ensure_bot_session`, `create_bot_run_session`, runs, persona/memory/profile resolution) + `src-tauri/src/db/bot_approvals.rs` (queue/resolve/expire) + `src-tauri/src/chat/bot_policy.rs` (the write-class gate for background runs + deterministic summaries) + `src-tauri/src/chat/tools/bots.rs` (chat-tool family) + `src-tauri/src/commands/bot_cmds.rs` — doc: `docs/architecture/BOTS.md` |
+| Bots components | `src/components/bots/{BotsView,BotEditorModal,ApprovalInbox,RunsStrip}.tsx` + `src/lib/ipc/bots.ts` + `src/hooks/useBots.ts` + `src/styles/bots.css` |
+| Pets (3D companions) | `src/lib/pets/adePets.ts` (ported three.js engine, six species) + `src/lib/pets/stage.ts` (one shared WebGL stage, dynamic import, WebGL/jsdom fallback) + `src/components/pet/{PetAvatar,BotPetDock}.tsx`; the sprite renderer in `src/components/pet/PetActor.tsx` is the fallback |
 | Automations scheduler | `src-tauri/src/automations.rs` (tick loop, `launch_run`, `run_blocking`, `validate_schedule`) + `src-tauri/src/automation_triggers.rs` (trigger specs, git/file evaluators, webhook secrets) + `src-tauri/src/automation_webhook.rs` (loopback listener) + `src-tauri/src/commands/automation_cmds.rs` + `src-tauri/src/automation_task.rs` + `src-tauri/src/db/automations.rs` |
 | Vault (markdown KB) | `src-tauri/src/vault/{mod,index,parse}.rs` + `src-tauri/src/chat/tools/vault.rs` + `src/state/vault.ts` + `src/lib/ipc/vault.ts` + `src/lib/vaultFrontmatter.ts` + `src/lib/vaultLinks.ts` + `src/components/vault/` (`VaultView`, `VaultEditor`, `VaultFileTree`, `VaultGraph`, `VaultLocalGraph`, `VaultPreview`, `VaultQuickSwitcher`, `VaultPdfViewer`, `VaultAssetView`, `VaultLinkHover`) |
 | Local image generation | `src-tauri/src/commands/image_gen.rs` (sd-server lifecycle + `image-gen:update`) + `src-tauri/src/chat/tools/imagegen.rs` + `src/state/imageGenStore.ts` + `src/lib/ipc/imageGen.ts` + `src/components/settings/ImageGenPanel.tsx` + `src/components/chat/ImageGenCard.tsx` |

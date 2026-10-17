@@ -455,6 +455,7 @@ pub(super) fn builtin_tool_specs_json(provider_id: &ChatProviderId, model: &str,
         research: false,
         session_mesh: false,
         automations_write: false,
+        bots_write: false,
                 subagent_write: true,
         totp: false,
         unlockable_families: std::sync::Arc::new(
@@ -805,6 +806,7 @@ pub async fn count_context_tokens(
                             research: false,
                             session_mesh: false,
                             automations_write: false,
+                            bots_write: false,
                 subagent_write: true,
                             totp: false,
                             unlockable_families: std::sync::Arc::new(
@@ -1119,6 +1121,7 @@ pub async fn count_context_breakdown(
                 research: false,
                 session_mesh: false,
                 automations_write: false,
+                bots_write: false,
                 subagent_write: true,
                 totp: false,
                 unlockable_families: std::sync::Arc::new(
@@ -1260,6 +1263,7 @@ pub async fn count_context_breakdown(
         research: false,
         session_mesh: false,
         automations_write: false,
+        bots_write: false,
                 subagent_write: true,
         totp: false,
         unlockable_families: std::sync::Arc::new(
@@ -1399,23 +1403,120 @@ pub async fn chat_compact_now(
     // historical behavior for callers that don't pass them.
     let tools_on = tools_enabled.unwrap_or(true);
     let code_exec_on = code_exec_enabled.unwrap_or(false);
+    crate::chat::stream_events::emit_status_reason(
+        Some(&app),
+        &chat_session_id,
+        "context_compacting",
+        "Compacting earlier context…",
+    );
+    let result = compact_session(
+        &app,
+        &chat_state.0.client,
+        &db.0,
+        local.0.status(),
+        &chat_session_id,
+        tools_on,
+        code_exec_on,
+        true,
+    )
+    .await;
+    let outcome = match result {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            // The pass never produced a result (nothing to compact, no running
+            // sidecar, or the summarizer failed) — erase the "Compacting…" pill
+            // so it doesn't linger until the next status event.
+            crate::chat::stream_events::emit_status_clear(Some(&app), &chat_session_id);
+            return Err(e);
+        }
+    };
+    crate::chat::stream_events::emit_status_reason(
+        Some(&app),
+        &chat_session_id,
+        "context_compacted",
+        format!(
+            "Compacted {} exchange(s) — {} messages now active",
+            outcome.compacted_exchange_count, outcome.active_message_count,
+        ),
+    );
+    Ok(format!(
+        "Compacted {} exchange(s)",
+        outcome.compacted_exchange_count
+    ))
+}
+
+/// Outcome of a successful [`compact_session`] pass.
+pub(crate) struct CompactSessionOutcome {
+    pub compacted_exchange_count: usize,
+    pub active_message_count: usize,
+    pub summary_id: i64,
+}
+
+/// Process-local in-flight ledger for [`compact_session`], so the manual
+/// "Compact now" and the idle sweep (or two sweeps) can't run a pass for the
+/// same session concurrently — two passes would each fold the same turns and
+/// race on `mark_superseded`. Released on drop (including on error).
+fn compact_in_flight() -> &'static parking_lot::Mutex<std::collections::HashSet<String>> {
+    static IN_FLIGHT: std::sync::OnceLock<
+        parking_lot::Mutex<std::collections::HashSet<String>>,
+    > = std::sync::OnceLock::new();
+    IN_FLIGHT.get_or_init(|| parking_lot::Mutex::new(std::collections::HashSet::new()))
+}
+
+/// RAII release for a [`compact_session`] claim.
+struct CompactionClaim(String);
+
+impl Drop for CompactionClaim {
+    fn drop(&mut self) {
+        compact_in_flight().lock().remove(&self.0);
+    }
+}
+
+/// One compaction pass shared by the "Compact now" command and the idle sweep
+/// (`chat::idle_compact`). Resolves the session's provider, assembles the
+/// system prompt + active history, runs the provider-appropriate pin+summarize
+/// engine (`maybe_compact` for the running local sidecar, `run_cloud_compaction`
+/// for API providers), persists the `[compacted context]` row, and emits the
+/// `context_compacted` status. `Err` means "leave the history as-is" (nothing
+/// aged out, no sidecar running, or the summarizer failed).
+///
+/// `force` bypasses the configured threshold on the local path. The cloud path
+/// always runs (callers gate it themselves); the idle sweep gates on its own
+/// min-token floor before calling.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn compact_session(
+    app: &tauri::AppHandle,
+    client: &reqwest::Client,
+    db: &std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    local_status: Option<local_models::ActiveLocalModel>,
+    chat_session_id: &str,
+    tools_on: bool,
+    code_exec_on: bool,
+    force: bool,
+) -> Result<CompactSessionOutcome, String> {
+    // One pass per session at a time; held for the whole (awaiting) pass and
+    // released by the RAII claim on every exit path.
+    if !compact_in_flight().lock().insert(chat_session_id.to_string()) {
+        return Err("a compaction pass is already running for this session".to_string());
+    }
+    let _claim = CompactionClaim(chat_session_id.to_string());
     let (provider_str, model_str) = {
-        let conn = db.0.lock();
-        let cs = db::get_chat_session(&conn, &chat_session_id)
+        let conn = db.lock();
+        let cs = db::get_chat_session(&conn, chat_session_id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "chat session not found".to_string())?;
         (cs.provider, cs.model)
     };
     let entries: Vec<crate::chat::compaction::CompactionEntry> = {
-        let conn = db.0.lock();
-        crate::chat::compaction::load_compaction_entries(&conn, &chat_session_id)
+        let conn = db.lock();
+        crate::chat::compaction::load_compaction_entries(&conn, chat_session_id)
             .map_err(|e| e.to_string())?
     };
     let (custom, attached_c, attached_m): (Option<String>, Vec<String>, Vec<String>) = {
-        let conn = db.0.lock();
+        let conn = db.lock();
         let custom = db::get_setting(&conn, "assistant.systemPrompt").map_err(|e| e.to_string())?;
         let (c, m): (Vec<String>, Vec<String>) =
-            db::list_chat_session_connectors(&conn, &chat_session_id)
+            db::list_chat_session_connectors(&conn, chat_session_id)
                 .unwrap_or_default()
                 .into_iter()
                 .partition(|r| !r.starts_with("mcp:"));
@@ -1426,25 +1527,18 @@ pub async fn chat_compact_now(
         .filter_map(|r| r.strip_prefix("mcp:").map(|s| s.to_string()))
         .collect();
 
-    crate::chat::stream_events::emit_status_reason(
-        Some(&app),
-        &chat_session_id,
-        "context_compacting",
-        "Compacting earlier context…",
-    );
-
     let run = if provider_str == "local_gguf" {
-        let Some(status) = local.0.status() else {
-            return Err("local model is not running".to_string());
-        };
+        let status = local_status.ok_or_else(|| "local model is not running".to_string())?;
         // Force: a threshold of 0 makes the trigger comparison always fire.
         let mut cfg = {
-            let conn = db.0.lock();
+            let conn = db.lock();
             crate::chat::compaction::load_compaction_config(&conn)
         };
-        cfg.threshold = 0.0;
+        if force {
+            cfg.threshold = 0.0;
+        }
         let system = {
-            let (avail_c, avail_m) = attach_availability(&app, &attached_c, &attached_m);
+            let (avail_c, avail_m) = attach_availability(app, &attached_c, &attached_m);
             let manifest = crate::chat::prompts::attach_manifest_segment(
             &avail_c,
             &avail_m,
@@ -1471,12 +1565,12 @@ pub async fn chat_compact_now(
         // Honor the summarizer override here too — "Compact now" should
         // produce the same quality the automatic path would.
         let route = match {
-            let conn = db.0.lock();
+            let conn = db.lock();
             resolve_cloud_summarizer(&conn)
         } {
             Some((provider_id, base, api_key, cloud_model))
                 if {
-                    let conn = db.0.lock();
+                    let conn = db.lock();
                     db::get_setting(&conn, "chat.local_gguf.compaction_summarizer")
                         .ok()
                         .flatten()
@@ -1501,7 +1595,7 @@ pub async fn chat_compact_now(
         // over-generous window, so it under-reported the risk too.
         let reserved_tokens: u32 = if tools_on {
             crate::chat::compaction::count_json_tokens_cached(
-                &chat_state.0.client,
+                client,
                 &status.base_url,
                 &builtin_tool_specs_json(&ChatProviderId::LocalGguf, &model_str, code_exec_on),
             )
@@ -1512,7 +1606,7 @@ pub async fn chat_compact_now(
         };
         crate::relay_eprintln!("[compact-now] tool schema reserves {reserved_tokens} tokens");
         let outcome = crate::chat::compaction::maybe_compact(
-            &chat_state.0.client,
+            client,
             &status.base_url,
             status.n_ctx,
             &model_str,
@@ -1541,16 +1635,16 @@ pub async fn chat_compact_now(
         let provider_id = parse_provider_id(&provider_str)
             .ok_or_else(|| format!("unknown provider: {provider_str}"))?;
         let cfg = {
-            let conn = db.0.lock();
+            let conn = db.lock();
             crate::chat::cloud_compact::load_cloud_compaction_config(&conn)
         };
         let api_key = {
-            let conn = db.0.lock();
+            let conn = db.lock();
             secrets::get_chat_api_key(&conn, &provider_str)
                 .ok_or_else(|| format!("no API key configured for provider: {provider_str}"))?
         };
         let base_url = {
-            let conn = db.0.lock();
+            let conn = db.lock();
             db::get_setting(&conn, &format!("chat.{provider_str}.base_url"))
                 .map_err(|e| e.to_string())?
         };
@@ -1562,7 +1656,7 @@ pub async fn chat_compact_now(
                 _ => OpenAIProvider::DEFAULT_BASE.to_string(),
             });
         let system = {
-            let (avail_c, avail_m) = attach_availability(&app, &attached_c, &attached_m);
+            let (avail_c, avail_m) = attach_availability(app, &attached_c, &attached_m);
             let manifest = crate::chat::prompts::attach_manifest_segment(
             &avail_c,
             &avail_m,
@@ -1587,7 +1681,7 @@ pub async fn chat_compact_now(
             Some(system)
         };
         crate::chat::cloud_compact::run_cloud_compaction(
-            &chat_state.0.client,
+            client,
             provider_id,
             &base,
             &api_key,
@@ -1600,28 +1694,22 @@ pub async fn chat_compact_now(
     };
 
     let summary_id = {
-        let conn = db.0.lock();
-        crate::chat::cloud_compact::persist_summary_row(&conn, &chat_session_id, &run)
+        let conn = db.lock();
+        crate::chat::cloud_compact::persist_summary_row(&conn, chat_session_id, &run)
             .map_err(|e| e.to_string())?
     };
     crate::relay_eprintln!(
         "[compact-now] compacted {} exchange(s) into summary row {}",
         run.compacted_exchange_count, summary_id,
     );
-    crate::chat::stream_events::emit_status_reason(
-        Some(&app),
-        &chat_session_id,
-        "context_compacted",
-        format!(
-            "Compacted {} exchange(s) — {} messages now active",
-            run.compacted_exchange_count,
-            run.messages.len(),
-        ),
-    );
-    Ok(format!(
-        "Compacted {} exchange(s)",
-        run.compacted_exchange_count
-    ))
+    // NOTE: the `context_compacted` status is emitted by the CALLER (the
+    // "Compact now" command vs. the idle sweep), which word the notice
+    // differently.
+    Ok(CompactSessionOutcome {
+        compacted_exchange_count: run.compacted_exchange_count,
+        active_message_count: run.messages.len(),
+        summary_id,
+    })
 }
 
 #[cfg(test)]
@@ -1849,6 +1937,20 @@ mod tests {
         // The whole goal text is never required to include the token again —
         // a bare /goal alone also injects.
         assert_eq!(parse_invoked_skills("/goal").len(), 1);
+    }
+
+    #[test]
+    fn compaction_claim_is_exclusive_and_released_on_drop() {
+        // The process-local claim that serializes manual + idle compaction
+        // passes for one session.
+        let sid = "test-claim-session";
+        assert!(compact_in_flight().lock().insert(sid.to_string()));
+        // Held → a second insert for the same session is refused.
+        assert!(!compact_in_flight().lock().insert(sid.to_string()));
+        // The RAII claim releases the slot on drop (every exit path).
+        drop(CompactionClaim(sid.to_string()));
+        assert!(compact_in_flight().lock().insert(sid.to_string()));
+        compact_in_flight().lock().remove(sid);
     }
 }
 

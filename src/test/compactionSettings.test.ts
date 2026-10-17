@@ -1,5 +1,9 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import {
+  DEFAULT_IDLE_COMPACTION_ENABLED,
+  DEFAULT_IDLE_COMPACTION_MAX_PER_PASS,
+  DEFAULT_IDLE_COMPACTION_MIN_TOKENS,
+  DEFAULT_IDLE_COMPACTION_MINUTES,
   DEFAULT_LOCAL_COMPACTION_THRESHOLD,
   DEFAULT_LOCAL_PIN_EXCHANGES,
   useSettingsStore,
@@ -137,5 +141,70 @@ describe("cloud compaction settings — setter clamping", () => {
     expect(useSettingsStore.getState().cloudPinExchanges).toBe(3);
     useSettingsStore.getState().setCloudPinExchanges(51); // > 50
     expect(useSettingsStore.getState().cloudPinExchanges).toBe(3);
+  });
+});
+
+// Idle compaction (chat/idle_compact.rs) — the Rust sweep reads the same keys,
+// so the UI defaults/clamps must not drift from the backend loader.
+describe("idle compaction settings — defaults", () => {
+  it("ships enabled, 60 min, 200k floor, 3 per sweep", () => {
+    expect(DEFAULT_IDLE_COMPACTION_ENABLED).toBe(true);
+    expect(DEFAULT_IDLE_COMPACTION_MINUTES).toBe(60);
+    expect(DEFAULT_IDLE_COMPACTION_MIN_TOKENS).toBe(200_000);
+    expect(DEFAULT_IDLE_COMPACTION_MAX_PER_PASS).toBe(3);
+  });
+
+  it("seeds the store with those defaults before load()", () => {
+    expect(useSettingsStore.getState().idleCompactionEnabled).toBe(true);
+    expect(useSettingsStore.getState().idleCompactionMinutes).toBe(60);
+    expect(useSettingsStore.getState().idleCompactionMinTokens).toBe(200_000);
+    expect(useSettingsStore.getState().idleCompactionMaxPerPass).toBe(3);
+  });
+});
+
+describe("idle compaction settings — setter clamping", () => {
+  beforeEach(() => {
+    useSettingsStore.setState({
+      idleCompactionEnabled: true,
+      idleCompactionMinutes: 60,
+      idleCompactionMinTokens: 200_000,
+      idleCompactionMaxPerPass: 3,
+    });
+  });
+
+  it("toggles the master switch", () => {
+    useSettingsStore.getState().setIdleCompactionEnabled(false);
+    expect(useSettingsStore.getState().idleCompactionEnabled).toBe(false);
+    useSettingsStore.getState().setIdleCompactionEnabled(true);
+    expect(useSettingsStore.getState().idleCompactionEnabled).toBe(true);
+  });
+
+  it("accepts an in-band idle age and rejects out-of-band", () => {
+    useSettingsStore.getState().setIdleCompactionMinutes(120);
+    expect(useSettingsStore.getState().idleCompactionMinutes).toBe(120);
+    useSettingsStore.getState().setIdleCompactionMinutes(1); // < 5
+    expect(useSettingsStore.getState().idleCompactionMinutes).toBe(120);
+    useSettingsStore.getState().setIdleCompactionMinutes(5000); // > 1440
+    expect(useSettingsStore.getState().idleCompactionMinutes).toBe(120);
+    useSettingsStore.getState().setIdleCompactionMinutes(60.5); // not an int
+    expect(useSettingsStore.getState().idleCompactionMinutes).toBe(120);
+  });
+
+  it("accepts an in-band token floor and rejects out-of-band", () => {
+    useSettingsStore.getState().setIdleCompactionMinTokens(50_000);
+    expect(useSettingsStore.getState().idleCompactionMinTokens).toBe(50_000);
+    useSettingsStore.getState().setIdleCompactionMinTokens(500); // < 1000
+    expect(useSettingsStore.getState().idleCompactionMinTokens).toBe(50_000);
+    useSettingsStore.getState().setIdleCompactionMinTokens(6_000_000); // > 5M
+    expect(useSettingsStore.getState().idleCompactionMinTokens).toBe(50_000);
+  });
+
+  it("accepts an in-band per-sweep cap and rejects out-of-band", () => {
+    useSettingsStore.getState().setIdleCompactionMaxPerPass(5);
+    expect(useSettingsStore.getState().idleCompactionMaxPerPass).toBe(5);
+    useSettingsStore.getState().setIdleCompactionMaxPerPass(0); // < 1
+    expect(useSettingsStore.getState().idleCompactionMaxPerPass).toBe(5);
+    useSettingsStore.getState().setIdleCompactionMaxPerPass(51); // > 50
+    expect(useSettingsStore.getState().idleCompactionMaxPerPass).toBe(5);
   });
 });

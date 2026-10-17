@@ -429,6 +429,104 @@ All five phases are implemented and green: **614 Rust tests + 513 TS tests passi
 
 ---
 
+## 5. Idle compaction (2026-10-18)
+
+### 5.1 What it is / why
+
+Claude Code 2.1.299 added **idle compaction**: a 200k+ token terminal
+conversation left idle for ~54 minutes is compacted before its one-hour prompt
+cache expires, so the next message doesn't reprocess the whole history
+(`CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS` tunes the floor; `"idleCompaction": false`
+turns it off; 2.1.302 added an `/config` row).
+
+Relay has the same cost shape on its built-in paths, so §5 adapts the idea:
+
+- **Cloud built-in** — history is re-sent from the DB every turn. The first turn
+  after a long idle is a full prompt-cache miss that re-charges the entire
+  conversation. Folding the aged-out head into a summary *while idle* shrinks
+  every future turn permanently.
+- **Local GGUF** — a smaller context next turn means less context-shifting and
+  less RAM/VRAM pressure; the summarizer runs while the machine is otherwise idle.
+  Note: local windows are small (≤32k), so the default 200k floor means local
+  threads are not swept unless the floor is lowered — the feature's primary
+  target is the cloud path. Local is otherwise fully wired.
+- **Harness sessions are excluded** — their context lives inside the CLI process,
+  which a background sweep cannot reach (Relay only has the `/compact`
+  passthrough).
+
+Timing note: the idle threshold should be **at least the provider's prompt-cache
+lifetime** (5 min default, 1 h extended) so a pass doesn't run while the cache is
+still warm — compacting then would pay a cold summarizer call for a turn that
+would have been a cheap cache hit. Default idle age is 60 min.
+
+### 5.2 Design
+
+A new background sweep (`src-tauri/src/chat/idle_compact.rs`, started from
+`lib.rs` next to `automations::start`) ticks every 60 s. Each pass:
+
+1. Loads `chat.idle_compaction.*` config; returns early when disabled.
+2. Selects candidates via `db::list_idle_compact_candidates(cutoff)` —
+   built-in sessions (`agent IS NULL OR NOT LIKE 'harness:%'`) whose
+   `last_active_at <= idle_minutes` ago, excluding bot sessions and automation
+   run-logs, oldest-first.
+3. Per candidate, in order: skip if attempted in the last 5 min (in-memory
+   cooldown, so a failing pass — e.g. no running sidecar — doesn't re-log every
+   sweep, and below-floor threads aren't re-read every 60s); skip if **busy**
+   (`ChatManager::has_active_stream` OR
+   `AgentSessionManager::is_turn_in_flight`, the same pair Session Mesh and
+   checkpoint restore use); skip a cloud/API session when the user's cloud
+   auto-compaction switch (`chat.cloud.compaction_enabled`) is off — the sweep
+   is automatic, so it honors that switch even though the manual "Compact now"
+   deliberately bypasses it (`provider_is_sweepable`); skip if the newest active
+   row is already a `[compacted context]` summary (nothing appended since →
+   summarizing the summary would only compound loss); skip if the estimated
+   active history is below `min_tokens`.
+4. Runs the shared `commands::compact_session(..., force = true)` pass — the
+   exact engine "Compact now" uses (local `maybe_compact` / cloud
+   `run_cloud_compaction`, then `persist_summary_row`). `force` because the idle
+   floor, not the window threshold, decides eligibility (a 200k-token thread on
+   a 1M window never reaches 75%). Caps `max_per_pass` compactions per sweep.
+
+`Compact now` and the sweep share one code path: `chat_compact_now` was
+refactored to delegate to `compact_session`, which returns the folded exchange /
+active-message counts and lets each caller word its `context_compacted` status
+("Compacted N exchange(s) — M messages now active" vs. "…while idle").
+
+### 5.3 Settings & UX
+
+Compaction now has its own **Settings → Compaction** section (moved out of
+Local Models, where it never belonged — folding context applies to cloud and
+idle threads too). `src/components/settings/CompactionPanel.tsx` groups the
+three triggers — Idle threads, Cloud & API chats, Local models (GGUF) — each a
+switch plus a field grid. The idle group is backed by keys the Rust loader
+clamps:
+
+| Key | Default | Clamp |
+|---|---|---|
+| `chat.idle_compaction.enabled` | `true` | off-list (`false`/`0`/`off`) disables |
+| `chat.idle_compaction.idle_minutes` | `60` | 5–1440 |
+| `chat.idle_compaction.min_tokens` | `200000` | 1 000–5 000 000 |
+| `chat.idle_compaction.max_per_pass` | `3` | 1–50 |
+
+Defaults/clamps are pinned on both sides by
+`src/test/compactionSettings.test.ts` and the Rust unit tests, so the UI and the
+sweep cannot drift.
+
+The durable marker is the `[compacted context]` row itself (with the existing
+"show folded turns" recovery disclosure); the sweep additionally emits
+`context_compacted` so an open meter refreshes.
+
+### 5.4 Implementation status
+
+Shipped: `chat/idle_compact.rs` (sweep + config + guards), shared
+`commands::compact_session`, `db::list_idle_compact_candidates`, the settings
+mirror + UI block. Verified: `cargo test --lib` (1846 passed) and
+`vitest run` (the one `jsxPreviewRuntime` failure is a pre-existing flake —
+passes in isolation) green; `tsc --noEmit` and `cargo clippy --all-targets`
+clean.
+
+---
+
 ## Sources
 
 - [Context Compaction Theory (arXiv 2608.01326)](https://arxiv.org/html/2608.01326v1)

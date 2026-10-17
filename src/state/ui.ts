@@ -26,7 +26,8 @@ export type ActiveView =
   | "automations"
   | "vault"
   | "logs"
-  | "wiki";
+  | "wiki"
+  | "bots";
 
 /** Tabs in the right-side tool panel (mockups 01/03). */
 export type ToolPanelTab =
@@ -155,6 +156,19 @@ export interface UiState {
    *  (e.g. "connectors" from the sidebar's Connectors row). SettingsView
    *  consumes and clears it. */
   settingsCategory: string | null;
+  /** Bots view: the selected bot's id. The rail highlights its row and the
+   *  composer dock shows only this bot's pet while the Bots view is open. */
+  activeBotId: string | null;
+  /** Bots view: collapse the RIGHT activity rail (approvals/jobs/runs/memory)
+   *  to a thin chip — the same affordance the main chat's git tools sidebar
+   *  has. Ephemeral, like that one. */
+  botsActivityCollapsed: boolean;
+  toggleBotsActivity: () => void;
+  /** One-shot handoff: the Bots view's "Add job" sets this to the active bot
+   *  and switches to Automations, whose new-job form opens pre-bound to it.
+   *  Consumed (cleared) by the form on mount. */
+  pendingAutomationBotId: string | null;
+  setPendingAutomationBotId: (botId: string | null) => void;
   /** One-shot deep-link consumed by the Local Models settings panel: open
    *  directly on the "market" tab (used by the local-model onboarding
    *  banner). Cleared after the first consume. */
@@ -295,6 +309,7 @@ export interface UiState {
   setSidebarCollapsed: (collapsed: boolean) => void;
   toggleSidebar: () => void;
   setSettingsCategory: (category: string | null) => void;
+  setActiveBotId: (botId: string | null) => void;
   setLocalModelsOpenMarket: (open: boolean) => void;
   setDiffPanelCollapsed: (collapsed: boolean) => void;
   toggleDiffPanel: () => void;
@@ -412,6 +427,9 @@ export const useUiStore = create<UiState>((set, get) => ({
   gitPromptProjectId: null,
   sidebarCollapsed: false,
   settingsCategory: null,
+  activeBotId: null,
+  botsActivityCollapsed: false,
+  pendingAutomationBotId: null,
   localModelsOpenMarket: false,
   modalOpen: false,
   openModalIds: [],
@@ -613,6 +631,9 @@ export const useUiStore = create<UiState>((set, get) => ({
   setSidebarCollapsed: (sidebarCollapsed) => set({ sidebarCollapsed }),
   toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
   setSettingsCategory: (settingsCategory) => set({ settingsCategory }),
+  setActiveBotId: (activeBotId) => set({ activeBotId }),
+  toggleBotsActivity: () => set((s) => ({ botsActivityCollapsed: !s.botsActivityCollapsed })),
+  setPendingAutomationBotId: (pendingAutomationBotId) => set({ pendingAutomationBotId }),
   setLocalModelsOpenMarket: (localModelsOpenMarket) => set({ localModelsOpenMarket }),
   setDiffPanelCollapsed: (diffPanelCollapsed) => set({ diffPanelCollapsed }),
   toggleDiffPanel: () => set((s) => ({ diffPanelCollapsed: !s.diffPanelCollapsed })),

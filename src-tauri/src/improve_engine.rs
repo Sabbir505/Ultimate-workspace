@@ -972,6 +972,7 @@ mod tests {
                     trigger_type: None,
                     trigger_config: None,
                     chat_mode: None,
+                    bot_id: None,
                 },
             )
             .unwrap()

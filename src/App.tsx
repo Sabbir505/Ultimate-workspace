@@ -13,6 +13,7 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { installTitleBarDrag } from "./lib/titleBarDrag";
+import { isFullScreenView } from "./lib/viewKinds";
 import { ArrowLeft, ArrowRight, MessageCirclePlus } from "lucide-react";
 import { Modal } from "./components/common/Modal";
 import { ConfirmDialogHost } from "./components/common/ConfirmDialogHost";
@@ -32,6 +33,7 @@ import { ProjectsSidebar } from "./components/sidebar/ProjectsSidebar";
 import { Sidebar } from "./components/sidebar/Sidebar";
 import { AppLogo } from "./components/common/AppLogo";
 import { NotificationBell } from "./components/common/NotificationBell";
+import { BottomBar } from "./components/common/BottomBar";
 import { TOOLBAR_SLOT_ID } from "./components/common/ToolbarHeader";
 import { ModelDownloadIndicator } from "./components/settings/ModelDownloadIndicator";
 import { ChatView } from "./components/chat/ChatView";
@@ -55,6 +57,8 @@ import { useChatEvents } from "./hooks/useChatEvents";
 import { useTtsAutoRead, useTtsStreamRead } from "./hooks/useTtsAutoRead";
 import { VoiceLoopController } from "./hooks/useVoiceLoop";
 import { useAutomationEvents } from "./hooks/useAutomationEvents";
+import { useBotEvents } from "./hooks/useBotEvents";
+import { useMainChatRestore } from "./hooks/useMainChatRestore";
 import { warmCostRollups } from "./hooks/useCostRollups";
 import { useBudgetEvents } from "./hooks/useBudgetEvents";
 import { useUsageLimitEvents } from "./hooks/useUsageLimitEvents";
@@ -67,17 +71,26 @@ import { usePtyEvents } from "./hooks/usePtyEvents";
 import { usePaneMemory } from "./hooks/usePaneMemory";
 import { useNewChatAction } from "./hooks/useNewChatAction";
 import { useViewNav } from "./hooks/useViewNav";
-import { usePetEvents } from "./hooks/usePetEvents";
-import { PetTicker } from "./components/pet/PetTicker";
-import { PetCarrier } from "./components/pet/PetCarrier";
 import { useTheme } from "./hooks/useTheme";
 import { useWallpaper } from "./hooks/useWallpaper";
+import { usePetStageSettings } from "./hooks/usePetStageSettings";
 import { confirmReplaceLru } from "./lib/sessionLauncher";
 import { checkAndNotifyHarnessUpdates } from "./lib/harnessUpdates";
 import { checkAndNotifyBuildUpdates } from "./lib/buildUpdates";
 import { initWorkspacePersistence } from "./lib/workspaceRestore";
 import { initAppFocusTracking } from "./lib/appFocus";
 import { monoFontStack, uiFontStack } from "./lib/fonts";
+import {
+  loadSettingsView,
+  loadSkillsLibrary,
+  loadCostDashboard,
+  loadWikiView,
+  loadAutomationsView,
+  loadBotsView,
+  loadVaultView,
+  loadLogsView,
+  preloadAllViews,
+} from "./lib/viewPreload";
 import { useProjectsStore } from "./state/projects";
 import { useProjectsSidebarStore } from "./state/projectsSidebar";
 import { useSettingsStore } from "./state/settings";
@@ -85,25 +98,30 @@ import { useSkillsStore } from "./state/skills";
 import { useUiStore } from "./state/ui";
 import { useUpdaterStore, wireUpdaterEvents } from "./state/updater";
 import { useOcclusion } from "./hooks/useOcclusion";
+import { tauriRuntimeAvailable } from "./lib/ipc";
 
 // Lazy-loaded overlay views. They're only fetched the first time the user
 // opens them, so the initial chat page skips downloading ~700 KB of
 // settings + cost + skills code (Settings is the largest single chunk).
-const SettingsView = lazy(() => import("./components/settings/SettingsView").then((m) => ({ default: m.SettingsView })));
-const SkillsLibrary = lazy(() => import("./components/skills-library/SkillsLibrary").then((m) => ({ default: m.SkillsLibrary })));
-const CostDashboard = lazy(() => import("./components/cost-dashboard/CostDashboard").then((m) => ({ default: m.CostDashboard })));
-const WikiView = lazy(() => import("./components/wiki/WikiView").then((m) => ({ default: m.WikiView })));
-const AutomationsView = lazy(() => import("./components/automations/AutomationsView").then((m) => ({ default: m.AutomationsView })));
+const SettingsView = lazy(() => loadSettingsView().then((m) => ({ default: m.SettingsView })));
+const SkillsLibrary = lazy(() => loadSkillsLibrary().then((m) => ({ default: m.SkillsLibrary })));
+const CostDashboard = lazy(() => loadCostDashboard().then((m) => ({ default: m.CostDashboard })));
+const WikiView = lazy(() => loadWikiView().then((m) => ({ default: m.WikiView })));
+const AutomationsView = lazy(() => loadAutomationsView().then((m) => ({ default: m.AutomationsView })));
+// Bots (named persistent agents — docs/architecture/BOTS.md): the rail + the
+// bot's own conversation. Real-view-swap like automations/vault, lazily loaded
+// so the bots surface never rides in the entry chunk.
+const BotsView = lazy(() => loadBotsView().then((m) => ({ default: m.BotsView })));
 // Vault (markdown knowledge base) — same real-view-swap shape as
 // automations, lazily loaded (CodeMirror + the markdown pipeline stay out
 // of the entry chunk until the user opens the vault).
-const VaultView = lazy(() => import("./components/vault/VaultView").then((m) => ({ default: m.VaultView })));
+const VaultView = lazy(() => loadVaultView().then((m) => ({ default: m.VaultView })));
 // Subagent (declarative subagents — research doc §C.5 item 3 / Phase 2.5): the
 // agent registry plus the manual "Run" surface and run history. Real-view-swap
 // like automations/vault, lazily loaded.
 // Logs (local-model request log + gateway). Real-view-swap like subagent/vault,
 // lazily loaded so the log table never rides in the entry chunk.
-const LogsView = lazy(() => import("./components/logs/LogsView").then((m) => ({ default: m.LogsView })));
+const LogsView = lazy(() => loadLogsView().then((m) => ({ default: m.LogsView })));
 // Welcome wizard (PRD §9): lazy like the overlays — existing users never see
 // it, so its chunk shouldn't ride along with the entry bundle.
 const WelcomeWizard = lazy(() => import("./components/onboarding/WelcomeWizard").then((m) => ({ default: m.WelcomeWizard })));
@@ -125,13 +143,26 @@ export default function App() {
   const projectSettingsFor = useUiStore((s) => s.projectSettingsFor);
   const sidebarCollapsed = useUiStore((s) => s.sidebarCollapsed);
   const toggleSidebar = useUiStore((s) => s.toggleSidebar);
+  // Full-screen views: the wiki / vault / bots surfaces carry their own
+  // project rails, so the sidebar has nothing to offer there — both left
+  // panels slide away (same collapse animation as the manual toggle) while
+  // one is open. The toolbar grows a Back-to-chat arrow in exchange, since
+  // the sidebar header's back control is hidden with the rail.
+  const fullScreenView = isFullScreenView(baseView);
+  const sidebarHidden = sidebarCollapsed || fullScreenView;
   // Second sidebar: the Projects panel beside the main sidebar. Kept mounted
   // (like .sidebar) so open/close animates as a width slide and the panel's
   // expansion/paging state survives closing it.
   const projectsSidebarOpen = useProjectsSidebarStore((s) => s.open);
   // View + chat back/forward, exposed in the collapsed rail (and expanded
   // sidebar header) — restores both the view and the chat that was open.
-  const { back: navBack, forward: navForward, canBack, canForward } = useViewNav();
+  const { back: navBack, forward: navForward, canBack, canForward, backToChat } = useViewNav();
+  // Exit a full-screen view: land on the chat the user was reading, skipping
+  // any intermediate full-page views (same rule as the sidebar header's
+  // back arrow — wiki → vault → Back must land on the chat, not on vault).
+  const exitFullScreenView = () => {
+    if (!backToChat()) setActiveView("chat");
+  };
   // New Chat from the collapsed rail — same action as the sidebar's "+"
   // (shared hook so both entry points stay in lockstep).
   const handleNewChat = useNewChatAction();
@@ -160,6 +191,10 @@ export default function App() {
   // double-clicking the drag region, so listen rather than assume.
   const [winMaximized, setWinMaximized] = useState(false);
   useEffect(() => {
+    // Outside the Tauri runtime (jsdom tests / plain `vite dev` browser
+    // session) there is no window to track; `getCurrentWindow()` reads
+    // `__TAURI_INTERNALS__` and throws — which crashed the whole shell.
+    if (!tauriRuntimeAvailable()) return;
     const win = getCurrentWindow();
     let unlisten: (() => void) | null = null;
     let disposed = false;
@@ -205,12 +240,10 @@ export default function App() {
     return null;
   }, []);
 
-  // The companion pet's homes register THEMSELVES: the sidebar strip plus
-  // each rendered chat composer's strip announce their existence to the pet
-  // store on mount (see PetStrip), so the random teleport scheduler only
-  // picks homes that can actually show the pet. (Publishing the pane tree's
-  // ids instead let the pet teleport to a home whose strip wasn't rendered —
-  // it vanished until the layout happened to bring the strip back.)
+  // Bot pets are docked by BotPetDock in the two homes (the sidebar search bar
+  // and each rendered chat composer) and moved between them by drag; the
+  // single-home + drag state lives in state/botPets. The classic companion pet
+  // is retired.
 
   // Bootstrap: settings first (theme), then projects/sessions/harnesses, skills.
   useEffect(() => {
@@ -252,14 +285,21 @@ export default function App() {
     // burst above; by the time the dashboard is opened there's a payload to
     // paint immediately.
     const warmTimer = window.setTimeout(() => warmCostRollups(), 2000);
+    // Preload the lazy screen chunks once the app is interactive, so a first
+    // click on any nav entry opens from cache instead of paying a full chunk
+    // fetch (cold opens measured at 80–370 ms before this). Staggered so the
+    // imports don't all land in one task.
+    const cancelPreload = preloadAllViews();
     return () => {
       window.clearInterval(updaterTimer);
       window.clearTimeout(warmTimer);
+      cancelPreload();
     };
   }, []);
 
   useTheme();
   useWallpaper();
+  usePetStageSettings();
   useKeybindings();
   usePtyEvents();
   useChatEvents();
@@ -268,6 +308,8 @@ export default function App() {
   useTtsAutoRead();
   useTtsStreamRead();
   useAutomationEvents();
+  useBotEvents();
+  useMainChatRestore();
   useBudgetEvents();
   useUsageLimitEvents();
   useMemoryEvents();
@@ -275,9 +317,6 @@ export default function App() {
   useModelDownloadEvents();
   useBrowserMcpEvents();
   useGitStatusPolling();
-  // Companion pet: event wiring (chat/panes/automations/notifications) plus
-  // the single rAF ticker that ages its mood state.
-  usePetEvents();
 
   // Focus tracking (module singleton) — drives the "notify only when Relay
   // is in the background" rules for completion sounds + OS toasts.
@@ -333,7 +372,6 @@ export default function App() {
         <DocDesignRunner />
       </Suspense>
       <ChatSelectionToolbar />
-      <PetCarrier />
       <ChatView popoutSessionId={popout.session ?? undefined} />
     </div>
   );
@@ -350,18 +388,16 @@ export default function App() {
       {/* Hands-free voice loop (renders nothing; listens to the shared
           voiceLoop store and drives the mic / TTS state machine). */}
       <VoiceLoopController />
-      <PetTicker />
-      <PetCarrier />
       {/* Kept mounted so collapse/expand animates as a width slide instead
           of an unmount flash; the collapsed class hides it after the
           transition (visibility) so it can't be interacted with. */}
-      <div className={`sidebar${sidebarCollapsed ? " collapsed" : ""}`} aria-hidden={sidebarCollapsed}>
+      <div className={`sidebar${sidebarHidden ? " collapsed" : ""}`} aria-hidden={sidebarHidden}>
         <Sidebar />
       </div>
 
       {/* Projects panel: the nested project/chat tree, right of the main
           sidebar. Same slide-collapse recipe as .sidebar (kept mounted). */}
-      <div className={`projects-sidebar${projectsSidebarOpen ? "" : " collapsed"}`} aria-hidden={!projectsSidebarOpen}>
+      <div className={`projects-sidebar${projectsSidebarOpen && !fullScreenView ? "" : " collapsed"}`} aria-hidden={!projectsSidebarOpen || fullScreenView}>
         <ProjectsSidebar />
       </div>
 
@@ -417,6 +453,22 @@ export default function App() {
                 aria-label="New Chat"
               >
                 <MessageCirclePlus size={15} strokeWidth={1.8} />
+              </button>
+            </div>
+          )}
+          {/* Full-screen view (wiki / vault / bots): the sidebar — and with
+              it the header's back arrow — is hidden, so the caption carries
+              the Back-to-chat control instead. */}
+          {fullScreenView && !sidebarCollapsed && (
+            <div className="sidebar-collapsed-bar">
+              <button
+                type="button"
+                className="sidebar-nav-btn"
+                onClick={exitFullScreenView}
+                title="Back to chat"
+                aria-label="Back to chat"
+              >
+                <ArrowLeft size={14} strokeWidth={1.8} />
               </button>
             </div>
           )}
@@ -530,7 +582,8 @@ export default function App() {
           {baseView !== "automations" &&
           baseView !== "vault" &&
           baseView !== "logs" &&
-          baseView !== "wiki" ? (
+          baseView !== "wiki" &&
+          baseView !== "bots" ? (
             /* The split-chat pane tree (up to six full chat views, resizable
                 gutters, drag-a-session-onto-an-edge). With no splits open the
                 same renderer draws the single main pane — identical drop
@@ -545,6 +598,14 @@ export default function App() {
                fills the center area, sidebar + tool panel stay put. */
             <Suspense fallback={null}>
               <WikiView />
+            </Suspense>
+          ) : baseView === "bots" ? (
+            /* Bots — the roster + the selected bot's REAL ChatView. The
+               conversation is the same component the main pane renders, so
+               tools/approvals/artifacts work identically and the thread also
+               opens from chat history. */
+            <Suspense fallback={null}>
+              <BotsView />
             </Suspense>
           ) : baseView === "logs" ? (
             /* Local-model request log: captured bodies + telemetry. */
@@ -565,6 +626,12 @@ export default function App() {
           <TtsPlayerBar />
         </div>
       </div>
+
+      {/* Bottom bar (mirrored title bar): full-window-width strip hosting
+          the workspace view entries (Skills / Cost / Pair / Logs /
+          Settings). Absolute at the app's bottom edge — the three columns
+          stop above it via --bottombar-h (shell.css). */}
+      <BottomBar />
 
       {/* Overlays — mounted lazily so the heaviest view (Settings) only
           downloads when the user actually opens it. The chat view is the

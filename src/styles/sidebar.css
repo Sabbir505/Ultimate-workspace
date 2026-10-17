@@ -1,23 +1,8 @@
-/* Sidebar shell: the same liquid glass as the composer card (same gradient,
-   frost and border token) instead of a near-opaque fill, so both rails read
-   as one material. */
-.sidebar-glass {
-  background: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--surface-glass) 45%, transparent),
-    color-mix(in srgb, var(--surface-glass) 25%, transparent)
-  );
-  backdrop-filter: blur(24px) saturate(160%);
-  -webkit-backdrop-filter: blur(24px) saturate(160%);
-  border-right: 1px solid var(--border);
-}
-:root[data-theme="light"] .sidebar-glass {
-  background: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--surface-glass) 55%, transparent),
-    color-mix(in srgb, var(--surface-glass) 38%, transparent)
-  );
-}
+/* NOTE: the left sidebar's glass lives on the .sidebar shell itself (below),
+   matching the projects rail / title bar / bottom bar. There used to be a
+   second .sidebar-glass veil on the inner <aside>, which stacked TWO glass
+   gradients and made the left rail read brighter than every single-layer
+   surface. Do not reintroduce a second glass layer here. */
 
 /* sidebar — Sidebar shell, project tree with nested chats, artifact-library entry, connector grid, plan preview notch.
    Split out of the old monolithic global.css (2026-08-15). Import order in
@@ -29,16 +14,12 @@
   display: flex;
   flex-direction: column;
   border-right: 1px solid var(--border);
-  /* Liquid glass, same recipe as the composer card / git sidebar: a
-     translucent gradient body under a heavy frost, so the app behind the
-     sidebar reads as blurred shapes instead of a flat sheet. */
-  background: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--surface-glass) 45%, transparent),
-    color-mix(in srgb, var(--surface-glass) 25%, transparent)
-  );
-  backdrop-filter: blur(24px) saturate(160%);
-  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  /* Shared shell-chrome glass (--shell-glass-* in tokens.css): the sidebar,
+     projects rail, title bar and bottom bar all paint the same gradient over
+     the flat --bg-tint canvas, so they tint identically in every theme. */
+  background: linear-gradient(180deg, var(--shell-glass-top), var(--shell-glass-bottom));
+  backdrop-filter: var(--shell-blur);
+  -webkit-backdrop-filter: var(--shell-blur);
   box-shadow:
     var(--glass-rim),
     inset 0 0 0 1px rgba(255, 255, 255, 0.08);
@@ -48,15 +29,6 @@
   /* Collapse/expand slides the panel instead of an unmount flash. The inner
      aside keeps a fixed width (below) so content doesn't reflow mid-slide. */
   transition: width 0.28s var(--ease, ease), opacity 0.2s ease;
-}
-/* Light theme: a touch more body so text keeps contrast on bright backdrops
-   (same bump the composer card uses). */
-:root[data-theme="light"] .sidebar {
-  background: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--surface-glass) 55%, transparent),
-    color-mix(in srgb, var(--surface-glass) 38%, transparent)
-  );
 }
 .sidebar.collapsed {
   width: 0;
@@ -81,31 +53,9 @@
   width: var(--sidebar-width);
   flex-shrink: 0;
 }
-/* Liquid glass sheen — subtle animated shimmer across the sidebar surface */
-.sidebar::before {
-  content: "";
-  position: absolute;
-  inset: -50% -50%;
-  width: 200%;
-  height: 200%;
-  background:
-    radial-gradient(ellipse 80% 50% at 20% 40%, rgba(255,255,255,0.07) 0%, transparent 50%),
-    radial-gradient(ellipse 60% 40% at 80% 60%, rgba(255,255,255,0.04) 0%, transparent 50%);
-  pointer-events: none;
-  animation: liquid-shimmer 8s ease-in-out infinite;
-  z-index: 0;
-}
-@keyframes liquid-shimmer {
-  0%, 100% { transform: translate(0, 0) rotate(0deg); }
-  25% { transform: translate(2%, -1%) rotate(0.5deg); }
-  50% { transform: translate(-1%, 2%) rotate(-0.3deg); }
-  75% { transform: translate(1%, 1%) rotate(0.2deg); }
-}
-/* Ensure sidebar children sit above the shimmer layer */
-.sidebar > * {
-  position: relative;
-  z-index: 1;
-}
+/* No animated shimmer overlay: a one-sided sheen made the left rail brighter
+   (and uneven) than the projects rail / chat view. Every chrome surface now
+   shows the same flat shared-glass gradient. */
 
 /* Thin scrollbar used inside the sidebar's scroll regions (chat history,
    connector row, projects list). Overrides the global webkit-scrollbar with a
@@ -690,13 +640,9 @@ button.sidebar-section-label:hover {
   display: flex;
   flex-direction: column;
   border-right: 1px solid var(--border);
-  background: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--surface-glass) 45%, transparent),
-    color-mix(in srgb, var(--surface-glass) 25%, transparent)
-  );
-  backdrop-filter: blur(24px) saturate(160%);
-  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  background: linear-gradient(180deg, var(--shell-glass-top), var(--shell-glass-bottom));
+  backdrop-filter: var(--shell-blur);
+  -webkit-backdrop-filter: var(--shell-blur);
   box-shadow:
     var(--glass-rim),
     inset 0 0 0 1px rgba(255, 255, 255, 0.08);
@@ -704,13 +650,6 @@ button.sidebar-section-label:hover {
   z-index: 3;
   overflow: hidden;
   transition: width 0.28s var(--ease, ease), opacity 0.2s ease;
-}
-:root[data-theme="light"] .projects-sidebar {
-  background: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--surface-glass) 55%, transparent),
-    color-mix(in srgb, var(--surface-glass) 38%, transparent)
-  );
 }
 .projects-sidebar.collapsed {
   width: 0;

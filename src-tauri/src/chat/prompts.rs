@@ -746,6 +746,17 @@ pub fn detect_family_unlocks(content: &str) -> Vec<String> {
         ],
     );
     probe(
+        crate::chat::tools::FAMILY_BOTS,
+        &[
+            "bot",
+            "bots",
+            "my bot",
+            "companion agent",
+            "standing job",
+            "persona",
+        ],
+    );
+    probe(
         crate::chat::tools::FAMILY_TOTP,
         &[
             "totp",

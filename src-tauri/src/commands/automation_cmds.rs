@@ -74,6 +74,17 @@ pub(crate) fn validate_input(
             )
         })?);
     }
+    // A standing job may be bound to a bot (docs/architecture/BOTS.md). An
+    // empty string means "no bot" (the single NULL sentinel); a non-empty id
+    // must name a real bot, or the job would fall idle forever with no persona.
+    if let Some(bot_id) = input.bot_id.as_deref().map(str::trim).filter(|b| !b.is_empty()) {
+        if crate::db::bots::get_bot(conn, bot_id)
+            .map_err(|e| e.to_string())?
+            .is_none()
+        {
+            return Err(format!("bot not found: {bot_id}"));
+        }
+    }
     automation_triggers::settle_webhook_secret(input, existing);
     let trigger_type = input
         .trigger_type

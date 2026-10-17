@@ -1,8 +1,10 @@
 // Sidebar (Â§5): inbox-style layout â€” brand/search header, Artifacts,
-// Automations, then the Chat History inbox (unbound chats in one flat list,
-// two lines per row: title + working-spinner/relative time, then the
-// project Â· branch context and the provider/harness/local-model brand icon)
-// and footer links to Settings / Skills Library / Cost Dashboard. Chats bound
+// Automations, Skills & Loops, then the Chat History inbox (unbound chats in
+// one flat list, two lines per row: title + working-spinner/relative time,
+// then the project Â· branch context and the provider/harness/local-model brand
+// icon). The full-screen/overlay entries (Vault / Wiki / Bots in the bottom
+// bar; Cost / Pair / Logs / Settings there too) do not live in this rail.
+// Chats bound
 // to a project are nested under that project in the Projects panel, so they
 // are filtered out of this list.
 //
@@ -13,35 +15,25 @@
 // darker bg + border. Text uses gray-700/gray-900 (light) and slate-200/
 // white (dark). All Tailwind classes use dark: variants keyed to
 // [data-theme="dark"] so a single source of truth covers both themes.
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import { useEffect, useMemo, useRef } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useShallow } from "zustand/react/shallow";
 
-import { toastError, toastSuccess, getMobilePairingInfo, type MobilePairingInfo } from "../../lib/ipc";
 import { useChatRowActions } from "./chatRowActions";
+import { preloadView } from "../../lib/viewPreload";
 import {
   ArrowLeft,
   ArrowRight,
-  DollarSign,
-  Library,
   MessageCirclePlus,
   MessageSquare,
   Search,
-  Settings,
   CalendarClock,
   Folders,
-  Users,
-  X,
-  QrCode,
-  ScrollText,
+  Library,
 } from "lucide-react";
-import { VaultIcon } from "../../lib/icons";
-import { BookOpen } from "lucide-react";
 import { useProjectsStore } from "../../state/projects";
 import { useProjectsSidebarStore } from "../../state/projectsSidebar";
 import { useChatStore } from "../../state/chat";
-import { useWikiStore } from "../../state/wiki";
 import { useUiStore } from "../../state/ui";
 import { useArtifactsStore } from "../../state/artifacts";
 import { useAppearanceStore } from "../../state/appearance";
@@ -49,12 +41,31 @@ import { useNewChatAction } from "../../hooks/useNewChatAction";
 import { useViewNav } from "../../hooks/useViewNav";
 import { useRelativeTimeTick } from "../../hooks/useRelativeTimeTick";
 import { relativeTime } from "../../lib/relativeTime";
+import {
+  groupChatSessions,
+  nestedParentId,
+  type ChatGroupRow,
+} from "../../lib/chatSessionGroups";
 import { ArtifactLibrary } from "./ArtifactLibrary";
-import { ChatSessionRowMemo as ChatSessionRow, type ChatSessionRowData } from "../chat/ChatSessionRow";
+import {
+  ChatSessionGroupHeader,
+  ChatSessionRowMemo as ChatSessionRow,
+  type ChatSessionRowData,
+} from "../chat/ChatSessionRow";
 import { AppVersion } from "./AppVersion";
 import { UpdateButton } from "./UpdateButton";
-import { useOcclusion } from "../../hooks/useOcclusion";
-import { PetStrip } from "../pet/PetStrip";
+import { BotPetDock } from "../pet/BotPetDock";
+
+/** Stable empty map for the "needs input" selectors below: a fresh `{}` per
+ *  notification would make zustand re-render on every store change (and the
+ *  per-test mock stores omit these fields entirely). */
+const EMPTY_MAP: Record<string, never> = {};
+
+/** One entry of the virtualized Chat History list: a section header or a chat
+ *  row (itself possibly nested under a parent). */
+type ChatListEntry =
+  | { kind: "header"; key: string; label: string }
+  | { kind: "row"; key: string; row: ChatGroupRow<ChatSessionRowData> };
 
 /** Sidebar header block: Relay wordmark (collapse control), back/forward,
  *  and the search trigger — with the optional user-uploaded art behind it
@@ -164,9 +175,10 @@ export function SidebarHeader() {
           )}
         </span>
       </div>
-      {/* Companion pet — strolls along its strip directly above the search
-          box (its other home is above the chat composer). */}
-      <PetStrip myHome="sidebar" />
+      {/* Docked bot pets, directly above the search box: one per bot that
+          chose a pet (clicking one opens that bot). They live here OR on the
+          composer — drag a pet to the other home to move them. */}
+      <BotPetDock myHome="sidebar" compact />
       <div className="flex items-center gap-2">
         {/* Search / command palette trigger */}
         <button
@@ -193,19 +205,6 @@ export function Sidebar() {
   const setPaletteOpen = useUiStore((s) => s.setPaletteOpen);
   const setGitPromptProjectId = useUiStore((s) => s.setGitPromptProjectId);
   const toggleSidebar = useUiStore((s) => s.toggleSidebar);
-  // A wiki build runs in the BACKEND (leaving the view never cancels it), so
-  // the sidebar keeps a visible pulse on the Wiki entry from any view — the
-  // only build indicator outside the wiki surface itself.
-  //
-  // ONE selector, not two `useWikiStore` calls joined by `||`: a build
-  // starting flips the first to true, JS short-circuits the right operand,
-  // and the second HOOK never runs that render — the hook count changes
-  // mid-life, every later hook shifts a slot, and the crash surfaces far away
-  // (React's deps compare reading `.length` off a `useRef`'s object by way of
-  // `useViewNav`'s `useCallback`). A single selector also subscribes once.
-  const wikiBuilding = useWikiStore(
-    (s) => s.progress?.state === "running" || s.status?.jobRunning === true,
-  );
   // Projects panel (second sidebar) — open state + toggle, persisted.
   const projectsPanelOpen = useProjectsSidebarStore((s) => s.open);
   const toggleProjectsSidebar = useProjectsSidebarStore((s) => s.toggleOpen);
@@ -230,6 +229,21 @@ export function Sidebar() {
   // (i.e. every streamed token) — shallow-compare the ids so the sidebar only
   // re-renders when the SET of streaming sessions actually changes.
   const streamingIds = useChatStore(useShallow((s) => Object.keys(s.streaming)));
+  // A session "needs input" while it holds a pending approval, question, or
+  // plan proposal — the three event-driven cards that PAUSE its turn until the
+  // user acts. (Errors are not input; they keep their own per-chat banner.)
+  const pendingApprovals = useChatStore((s) => s.pendingApprovals ?? EMPTY_MAP);
+  const pendingQuestions = useChatStore((s) => s.pendingQuestions ?? EMPTY_MAP);
+  const pendingPlanProposals = useChatStore((s) => s.pendingPlanProposals ?? EMPTY_MAP);
+  const chatsNeedingInput = useMemo(
+    () =>
+      new Set([
+        ...Object.keys(pendingApprovals),
+        ...Object.keys(pendingQuestions),
+        ...Object.keys(pendingPlanProposals),
+      ]),
+    [pendingApprovals, pendingQuestions, pendingPlanProposals],
+  );
   const chatConfig = useChatStore((s) => s.config);
   const lastSelection = useChatStore((s) => s.lastSelection);
   const chatLoaded = useChatStore((s) => s.loaded);
@@ -245,59 +259,6 @@ export function Sidebar() {
 
   // Artifacts count
   const artifactItems = useArtifactsStore((s) => s.items);
-
-  // â”€â”€ Pairing QR modal (sidebar footer quick access) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  const [pairingModalOpen, setPairingModalOpen] = useState(false);
-  const [pairingInfo, setPairingInfo] = useState<MobilePairingInfo | null>(null);
-  const [pairingQr, setPairingQr] = useState<string>("");
-  const [pairingLoading, setPairingLoading] = useState(false);
-  const pairingTimer = useRef<number | null>(null);
-
-  const loadPairingInfo = useCallback(async () => {
-    try {
-      const info = await getMobilePairingInfo();
-      setPairingInfo(info);
-      // Prefer: tailnet direct (no HTTPS serve needed) â†’ HTTPS serve â†’ local USB bridge.
-      const url = info?.tailnetUrl ?? info?.tailscaleUrl ?? info?.localUrl ?? "";
-      if (url) {
-        const { default: QRCode } = await import("qrcode");
-        const dataUrl = await QRCode.toDataURL(url, { width: 240, margin: 1 });
-        setPairingQr(dataUrl);
-      } else {
-        setPairingQr("");
-      }
-    } catch {
-      setPairingInfo(null);
-      setPairingQr("");
-    } finally {
-      setPairingLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!pairingModalOpen) return;
-    setPairingLoading(true);
-    void loadPairingInfo();
-    // Poll while modal is open so QR stays fresh if serve state changes.
-    pairingTimer.current = window.setInterval(() => void loadPairingInfo(), 3000);
-    return () => {
-      if (pairingTimer.current) window.clearInterval(pairingTimer.current);
-    };
-  }, [pairingModalOpen, loadPairingInfo]);
-
-  const closePairingModal = useCallback(() => {
-    if (pairingTimer.current) window.clearInterval(pairingTimer.current);
-    setPairingModalOpen(false);
-  }, []);
-
-  const openPairingModal = useCallback(() => {
-    setPairingModalOpen(true);
-  }, []);
-
-  // The pairing QR popover isn't a Modal, so it must register itself with the
-  // webview-occlusion system (M22) — a native browser webview would otherwise
-  // paint on top of it.
-  useOcclusion("sidebar:pairing-qr", pairingModalOpen);
 
   const handleNewChat = useNewChatAction();
 
@@ -334,6 +295,12 @@ export function Sidebar() {
     () =>
       chatSessions
         .filter((s) => {
+          // A bot's sessions (its thread AND its runs) live in the Bots view
+          // rail now: clicking a bot opens its thread, and its runs sit in the
+          // bot's activity rail (docs/architecture/BOTS.md). Chat History is
+          // for the user's own conversations, so no bot-bound session shows
+          // here. A session unbound by `delete_bot` reappears as a plain chat.
+          if (s.botId != null || s.botRole === "run") return false;
           const projectId = s.projectId ?? sessionProjects[s.id] ?? null;
           return projectId == null || !projects.some((p) => p.id === projectId);
         })
@@ -365,6 +332,9 @@ export function Sidebar() {
             branchName,
             agent: s.agent ?? null,
             provider: s.provider ?? null,
+            // Child provenance: an agent-spawned session or a sidechat nests
+            // under its parent in the list below, not as a top-level row.
+            parentId: nestedParentId(s.origin),
           };
         })
         .sort(
@@ -374,25 +344,49 @@ export function Sidebar() {
     [chatSessions, sessionProjects, projects, gitStatuses, cwdOverrides, nowTick],
   );
 
+  // Group the flat inbox into Needs input / Working / Completed and nest each
+  // agent-spawned child under its parent (see ./chatSessionGroups). The render
+  // list is the flat seq of section headers + rows so the windowed list can
+  // virtualize headers and rows uniformly.
+  const streamingSet = useMemo(() => new Set(streamingIds), [streamingIds]);
+  const chatGroups = useMemo(
+    () =>
+      groupChatSessions(chatRowData, {
+        isWorking: (r) => streamingSet.has(r.id),
+        needsInput: (r) => chatsNeedingInput.has(r.id),
+      }),
+    [chatRowData, streamingSet, chatsNeedingInput],
+  );
+  const chatListEntries: ChatListEntry[] = useMemo(() => {
+    const out: ChatListEntry[] = [];
+    for (const section of chatGroups.sections) {
+      out.push({ kind: "header", key: `header:${section.key}`, label: section.label });
+      for (const row of section.rows) {
+        out.push({ kind: "row", key: row.session.id, row });
+      }
+    }
+    return out;
+  }, [chatGroups]);
+
   // PERF (PERFORMANCE_AUDIT.md mi27/F5): virtualize the flat chat-history
   // list â€” 100+ sessions used to mount 100+ ChatSessionRow subtrees (each
   // with hover action buttons + context menu wiring), making sidebar scroll
   // stutter. Rows self-measure via measureElement.
   const chatListRef = useRef<HTMLDivElement>(null);
   const chatListVirtualizer = useVirtualizer({
-    count: chatRowData.length,
+    count: chatListEntries.length,
     getScrollElement: () => chatListRef.current,
     estimateSize: () => 80,
     overscan: 8,
-    // Key cached row measurements by session id, not list index. Switching
-    // chats or creating one re-sorts the sessions array; with index-keyed
+    // Key cached row measurements by entry key, not list index. Switching
+    // chats or creating one re-sorts the entries; with index-keyed
     // measurements the cached heights attach to whatever rows moved into
     // those index slots, leaving tall phantom gaps between history rows.
-    getItemKey: (index) => chatRowData[index].id,
+    getItemKey: (index) => chatListEntries[index].key,
   });
 
   return (
-    <aside className="sidebar-glass flex flex-col h-full overflow-hidden select-none">
+    <aside className="flex flex-col h-full overflow-hidden select-none">
       <SidebarHeader />
 
       {/* â”€â”€ Pinned upper block (non-scrolling) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
@@ -404,6 +398,8 @@ export function Sidebar() {
             <button
               type="button"
               onClick={() => setActiveView("automations")}
+              onPointerEnter={() => preloadView("automations")}
+              onFocus={() => preloadView("automations")}
               className={`artifact-lib-title ${activeView === "automations" ? "is-active" : ""}`}
               style={{ width: "100%" }}
               title="Open automations"
@@ -412,35 +408,23 @@ export function Sidebar() {
               <CalendarClock size={14} strokeWidth={1.8} className="artifact-lib-title-icon" />
               <span className="artifact-lib-title-label">Automations</span>
             </button>
-            {/* Vault — the local markdown knowledge base (files on disk). */}
+            {/* Skills & Loops — moved down from the window's bottom bar, so the
+                library reads as part of the workspace's own nav stack. */}
             <button
               type="button"
-              onClick={() => setActiveView("vault")}
-              className={`artifact-lib-title ${activeView === "vault" ? "is-active" : ""}`}
+              onClick={() => setActiveView("skills")}
+              onPointerEnter={() => preloadView("skills")}
+              onFocus={() => preloadView("skills")}
+              className={`artifact-lib-title ${activeView === "skills" ? "is-active" : ""}`}
               style={{ width: "100%" }}
-              title="Open vault"
-              aria-label="Open vault"
+              title="Skills Library"
+              aria-label="Skills Library"
             >
-              <VaultIcon size={14} strokeWidth={1.8} className="artifact-lib-title-icon" />
-              <span className="artifact-lib-title-label">Vault</span>
+              <Library size={14} strokeWidth={1.8} className="artifact-lib-title-icon" />
+              <span className="artifact-lib-title-label">Skills &amp; Loops</span>
             </button>
-            {/* Wiki — the GENERATED per-project knowledge base (§6.15). The
-                per-project wiki list lives on the view's own left rail
-                (wiki.css .wiki-rail-projects), not nested under this row. */}
-            <button
-              type="button"
-              onClick={() => setActiveView("wiki")}
-              className={`artifact-lib-title ${activeView === "wiki" ? "is-active" : ""}`}
-              style={{ width: "100%" }}
-              title={wikiBuilding ? "A wiki build is running" : "Open project wiki"}
-              aria-label={
-                wikiBuilding ? "A wiki build is running — open project wiki" : "Open project wiki"
-              }
-            >
-              <BookOpen size={14} strokeWidth={1.8} className="artifact-lib-title-icon" />
-              <span className="artifact-lib-title-label">Wiki</span>
-              {wikiBuilding && <span className="sidebar-wiki-running" aria-hidden="true" />}
-            </button>
+            {/* Vault / Wiki / Bots moved to the window's bottom bar
+                (common/BottomBar) as icon-only entries. */}
             {/* Projects — toggles the nested projects panel that opens beside
                 this sidebar (state in useProjectsSidebarStore, persisted). */}
             <button
@@ -480,7 +464,7 @@ export function Sidebar() {
       </div>
       {/* â”€â”€ Scrolling chat list â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       <div className="flex-1 overflow-y-auto sidebar-thin-scroll min-h-0" ref={chatListRef}>
-        {chatRowData.length === 0 ? (
+        {chatListEntries.length === 0 ? (
           <div className="flex flex-col items-center gap-2 py-6 px-3">
             <MessageSquare size={20} className="text-gray-300 dark:text-slate-400" strokeWidth={1.5} />
             <span className="text-xs text-gray-500 dark:text-slate-300">No chats yet</span>
@@ -493,10 +477,10 @@ export function Sidebar() {
             }}
           >
             {chatListVirtualizer.getVirtualItems().map((vi) => {
-              const s = chatRowData[vi.index];
+              const entry = chatListEntries[vi.index];
               return (
                 <div
-                  key={s.id}
+                  key={entry.key}
                   data-index={vi.index}
                   ref={chatListVirtualizer.measureElement}
                   style={{
@@ -507,19 +491,28 @@ export function Sidebar() {
                     transform: `translateY(${vi.start}px)`,
                   }}
                 >
-                  <ChatSessionRow
-                    session={s}
-                    active={s.id === activeChatSessionId}
-                    working={streamingIds.includes(s.id)}
-                    onSelect={handleSelectChat}
-                    onDelete={handleDeleteChat}
-                    onRename={handleRenameChat}
-                    onToggleStar={handleToggleStar}
-                    onSetUnread={handleSetUnread}
-                    onExport={handleExportChat}
-                    onOpenSplit={handleOpenSplitChat}
-                    onFork={handleForkChat}
-                  />
+                  {entry.kind === "header" ? (
+                    <ChatSessionGroupHeader label={entry.label} />
+                  ) : (
+                    <ChatSessionRow
+                      session={entry.row.session}
+                      active={entry.row.session.id === activeChatSessionId}
+                      working={entry.row.working}
+                      nested={entry.row.nested}
+                      depth={entry.row.depth}
+                      lastChild={entry.row.lastChild}
+                      completed={entry.row.completed}
+                      needsInput={entry.row.needsInput}
+                      onSelect={handleSelectChat}
+                      onDelete={handleDeleteChat}
+                      onRename={handleRenameChat}
+                      onToggleStar={handleToggleStar}
+                      onSetUnread={handleSetUnread}
+                      onExport={handleExportChat}
+                      onOpenSplit={handleOpenSplitChat}
+                      onFork={handleForkChat}
+                    />
+                  )}
                 </div>
               );
             })}
@@ -527,112 +520,6 @@ export function Sidebar() {
         )}
       </div>
 
-      {/* â”€â”€ Pinned Footer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
-      <div className="flex-shrink-0 flex flex-row justify-center gap-2 p-2 border-t border-gray-200 dark:border-white/20">
-        <button
-          className={`sidebar-quiet-btn p-2 rounded-lg transition-all duration-150 active:scale-95 ${
-            activeView === "skills"
-              ? "bg-gray-200 dark:bg-white/15 text-gray-900 dark:text-white"
-              : "bg-transparent dark:bg-transparent text-gray-700 dark:text-slate-200 hover:bg-gray-200 dark:hover:bg-white/20 hover:text-gray-900 dark:hover:text-white"
-          }`}
-          onClick={() => setActiveView(activeView === "skills" ? "chat" : "skills")}
-          title="Skills Library"
-          aria-label="Skills Library"
-        >
-          <Library size={16} strokeWidth={1.8} />
-        </button>
-        <button
-          className={`sidebar-quiet-btn p-2 rounded-lg transition-all duration-150 active:scale-95 ${
-            activeView === "cost"
-              ? "bg-gray-200 dark:bg-white/15 text-gray-900 dark:text-white"
-              : "bg-transparent dark:bg-transparent text-gray-700 dark:text-slate-200 hover:bg-gray-200 dark:hover:bg-white/20 hover:text-gray-900 dark:hover:text-white"
-          }`}
-          onClick={() => setActiveView(activeView === "cost" ? "chat" : "cost")}
-          title="Cost"
-          aria-label="Cost"
-        >
-          <DollarSign size={16} strokeWidth={1.8} />
-        </button>
-        <button
-          className={`sidebar-quiet-btn p-2 rounded-lg transition-all duration-150 active:scale-95 ${
-            pairingModalOpen
-              ? "bg-gray-200 dark:bg-white/15 text-gray-900 dark:text-white"
-              : "bg-transparent dark:bg-transparent text-gray-700 dark:text-slate-200 hover:bg-gray-200 dark:hover:bg-white/20 hover:text-gray-900 dark:hover:text-white"
-          }`}
-          onClick={openPairingModal}
-          title="Phone pairing QR"
-          aria-label="Phone pairing QR"
-        >
-          <QrCode size={16} strokeWidth={1.8} />
-        </button>
-        <button
-          className={`sidebar-quiet-btn p-2 rounded-lg transition-all duration-150 active:scale-95 ${
-            activeView === "logs"
-              ? "bg-gray-200 dark:bg-white/15 text-gray-900 dark:text-white"
-              : "bg-transparent dark:bg-transparent text-gray-700 dark:text-slate-200 hover:bg-gray-200 dark:hover:bg-white/20 hover:text-gray-900 dark:hover:text-white"
-          }`}
-          onClick={() => setActiveView(activeView === "logs" ? "chat" : "logs")}
-          title="Model request log"
-          aria-label="Model request log"
-        >
-          <ScrollText size={16} strokeWidth={1.8} />
-        </button>
-        <button
-          className={`sidebar-quiet-btn p-2 rounded-lg transition-all duration-150 active:scale-95 ${
-            activeView === "settings"
-              ? "bg-gray-200 dark:bg-white/15 text-gray-900 dark:text-white"
-              : "bg-transparent dark:bg-transparent text-gray-700 dark:text-slate-200 hover:bg-gray-200 dark:hover:bg-white/20 hover:text-gray-900 dark:hover:text-white"
-          }`}
-          onClick={() => setActiveView(activeView === "settings" ? "chat" : "settings")}
-          title="Settings"
-          aria-label="Settings"
-        >
-          <Settings size={16} strokeWidth={1.8} />
-        </button>
-      </div>
-
-      {/* â”€â”€ Pairing QR modal (sidebar quick access) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-          Rendered via portal to document.body so it overlays the entire app
-          (the sidebar's backdrop-blur creates its own containing block,
-          which would trap a position:fixed overlay inside the rail). */}
-      {pairingModalOpen &&
-        createPortal(
-          <div className="pairing-modal" onClick={closePairingModal}>
-            <div className="pairing-modal-card" onClick={(e) => e.stopPropagation()}>
-              <div className="pairing-modal-head">
-                <span className="pairing-modal-title">Phone pairing</span>
-                <button className="pairing-modal-close" onClick={closePairingModal} aria-label="Close">
-                  <X size={16} />
-                </button>
-              </div>
-              {pairingLoading ? (
-                <p className="muted" style={{ fontSize: 12 }}>Loadingâ€¦</p>
-              ) : pairingInfo?.running && pairingQr ? (
-                <>
-                  <div className="pairing-modal-qr">
-                    <img src={pairingQr} alt="Pairing QR" width={240} height={240} />
-                  </div>
-<p className="pairing-modal-hint">
-                  Scan with the mobile app to pair. Works over Tailscale
-                  {pairingInfo.tailnetUrl || pairingInfo.tailscaleUrl ? " (cross-network)" : " (local)"}.
-                  Token rotates each time the relay restarts.
-                </p>
-                <div className="field">
-                  <label className="field-label" style={{ fontSize: 11 }}>URL</label>
-                  <code className="pairing-modal-url" style={{ color: "var(--text-dim)" }}>
-                    {pairingInfo.tailnetUrl ?? pairingInfo.tailscaleUrl ?? pairingInfo.localUrl}
-                  </code>
-                </div>
-                </>
-              ) : (
-                <p className="muted" style={{ fontSize: 12 }}>
-                  Relay is not running. Open Settings â†’ Remote to start it.
-                </p>
-              )}
-            </div>
-          </div>,
-          document.body,
-        )}
     </aside>
   );
 }

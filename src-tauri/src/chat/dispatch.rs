@@ -805,7 +805,11 @@ pub fn capability_probe_refusal(command: &str) -> Option<String> {
 /// against the background TaskManager. The permission gate has already
 /// decided (or the user approved); these calls either start a task, or read/
 /// cancel an existing one, and return text for the model.
-async fn execute_system_tool(
+///
+/// `pub(crate)` because the bot-approval replay path calls it directly:
+/// system tools are not members of the `tools::execute_tool` family ladder,
+/// so replaying an approved `run_shell`/`download_file` must land here.
+pub(crate) async fn execute_system_tool(
     app: &AppHandle,
     sid: &str,
     name: &str,
@@ -2744,7 +2748,12 @@ async fn run_attach_tool(
         let already = match id.as_str() {
             tools::FAMILY_SESSION_MESH => caps.session_mesh,
             tools::FAMILY_AUTOMATIONS => caps.automations_write,
-            _ => caps.totp,
+            tools::FAMILY_BOTS => caps.bots_write,
+            tools::FAMILY_TOTP => caps.totp,
+            // Unknown family id: treat as not-yet-unlocked rather than reading
+            // an unrelated cap (the old `_ => caps.totp` mis-reported "already
+            // unlocked" for any family it didn't know).
+            _ => false,
         };
         if already {
             return format!(
@@ -2935,6 +2944,14 @@ pub(crate) async fn run_tool(
     name: &str,
     args: &Value,
 ) -> String {
+    // Bots (docs/architecture/BOTS.md): a BACKGROUND bot run (a session with
+    // bot_role = 'run') never executes a write-class tool. The call is queued
+    // for the owner and the model gets a synthetic result telling it the
+    // action did not run and must not be retried. Sessions that belong to no
+    // bot — and a bot's own interactive thread — fall through unchanged.
+    if let Some(queued) = crate::chat::queue_if_background_write(app, sid, name, args) {
+        return queued;
+    }
     if crate::chat::plan::is_plan_tool(name) || crate::hooks::is_exempt(name) {
         return run_tool_inner(client, artifacts_dir, caps, sandbox, approval, mgr, app, sid, name, args)
             .await;
@@ -3062,6 +3079,35 @@ async fn run_tool_inner(
     // on. delete keeps the stricter delete_file posture; run_now launches an
     // already-approved automation. Plan mode has already refused the mutating
     // ones above via is_mutating_tool.
+    if tools::is_bot_tool(name) {
+        // Bot CRUD mirrors the automation family: reads (list_bots) and the
+        // read-class delegation (ask_bot) run inline; authoring, deleting and
+        // running are carded in EVERY posture — creating a bot is the moment
+        // of consent, exactly like creating an automation.
+        let decision = if name == tools::LIST_BOTS || name == tools::ASK_BOT {
+            permission::PermissionDecision::AutoRun
+        } else if !sandbox.allows_mutating_tools() {
+            permission::PermissionDecision::NeedsApproval
+        } else {
+            permission::PermissionDecision::NeedsApproval
+        };
+        if matches!(decision, permission::PermissionDecision::NeedsApproval) {
+            let summary = tools::bot_tool_summary(name, args);
+            return run_gated(
+                mgr,
+                app,
+                sid,
+                name,
+                args,
+                summary,
+                gated_deny_text(name),
+                || async { tools::execute_bot_tool(app, name, args).await },
+            )
+            .await;
+        }
+        return tools::execute_bot_tool(app, name, args).await;
+    }
+
     if tools::is_automation_tool(name) {
         let decision = if name == tools::LIST_AUTOMATIONS || name == tools::GET_AUTOMATION {
             permission::PermissionDecision::AutoRun
@@ -5404,11 +5450,17 @@ async fn run_memory_tool(app: &AppHandle, sid: &str, name: &str, args: &Value) -
                     Memory. Do not retry; answer without remembered context."
                 .to_string();
         }
+        // A bot with memory_enabled = false has no memory of its own AND may
+        // not read the user's (docs/architecture/BOTS.md).
+        if !db::bots::memory_enabled_for_session(&conn, sid).unwrap_or(true) {
+            return "Memory is switched off for this bot — answer without remembered context."
+                .to_string();
+        }
     }
     match name {
         tools::MEMORY_SAVE => crate::memory::tools_impl::memory_save(app, sid, args).await,
-        tools::MEMORY_RECALL => crate::memory::tools_impl::memory_recall(app, args),
-        tools::MEMORY_FORGET => crate::memory::tools_impl::memory_forget(app, args),
+        tools::MEMORY_RECALL => crate::memory::tools_impl::memory_recall(app, sid, args),
+        tools::MEMORY_FORGET => crate::memory::tools_impl::memory_forget(app, sid, args),
         _ => format!("Error: unknown memory tool {name}"),
     }
 }

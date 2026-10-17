@@ -415,6 +415,7 @@ fn create_automation(app: &AppHandle, args: &Value) -> String {
         trigger_type,
         trigger_config,
         chat_mode,
+        bot_id: None,
     };
     // Same validation + webhook-secret settle the form command uses (one
     // code path, no drift). Cron rows still validate `schedule` here.
@@ -573,6 +574,7 @@ fn update_automation(app: &AppHandle, args: &Value) -> String {
         trigger_type: trigger_type.clone(),
         trigger_config,
         chat_mode: chat_mode.clone(),
+        bot_id: None,
     };
     // Same validation + webhook-secret settle as the form command, WITH the
     // stored row so a switch to webhook (or a redacted config) carries the
@@ -762,6 +764,7 @@ mod tests {
             chat_mode: "per_run".into(),
             last_trigger_state: None,
             last_event_run_at: None,
+            bot_id: None,
         };
         let out = format_automation_detail(&a);
         assert!(out.contains(&long_prompt), "prompt must be verbatim");

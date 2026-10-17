@@ -1,11 +1,11 @@
-//! Message types for mobile ↔ desktop relay communication (JSON over WebSocket).
+//! Message types for mobile Ã¢â€ â€ desktop relay communication (JSON over WebSocket).
 
 use serde::{Deserialize, Serialize};
 
 use crate::chat::providers::ChatMessage;
 
 // ---------------------------------------------------------------------------
-// Mobile → Desktop messages
+// Mobile Ã¢â€ â€™ Desktop messages
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -13,7 +13,7 @@ use crate::chat::providers::ChatMessage;
 pub enum MobileMessage {
     /// First frame every WebSocket connection MUST send. Two pairing modes:
     ///
-    /// - **E2E (§3.2.11):** send only `proof` = lowercase-hex
+    /// - **E2E (Ã‚Â§3.2.11):** send only `proof` = lowercase-hex
     ///   `HMAC-SHA256(key = token, data = "E2E")`. The desktop verifies the
     ///   proof against its per-launch token, both sides derive a session key
     ///   from the token via HKDF, and every subsequent frame is
@@ -35,7 +35,7 @@ pub enum MobileMessage {
         /// client understands `PairChallenge` and its `proof` is
         /// `HMAC(token, "E2E-NONCE-V1" || this connection's nonce)`. When
         /// true the desktop requires the nonce-bound proof and will NOT fall
-        /// back to the legacy static proof — so replaying a captured static
+        /// back to the legacy static proof Ã¢â‚¬â€ so replaying a captured static
         /// proof at a v2 client's identity fails. Old builds omit the field
         /// (serde default) and keep the legacy path.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -45,7 +45,7 @@ pub enum MobileMessage {
         /// (`SHA256(challenge || salt)`) before deriving its session key and
         /// refuses a replayed challenge, so a relay MITM replaying a recorded
         /// `PairOk` salt cannot re-derive a previous connection's key (whose
-        /// counter nonces restart at 0 → keystream + one-time-key reuse). The
+        /// counter nonces restart at 0 Ã¢â€ â€™ keystream + one-time-key reuse). The
         /// desktop derives the SAME bound salt when this flag is set; pre-v3
         /// clients keep the raw-salt derivation.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -57,13 +57,53 @@ pub enum MobileMessage {
     /// picks the new state up on the next poll.
     SetSessionStarred { session_id: String, starred: bool },
     /// The artifact library: every chat's latest artifact, newest first
-    /// (desktop Sidebar → ArtifactLibrary parity).
+    /// (desktop Sidebar Ã¢â€ â€™ ArtifactLibrary parity).
     ListArtifacts,
-    /// Cost-dashboard rollups for N days (desktop Settings → Cost parity).
+    /// Cost-dashboard rollups for N days (desktop Settings Ã¢â€ â€™ Cost parity).
     GetCostRollups {
         #[serde(default)]
         days: Option<u32>,
     },
+    /// Usage meters + limits (desktop UsageLimitsPanel parity): rolling
+    /// local windows, provider/CLI-reported plan windows and configured caps
+    /// for every metered provider / CLI harness.
+    GetUsageMeters,
+    /// Re-run the warn/crit pass (desktop refresh after a manual provider
+    /// refresh): returns the meters plus the current alert set.
+    CheckUsageLimits,
+    /// Upsert a cap. A zero/absent cap on every unit clears the entry.
+    SetUsageLimit {
+        /// Rollup identity: `chat:<provider>` or a bare harness id.
+        target: String,
+        /// `hour` | `day` | `week` | `month` (anything else normalises to day).
+        window: String,
+        #[serde(default)]
+        cap_usd: Option<f64>,
+        #[serde(default)]
+        cap_tokens: Option<i64>,
+        #[serde(default)]
+        cap_requests: Option<i64>,
+        #[serde(default)]
+        threshold_pct: Option<f64>,
+    },
+    RemoveUsageLimit {
+        target: String,
+        window: String,
+    },
+    /// Re-probe provider/CLI-reported plan windows (desktop panel refresh).
+    RefreshUsageWindows,
+    /// Per-artifact cost attribution (desktop ArtifactCostPanel parity):
+    /// live runs plus the improvement engine's own eval turns, per artifact.
+    GetArtifactCosts {
+        #[serde(default)]
+        range_days: Option<i64>,
+    },
+    /// Live price-table freshness (desktop price bar parity): epoch seconds
+    /// of the last successful fetch, or null when never fetched (in which case
+    /// the compiled rate table is pricing everything).
+    GetPriceInfo,
+    /// Force a live price fetch now (desktop prices_refresh_now parity).
+    RefreshPrices,
     /// Query active CLI sessions running on the desktop.
     ListSessions,
     /// Start a chat turn. The desktop creates a temporary session, streams
@@ -87,7 +127,7 @@ pub enum MobileMessage {
     /// Request the pty transcript for a session (the full scrollback).
     GetTranscript { session_id: String },
     /// Create a new CLI session under a project. `provider`/`model` are the
-    /// phone-picked model for the new chat (omitted → "auto" routing, the
+    /// phone-picked model for the new chat (omitted Ã¢â€ â€™ "auto" routing, the
     /// desktop's fresh-chat default).
     CreateSession {
         project_id: String,
@@ -96,7 +136,7 @@ pub enum MobileMessage {
         provider: Option<String>,
         #[serde(default)]
         model: Option<String>,
-        /// Reasoning effort for the new chat ("" / absent = provider default) —
+        /// Reasoning effort for the new chat ("" / absent = provider default) Ã¢â‚¬â€
         /// the phone's picker slider, same wire values the desktop stores.
         #[serde(default)]
         effort: Option<String>,
@@ -138,7 +178,7 @@ pub enum MobileMessage {
         session_id: String,
         pending_id: String,
         decision: String,
-        /// "Always allow" — persist an approval rule so this tool stops
+        /// "Always allow" Ã¢â‚¬â€ persist an approval rule so this tool stops
         /// prompting. Only meaningful for the filesystem mutators the desktop
         /// rules engine governs (write_file / edit_file / delete_file /
         /// move_file / copy_file); ignored for everything else.
@@ -173,7 +213,7 @@ pub enum MobileMessage {
     /// about approvals / completions while no WebSocket is connected.
     RegisterPushToken {
         token: String,
-        /// "ios" | "android" | "web" — diagnostics only today.
+        /// "ios" | "android" | "web" Ã¢â‚¬â€ diagnostics only today.
         platform: String,
     },
     /// List the artifacts attached to this session's messages.
@@ -183,7 +223,7 @@ pub enum MobileMessage {
     /// Lightweight artifact preview for the library GRID (desktop
     /// ArtifactLibrary parity): a text snippet for text-like kinds, a data
     /// URI for images, nothing for binaries. Same containment gate as
-    /// `ReadArtifact` — the relay applies it before calling the core.
+    /// `ReadArtifact` Ã¢â‚¬â€ the relay applies it before calling the core.
     ReadArtifactPreview {
         path: String,
     },
@@ -207,7 +247,7 @@ pub enum MobileMessage {
     RebuildWiki { path: String },
     CancelWikiJob { path: String },
     /// Read one artifact's bytes for on-device preview. The path is
-    /// containment-checked against the desktop's artifacts directory — the
+    /// containment-checked against the desktop's artifacts directory Ã¢â‚¬â€ the
     /// relay must never become an arbitrary-file-read primitive.
     ReadArtifact {
         session_id: String,
@@ -217,9 +257,22 @@ pub enum MobileMessage {
     ListChatSkills,
     /// Automations (desktop Automations view parity).
     ListAutomations,
-    /// ACP agents (desktop picker "Agents · ACP" rail parity).
+    /// List the desktop's bots (rail parity: dot state, job count, how many
+    /// writes are waiting for approval).
+    ListBots,
+    /// List queued background writes — optionally only one bot's.
+    ListBotApprovals {
+        #[serde(default)]
+        bot_id: Option<String>,
+    },
+    /// Approve or deny a queued background write.
+    ResolveBotApproval {
+        id: String,
+        approve: bool,
+    },
+    /// ACP agents (desktop picker "Agents Ã‚Â· ACP" rail parity).
     ListAcpAgents,
-    /// Memory (desktop Settings → Memory parity): browse, edit, forget, purge.
+    /// Memory (desktop Settings Ã¢â€ â€™ Memory parity): browse, edit, forget, purge.
     ListMemoryRecords {
         #[serde(default)]
         include_inactive: Option<bool>,
@@ -285,7 +338,7 @@ pub enum MobileMessage {
         #[serde(default)]
         limit: Option<usize>,
     },
-    /// Per-project spend caps (desktop Cost → Budgets parity).
+    /// Per-project spend caps (desktop Cost Ã¢â€ â€™ Budgets parity).
     ListBudgets,
     SetBudget {
         project_id: String,
@@ -322,7 +375,7 @@ pub enum MobileMessage {
     /// Connectors + their connection state (composer @-menu parity).
     ListConnectors,
     /// Replace the connectors attached to a chat session (the @-menu's
-    /// toggle) — same per-session set the desktop composer edits.
+    /// toggle) Ã¢â‚¬â€ same per-session set the desktop composer edits.
     SetSessionConnectors {
         session_id: String,
         connector_ids: Vec<String>,
@@ -332,7 +385,7 @@ pub enum MobileMessage {
         session_id: String,
     },
     CreateAutomation {
-        /// `AutomationInput` shape (name/prompt/harness/model/cwd/schedule/…).
+        /// `AutomationInput` shape (name/prompt/harness/model/cwd/schedule/Ã¢â‚¬Â¦).
         input: serde_json::Value,
     },
     UpdateAutomation {
@@ -401,7 +454,7 @@ pub enum MobileMessage {
         session_id: String,
         mode: String,
     },
-    /// `/compact` — summarize older turns now.
+    /// `/compact` Ã¢â‚¬â€ summarize older turns now.
     CompactSession {
         session_id: String,
     },
@@ -434,10 +487,10 @@ pub enum MobileMessage {
 }
 
 // ---------------------------------------------------------------------------
-// Desktop → Mobile messages
+// Desktop Ã¢â€ â€™ Mobile messages
 // ---------------------------------------------------------------------------
 
-/// One connector row (composer @-menu parity) — mirrors
+/// One connector row (composer @-menu parity) Ã¢â‚¬â€ mirrors
 /// `ConnectorWithStatus` without the OAuth plumbing the phone never needs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectorInfo {
@@ -491,7 +544,7 @@ pub struct BudgetInfo {
     pub project_id: String,
     /// Monthly cap in USD; non-positive means "no budget".
     pub monthly_usd: f64,
-    /// 0..100 — percent of the cap at which the alert fires.
+    /// 0..100 Ã¢â‚¬â€ percent of the cap at which the alert fires.
     pub threshold_pct: f64,
 }
 
@@ -526,6 +579,41 @@ pub struct AutomationInfo {
     pub origin: String,
     /// "cron" | "webhook" | "file" | "git" | "gmail"
     pub trigger_type: String,
+}
+
+/// One bot as the phone sees it (docs/architecture/BOTS.md). Kept to what the
+/// list and the approval sheet need: identity, state, and how much is waiting
+/// for the user. The bot's memory/persona stay on the desktop.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BotInfo {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub emoji: String,
+    pub color: String,
+    /// One of the six pets, or "" for none.
+    pub pet: String,
+    pub enabled: bool,
+    /// Standing jobs bound to this bot.
+    pub jobs: i64,
+    /// Writes a background run queued for the owner.
+    pub pending_approvals: i64,
+    /// A run is in flight right now.
+    pub running: bool,
+}
+
+/// Pending (and recently resolved) background writes awaiting the owner.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BotApprovalInfo {
+    pub id: String,
+    pub bot_id: String,
+    pub bot_name: String,
+    pub summary: String,
+    pub tool_name: String,
+    /// The declared arguments, serialized — the phone shows them read-only.
+    pub args_json: String,
+    pub status: String,
+    pub created_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -595,11 +683,11 @@ pub enum DesktopMessage {
     },
     /// Active CLI session list response.
     SessionList { sessions: Vec<SessionInfo> },
-    /// Artifact library response (desktop Sidebar → ArtifactLibrary parity).
+    /// Artifact library response (desktop Sidebar Ã¢â€ â€™ ArtifactLibrary parity).
     ArtifactLibrary {
         artifacts: Vec<ArtifactLibraryEntry>,
     },
-    /// Cost rollups response — the same payload the desktop CostDashboard
+    /// Cost rollups response Ã¢â‚¬â€ the same payload the desktop CostDashboard
     /// renders (totals, byKind, perModel, perProject, daily). Held as a
     /// pre-serialized value: CostRollups serializes but doesn't derive
     /// Deserialize, and the enum requires both directions.
@@ -626,7 +714,7 @@ pub enum DesktopMessage {
     /// Pairing challenge (anti-replay, 2026-10-01). Sent PLAINTEXT the moment
     /// the WebSocket is accepted, BEFORE any Pair frame is read. Challenge-
     /// capable clients answer with `Pair { v2: true, proof }` where proof =
-    /// `HMAC(key = token, "E2E-NONCE-V1" || nonce)` — bound to THIS
+    /// `HMAC(key = token, "E2E-NONCE-V1" || nonce)` Ã¢â‚¬â€ bound to THIS
     /// connection, so a captured Pair frame cannot be replayed. Clients that
     /// never saw a challenge (pre-v2 builds) keep the legacy static proof;
     /// `mobile.pairing.require_challenge` refuses it once the fleet is v2.
@@ -636,10 +724,10 @@ pub enum DesktopMessage {
     /// and before any encrypted frame (same-socket ordering guarantees the
     /// phone processes it first). The salt is public: the session key is
     /// `HKDF(ikm = token, salt)` on both sides, so the key is unique per
-    /// connection (audit C1 — reconnecting must not reuse nonces under one
+    /// connection (audit C1 Ã¢â‚¬â€ reconnecting must not reuse nonces under one
     /// key). Base64url (no padding), 32 bytes.
     PairOk { salt: String },
-    /// Response to GetTranscript — the rendered terminal screen (SGR-styled
+    /// Response to GetTranscript Ã¢â‚¬â€ the rendered terminal screen (SGR-styled
     /// rows) plus the terminal size, so the phone can fit the font to the
     /// terminal's column count instead of sideways-scrolling a desktop-width
     /// layout.
@@ -649,7 +737,7 @@ pub enum DesktopMessage {
         cols: u16,
         rows: u16,
         /// M11: true when the screen is byte-identical to the last snapshot
-        /// sent on this connection — `text` is empty and the client should
+        /// sent on this connection Ã¢â‚¬â€ `text` is empty and the client should
         /// keep rendering the previous snapshot. Full-screen SGR snapshots
         /// are the relay's largest messages; deduping them kills the
         /// per-poll bandwidth while the terminal is static.
@@ -702,7 +790,7 @@ pub enum DesktopMessage {
     /// Aggregate spend response (today + rolling 7 days).
     /// `version: 2` = read-time priced (same source as the desktop rollup).
     CostSummary { today: f64, week: f64, version: u32 },
-    /// Detailed cost breakdown response — same shape the desktop
+    /// Detailed cost breakdown response Ã¢â‚¬â€ same shape the desktop
     /// CostDashboard renders: daily spend, per-project totals, and per
     /// local-model token usage. All figures are best-effort estimates.
     CostDetails {
@@ -711,7 +799,7 @@ pub enum DesktopMessage {
         local_models: Vec<LocalModelUsageEntry>,
     },
     /// Ack for `StartLocalModel`: the sidecar is up and serving at `base_url`,
-    /// so the phone can clear its "Loading local model…" banner.
+    /// so the phone can clear its "Loading local modelÃ¢â‚¬Â¦" banner.
     LocalModelReady {
         model: String,
         base_url: String,
@@ -750,7 +838,7 @@ pub enum DesktopMessage {
         summary: String,
         args: serde_json::Value,
     },
-    /// The approval was resolved (from ANY surface — desktop card or phone)
+    /// The approval was resolved (from ANY surface Ã¢â‚¬â€ desktop card or phone)
     /// so every phone can dismiss its matching card instead of waiting for a
     /// timeout that never comes.
     SessionApprovalResolved {
@@ -766,7 +854,7 @@ pub enum DesktopMessage {
         title: String,
         plan: String,
     },
-    /// Ack for `SetSessionModel` — the session row now carries this model.
+    /// Ack for `SetSessionModel` Ã¢â‚¬â€ the session row now carries this model.
     SessionModelSet {
         session_id: String,
         provider_id: String,
@@ -819,7 +907,7 @@ pub enum DesktopMessage {
     SessionCompacted {
         session_id: String,
     },
-    /// Response to `GetSessionMeta` — header + model-sheet state for a chat.
+    /// Response to `GetSessionMeta` Ã¢â‚¬â€ header + model-sheet state for a chat.
     SessionMeta {
         session_id: String,
         provider: String,
@@ -832,7 +920,7 @@ pub enum DesktopMessage {
         /// full_auto) so the phone's mode chip starts on the real value.
         #[serde(default)]
         permission_mode: Option<String>,
-        /// The chat's bound project, when one is bound — keys the diff peek
+        /// The chat's bound project, when one is bound Ã¢â‚¬â€ keys the diff peek
         /// (file-edit activity rows fetch that project's git diff for path).
         #[serde(default)]
         project_id: Option<String>,
@@ -940,6 +1028,19 @@ pub enum DesktopMessage {
     AutomationList {
         automations: Vec<AutomationInfo>,
     },
+    /// Response to `ListBots`.
+    BotsList {
+        bots: Vec<BotInfo>,
+    },
+    /// Response to `ListBotApprovals`.
+    BotApprovalsList {
+        approvals: Vec<BotApprovalInfo>,
+    },
+    /// Ack for `ResolveBotApproval` — the phone re-fetches to converge.
+    BotApprovalResolved {
+        id: String,
+        status: String,
+    },
     /// Ack for `CreateAutomation` / `UpdateAutomation` / `SetAutomationEnabled`
     /// (the phone re-lists to converge).
     AutomationUpdated {
@@ -953,7 +1054,7 @@ pub enum DesktopMessage {
     AutomationRunStarted {
         automation_id: String,
     },
-    /// Ack for `StopAutomationRun` — `stopped` false means the run already
+    /// Ack for `StopAutomationRun` Ã¢â‚¬â€ `stopped` false means the run already
     /// ended or belongs to the Task-Scheduler binary (desktop parity).
     AutomationRunStopped {
         automation_id: String,
@@ -968,7 +1069,7 @@ pub enum DesktopMessage {
     ChatSkills {
         skills: Vec<ChatSkillInfo>,
     },
-    /// Response to `ReadArtifactPreview` — the desktop `ArtifactPreview`
+    /// Response to `ReadArtifactPreview` Ã¢â‚¬â€ the desktop `ArtifactPreview`
     /// shape (Serialize-only there, mirrored here for the phone enum).
     ArtifactPreviewMsg {
         path: String,
@@ -981,7 +1082,7 @@ pub enum DesktopMessage {
         data_uri: Option<String>,
         truncated: bool,
     },
-    /// Response to `ListHarnessModels` — one CLI harness's own model catalog,
+    /// Response to `ListHarnessModels` Ã¢â‚¬â€ one CLI harness's own model catalog,
     /// endpoint, and effort tiers (the desktop harness pane's payload).
     HarnessModels {
         harness_id: String,
@@ -1000,13 +1101,13 @@ pub enum DesktopMessage {
         session_id: String,
         artifacts: Vec<ChatArtifactPayload>,
     },
-    /// Response to `ReadArtifact` — preview bytes for one artifact.
+    /// Response to `ReadArtifact` Ã¢â‚¬â€ preview bytes for one artifact.
     /// `text` for previewable text formats, `data_base64` otherwise.
     ArtifactContent {
         session_id: String,
         path: String,
         filename: String,
-        /// Extension-derived format tag ("md", "pdf", "png", …).
+        /// Extension-derived format tag ("md", "pdf", "png", Ã¢â‚¬Â¦).
         kind: String,
         #[serde(default)]
         text: Option<String>,
@@ -1030,7 +1131,7 @@ pub enum DesktopMessage {
         artifact: ChatArtifactPayload,
     },
     /// Broadcast to every connected phone when an automation run finishes
-    /// (scheduled or manual). The phone shows it as a local alert — the
+    /// (scheduled or manual). The phone shows it as a local alert Ã¢â‚¬â€ the
     /// "your nightly task failed" pocket pager.
     AutomationRunFinished {
         automation_id: String,
@@ -1045,6 +1146,31 @@ pub enum DesktopMessage {
         project_name: String,
         monthly_usd: f64,
         spent_usd: f64,
+    },
+    /// Response to `GetUsageMeters` / `CheckUsageLimits`. Meters are keyed by
+    /// `target` on the phone, so the whole list is sent; the nested structs
+    /// are the desktop's camelCase usage payloads passed through as
+    /// `serde_json::Value` (see commands/usage.rs `rename_all`).
+    UsageMeters {
+        meters: Vec<serde_json::Value>,
+        alerts: Vec<serde_json::Value>,
+    },
+    /// Ack for `SetUsageLimit` / `RemoveUsageLimit` / `RefreshUsageWindows`.
+    /// `usage-limits` domain errors are reported through this frame so the
+    /// phone can show WHY a cap edit failed instead of silently no-oping.
+    UsageLimitsAck {
+        ok: bool,
+        error: Option<String>,
+    },
+    /// Response to `GetArtifactCosts`: per-artifact rows (the desktop
+    /// `ArtifactCost` payload, camelCase, passed through as JSON).
+    ArtifactCosts {
+        rows: Vec<serde_json::Value>,
+    },
+    /// Response to `GetPriceInfo` / `RefreshPrices`: epoch seconds of the last
+    /// successful live price fetch, or null when never fetched.
+    PriceInfo {
+        fetched_at: Option<i64>,
     },
 }
 
@@ -1097,20 +1223,20 @@ pub struct ProviderInfo {
 }
 
 /// One model row of a harness's own catalog (desktop AgentModelPicker pane
-/// parity): `source` is "config" | "cli" | "builtin" — the badge the desktop
+/// parity): `source` is "config" | "cli" | "builtin" Ã¢â‚¬â€ the badge the desktop
 /// shows next to the label.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct HarnessModelRow {
     pub id: String,
     pub label: String,
     pub source: String,
-    /// Per-model thinking tiers (empty → the harness-wide effort_options).
+    /// Per-model thinking tiers (empty Ã¢â€ â€™ the harness-wide effort_options).
     #[serde(default)]
     pub thinking: Vec<String>,
 }
 
 /// An agent-harness family the desktop can drive (Claude Code, Kimi Code,
-/// OpenCode, …). Mirrors the desktop agent picker's entries.
+/// OpenCode, Ã¢â‚¬Â¦). Mirrors the desktop agent picker's entries.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HarnessInfo {
     pub id: String,
@@ -1118,7 +1244,7 @@ pub struct HarnessInfo {
     /// Whether the CLI is installed on the desktop (probed with a 30s cache;
     /// may be false purely because the cache is cold).
     pub installed: bool,
-    /// The CLI's own model catalog + endpoint + effort tiers — filled from
+    /// The CLI's own model catalog + endpoint + effort tiers Ã¢â‚¬â€ filled from
     /// the warm probe cache when available; the phone fetches a cold pane's
     /// catalog via ListHarnessModels (desktop fetches on picker open too).
     #[serde(default)]
@@ -1133,7 +1259,7 @@ pub struct HarnessInfo {
     pub effort_options: Vec<String>,
 }
 
-/// One entry of the artifact library — the same deduped, newest-first list
+/// One entry of the artifact library Ã¢â‚¬â€ the same deduped, newest-first list
 /// the desktop's sidebar ArtifactLibrary renders. `chat_session_id` lets the
 /// phone open/read the artifact through the existing session-scoped read op.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1141,7 +1267,7 @@ pub struct ArtifactLibraryEntry {
     pub chat_session_id: Option<String>,
     pub filename: String,
     pub path: String,
-    /// Lowercase extension: "docx" | "pptx" | "pdf" | "xlsx" | "html" | …
+    /// Lowercase extension: "docx" | "pptx" | "pdf" | "xlsx" | "html" | Ã¢â‚¬Â¦
     pub kind: String,
     pub created_at: i64,
 }
@@ -1166,7 +1292,7 @@ pub struct SessionInfo {
     pub project_name: String,
     pub title: String,
     pub harness: String,
-    /// "working" | "waiting" | "diff_ready" | "idle" — reflects whether a
+    /// "working" | "waiting" | "diff_ready" | "idle" Ã¢â‚¬â€ reflects whether a
     /// live pty exists for this session.
     pub status: String,
     pub last_active_at: i64,
@@ -1177,7 +1303,7 @@ pub struct SessionInfo {
     pub starred: bool,
     #[serde(default)]
     pub unread: bool,
-    /// Reasoning effort stored on the chat row (None = provider default) —
+    /// Reasoning effort stored on the chat row (None = provider default) Ã¢â‚¬â€
     /// seeds the picker's effort slider.
     #[serde(default)]
     pub effort: Option<String>,
@@ -1245,7 +1371,7 @@ pub struct MobileChatUsage {
 pub struct ChatArtifactPayload {
     pub path: String,
     pub filename: String,
-    /// Extension-derived format tag ("md", "pdf", "png", "docx", …) so the
+    /// Extension-derived format tag ("md", "pdf", "png", "docx", Ã¢â‚¬Â¦) so the
     /// phone can pick a preview without reading the bytes.
     #[serde(default)]
     pub kind: Option<String>,

@@ -423,6 +423,22 @@ pub struct ChatSession {
     /// `ON DELETE SET NULL`: deleting the definition keeps the sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_def_id: Option<String>,
+    /// The bot this session belongs to (docs/architecture/BOTS.md). `None` =
+    /// a plain chat: the send path, memory pipeline and prompt-cache warmup
+    /// behave exactly as they did before bots existed. A session with a
+    /// `bot_id` gets the bot's persona layered onto the global prompt, scopes
+    /// memory to profile `bot:<id>`, and (in a background run) never executes
+    /// write-class tools without the owner's approval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bot_id: Option<String>,
+    /// `"thread"` = the bot's one conversation (visible in Chat History, like
+    /// any session); `"run"` = one standing-job execution (hidden from Chat
+    /// History and opened from the bot's activity strip). `None` = plain chat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bot_role: Option<String>,
+    /// The automation that spawned a run session (`automations.id`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bot_job_id: Option<String>,
 }
 
 fn default_permission_mode() -> String {
@@ -591,6 +607,14 @@ pub struct ChatMessageRecord {
     pub ttft_ms: Option<i64>,
     #[serde(default)]
     pub tokens_per_second: Option<f64>,
+    /// Command-only / context-only row marker. `None` for ordinary
+    /// user/assistant turns; `'artifact_command'` marks a /create anchor row
+    /// and `'sidechat_seed'` a sidechat's hidden handoff snapshot. SQL readers
+    /// that must not see one of these filter the column server-side; the
+    /// column is exposed here so the harness primer can recognise a leading
+    /// sidechat seed without a second query.
+    #[serde(default)]
+    pub kind: Option<String>,
 }
 
 /// One recorded fact/claim a research turn extracted from a single source page.

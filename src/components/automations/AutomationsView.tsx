@@ -51,6 +51,7 @@ import {
   type GgufModel,
 } from "../../lib/ipc";
 import { useAutomationsStore } from "../../state/automations";
+import { ensureBotsLoaded, useBotsStore } from "../../state/bots";
 import { ToolbarHeader } from "../common/ToolbarHeader";
 import { GlassSelect } from "../common/GlassSelect";
 import { useSubagentStore } from "../../state/subagents";
@@ -308,6 +309,7 @@ export function AutomationsView() {
   const runningNow = useAutomationsStore((s) => s.runningNow);
   const pendingArtifactFormData = useUiStore((s) => s.pendingArtifactFormData);
   const setPendingArtifactFormData = useUiStore((s) => s.setPendingArtifactFormData);
+  const pendingAutomationBotId = useUiStore((s) => s.pendingAutomationBotId);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [showNewForm, setShowNewForm] = useState(false);
   const [templates, setTemplates] = useState<AutomationTemplate[]>([]);
@@ -361,6 +363,15 @@ export function AutomationsView() {
       setSelectedId(null);
     }
   }, [pendingArtifactFormData]);
+
+  // Bots view "Add job": open the new-job form bound to that bot. The form
+  // consumes the id (and clears it) on mount.
+  useEffect(() => {
+    if (pendingAutomationBotId) {
+      setShowNewForm(true);
+      setSelectedId(null);
+    }
+  }, [pendingAutomationBotId]);
 
   const selected = automations.find((a) => a.id === selectedId) ?? null;
   const editingId = selectedId?.startsWith(EDIT_PREFIX)
@@ -546,6 +557,7 @@ export function AutomationsView() {
             {showNewForm ? (
               <AutomationForm
                 automation={null}
+                initialBotId={pendingAutomationBotId}
                 onClose={() => setShowNewForm(false)}
                 onCreated={(id) => { setSelectedId(id); setShowNewForm(false); }}
               />
@@ -1189,10 +1201,13 @@ function AutomationDetail({
 
 function AutomationForm({
   automation,
+  initialBotId,
   onClose,
   onCreated,
 }: {
   automation: Automation | null;
+  /** Present when opened from the Bots view's "Add job": pre-binds the new job. */
+  initialBotId?: string | null;
   onClose: () => void;
   onCreated?: (id: string) => void;
 }) {
@@ -1202,6 +1217,12 @@ function AutomationForm({
   const settingsLoaded = useSettingsStore((s) => s.loaded);
   const pendingArtifactFormData = useUiStore((s) => s.pendingArtifactFormData);
   const setPendingArtifactFormData = useUiStore((s) => s.setPendingArtifactFormData);
+  const setPendingAutomationBotId = useUiStore((s) => s.setPendingAutomationBotId);
+  const bots = useBotsStore((s) => s.bots);
+
+  // "" = no bot (the single NULL sentinel); a bot id = a standing job of that
+  // bot (docs/architecture/BOTS.md §Standing jobs).
+  const [botId, setBotId] = useState(automation?.botId ?? initialBotId ?? "");
 
   const [name, setName] = useState(automation?.name ?? "");
   const [prompt, setPrompt] = useState(automation?.prompt ?? "");
@@ -1301,6 +1322,13 @@ function AutomationForm({
       setScheduleChoice(s.trigger.schedule);
     }
   }, []);
+
+  // Load the bot roster for the "Standing job of" picker, and consume the
+  // Bots-view "Add job" handoff (the bot is already in `botId`).
+  useEffect(() => {
+    ensureBotsLoaded();
+    if (initialBotId) setPendingAutomationBotId(null);
+  }, [initialBotId, setPendingAutomationBotId]);
 
   // Consume pending form data from conversational artifact creation
   useEffect(() => {
@@ -1458,6 +1486,8 @@ function AutomationForm({
       triggerType,
       triggerConfig: triggerConfigJson,
       chatMode,
+      // "" clears the binding; a bot id makes this a standing job of that bot.
+      botId,
     };
     setSaving(true);
     setError(null);
@@ -1508,6 +1538,25 @@ function AutomationForm({
             placeholder="Nightly test fix"
           />
         </div>
+
+        {bots.length > 0 && (
+          <div className="automation-form-field">
+            <label>
+              Standing job of <span className="automation-form-optional">(optional)</span>
+            </label>
+            {/* GlassSelect — the app's shared themed dropdown; a native
+                <select> option list is OS-drawn and can't match Liquid Glass. */}
+            <GlassSelect<string>
+              ariaLabel="Standing job of"
+              value={botId}
+              options={[
+                { value: "", label: "No bot — runs as a plain automation" },
+                ...bots.map((b) => ({ value: b.id, label: `${b.emoji} ${b.name}` })),
+              ]}
+              onChange={(v) => setBotId(v)}
+            />
+          </div>
+        )}
 
         <div className="automation-form-field">
           <label>Prompt</label>

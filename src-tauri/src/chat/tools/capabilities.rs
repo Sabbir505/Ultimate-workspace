@@ -413,11 +413,13 @@ mod tests {
         // main loop unconditionally; the bridge/subagent defaults lack it).
         let full = ToolCaps {
             automations_write: true,
+            bots_write: true,
             subagent_write: true,
             ..ToolCaps::default()
         };
         let mut read_only = ToolCaps {
             automations_write: true,
+            bots_write: true,
             subagent_write: true,
             ..ToolCaps::default()
         };

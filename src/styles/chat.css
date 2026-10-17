@@ -27,8 +27,8 @@
   position: relative;
   display: flex;
   align-items: flex-start;
-  gap: 6px;
-  padding: 10px 9px;
+  gap: 5px;
+  padding: 6px 8px;
   border-radius: var(--radius-sm);
   cursor: pointer;
   transition: background 0.15s var(--ease);
@@ -149,13 +149,101 @@
 .chat-session-row.menu-open .chat-session-working {
   opacity: 0;
 }
+
+/* ── Chat list grouping (Needs input / Working / Completed) ──────────────
+ * The inbox (and each project's chat list) is split into these three
+ * sections. Headers are plain, quiet labels — no pill, so they read as
+ * structure, not as another clickable row. */
+.chat-group-header {
+  padding: 8px 8px 2px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--text-dim);
+  user-select: none;
+}
+
+/* Spawn-tree child (mesh / subagent session): indented under its parent.
+ * The connector is a CONTINUOUS spine. It drops from the parent's title line,
+ * turns a rounded elbow into this child's title, and — when more siblings
+ * follow — keeps running down to meet the next one, so consecutive children
+ * read as one line falling out of the parent. The last child ends at its own
+ * elbow so nothing dangles.
+ *
+ * The colour is derived from --text (not a fixed border token) so the spine
+ * reads at the same weight across every theme — light, dark, and the
+ * accent-tinted / wallpaper palettes. */
+.chat-session-row.is-nested {
+  /* How far each level steps in. Raising it widens the gap in front of the
+   * nested chat, which lengthens the elbow arm — while the spine stays put
+   * under the parent's title (both the content and the spine shift with the
+   * indent, so the arm grows by the same amount). */
+  --nest-indent: 20px;
+  margin-left: calc(var(--nest-indent) * var(--nest-depth, 1));
+  --nest-connector: color-mix(in srgb, var(--text) 24%, transparent);
+  /* The spine drops from a few characters into the PARENT's title (not the
+   * far-left gutter, which read as coming from the row above). The parent
+   * title sits 25px into its row; +6px is "a few letters after". The arm then
+   * spans from here to the child's own title (also at 25px). */
+  --nest-spine-x: calc(31px - var(--nest-indent));
+  --nest-arm: calc(25px - var(--nest-spine-x));
+}
+/* Downward half: from the elbow corner to the row's bottom, reaching the next
+ * sibling below. Omitted on the last child so the spine stops cleanly. */
+.chat-session-row.is-nested::before {
+  content: "";
+  position: absolute;
+  left: var(--nest-spine-x);
+  top: 14px;
+  bottom: 0;
+  width: 0;
+  border-left: 1px solid var(--nest-connector);
+  pointer-events: none;
+}
+.chat-session-row.is-nested.is-last-child::before {
+  content: none;
+}
+/* Upward half + elbow: rises exactly one row-height up (landing on the
+ * parent's title line), then turns right into this row's title. Expressing
+ * the rise as `14px - 100%` keeps it aligned for any row height — the elbow
+ * corner always sits at this row's title line, whatever the row measures. */
+.chat-session-row.is-nested::after {
+  content: "";
+  position: absolute;
+  left: var(--nest-spine-x);
+  top: calc(14px - 100%);
+  width: var(--nest-arm);
+  height: 100%;
+  border-left: 1px solid var(--nest-connector);
+  border-bottom: 1px solid var(--nest-connector);
+  border-bottom-left-radius: 7px;
+  pointer-events: none;
+}
+
+/* A row whose whole spawn subtree is done: title reads bold, even when it
+ * stays nested in a still-working parent's group instead of dropping into
+ * the Completed section. */
+.chat-session-row.is-completed .chat-session-title {
+  font-weight: 700;
+}
+
+/* "Needs input" mark — a pending approval / question / plan pause. Amber so
+ * it reads as an attention cue, not an error. */
+.chat-session-needs-input {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  margin-left: auto;
+  color: var(--warn, #d29922);
+}
+
 /* Inbox second row: project · branch context on the left, the session's
    provider/harness/local-model brand icon on the right. */
 .chat-session-sub-row {
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-top: 6px;
+  margin-top: 3px;
   min-width: 0;
 }
 .chat-session-context,
@@ -182,7 +270,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 10.5px;
+  font-size: 9.5px;
   line-height: 1.2;
   color: var(--text-dim);
   opacity: 0.9;
@@ -209,7 +297,7 @@
 
 .chat-session-rename-input {
   width: 100%;
-  font-size: 12.5px;
+  font-size: 11.5px;
   font-weight: 500;
   padding: 1px 4px;
   border: 1px solid var(--accent);
@@ -309,7 +397,7 @@ div[data-index]:has(.chat-session-row.menu-open) {
   min-width: 0;
 }
 .chat-session-title {
-  font-size: 12.5px;
+  font-size: 11.5px;
   font-weight: 500;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -338,7 +426,7 @@ div[data-index]:has(.chat-session-row.menu-open) {
   }
 }
 .chat-session-meta {
-  font-size: 10px;
+  font-size: 9px;
   color: var(--text-dim);
   display: flex;
   align-items: baseline;
@@ -383,13 +471,19 @@ div[data-index]:has(.chat-session-row.menu-open) {
   opacity: 0.8;
 }
 
-/* ChatView main area */
+/* ChatView main area.
+   Same shared shell-chrome glass as the sidebar / title bar / bottom bar
+   (--shell-glass-* in tokens.css), so the transcript canvas is the SAME
+   material as the surrounding chrome instead of a flat --bg-tint that read as
+   a different shade. No backdrop-filter: the backdrop here is the flat app
+   canvas, so the frost would blur nothing — the gradient alone composites to
+   the identical color the frosted chrome renders. */
 .chat-view {
   flex: 1;
   display: flex;
   flex-direction: column;
   min-height: 0;
-  background: var(--bg-tint);
+  background: linear-gradient(180deg, var(--shell-glass-top), var(--shell-glass-bottom));
   position: relative;
 }
 
@@ -473,11 +567,15 @@ div[data-index]:has(.chat-session-row.menu-open) {
      image-gen card) lands stranded under the composer. Anchoring must not
      touch this scroller. */
   overflow-anchor: none;
-  /* Reserve the scrollbar gutter so the column width never shifts when the
-     scrollbar appears/disappears mid-stream — a width shift rescales every
-     width:100% diagram and live iframe, which read as flashing
-     expanding/collapsing diagrams while the next message streams. */
-  scrollbar-gutter: stable;
+  /* Historically reserved the scrollbar gutter so the centered column never
+     shifted when the scrollbar appeared/disappeared mid-stream. The scrollbar
+     is now hidden entirely, so there is nothing to reserve (and a reserved
+     gutter would sit as a blank strip beside the column). */
+  scrollbar-gutter: auto;
+  /* The transcript scrollbar is hidden in BOTH the main chat and the bots
+     view: the app owns the scroll pin, and the rail read as a stray line
+     beside the conversation. Wheel/trackpad scrolling is unaffected. */
+  scrollbar-width: none;
   /* Claude-style centered conversation column. NOTE: NO bottom padding —
      the floating composer dock's space is reserved by an in-flow spacer
      element at the end of the list (see ChatView). Padding-bottom on this
@@ -490,6 +588,37 @@ div[data-index]:has(.chat-session-row.menu-open) {
   display: flex;
   flex-direction: column;
   gap: 18px;
+}
+
+/* Hide the transcript scrollbar in WebKit/Chromium too (see scrollbar-width
+   on .chat-messages above). */
+.chat-messages::-webkit-scrollbar {
+  display: none;
+}
+
+/* Sidechat provenance line — the first in-flow child of a sidechat
+   transcript (ChatView). The source chat's history rides as model context
+   via a hidden seed row, so this pane's transcript intentionally starts
+   empty; without this line it reads as a fresh empty chat. Centered pill
+   like a day divider, in-flow so it scrolls away with the transcript top
+   (it is NOT a virtualized row). */
+.chat-sidechat-banner {
+  flex: none;
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 12px;
+  max-width: min(100%, 720px);
+  font-size: 12px;
+  color: var(--text-dim);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+.chat-sidechat-banner svg {
+  flex: none;
+  opacity: 0.75;
 }
 
 /* Empty state (centered in chat area) */
@@ -1818,8 +1947,14 @@ div[data-index]:has(.chat-session-row.menu-open) {
    pill (translucent veil + hairline border) so it reads as a chip on the
    glass bubbles instead of either bare browser-default code or an opaque
    slab. Block code is excluded — fenced blocks keep their .chat-code-block
-   treatment. */
-.chat-markdown :not(pre) > code {
+   treatment.
+   The exclusion names the block WRAPPERS, not just the parent tag: the
+   syntax highlighter renders its body as <div><code> (PreTag="div"), so a
+   bare `:not(pre)` parent check still caught the whole block body and
+   painted the pill's translucent band behind every line — one band per
+   paragraph, gapped at the blank lines between them. Every wrapper that can
+   hold a block inside .chat-markdown belongs in this list. */
+.chat-markdown :not(pre) > code:not(.chat-code-block *, .doc-code-block *) {
   padding: 1px 6px;
   border-radius: var(--radius-xs);
   background: color-mix(in srgb, var(--surface-glass) 60%, transparent);
@@ -2052,15 +2187,28 @@ div[data-index]:has(.chat-session-row.menu-open) {
 }
 
 /* Code blocks inside messages — fixed-dark (ChatGPT-style) in BOTH themes:
-   a near-black card with light text that never follows the light theme's
-   surfaces. The syntax token palette is pinned to the block further down. */
+   a near-black card with white text that never follows the light theme's
+   surfaces. The syntax token palette is pinned to the block further down;
+   untokenized text (and the `text`-language blocks) reads pure white — see
+   the base color in lib/syntaxTheme.ts, which paints the code element. */
 .chat-code-block {
   margin: 10px 0;
   border: 1px solid #262626;
   border-radius: 10px;
   overflow: hidden;
   background: #0d0d0d;
-  color: #ececec;
+  color: #ffffff;
+}
+/* Hard backstop: the block's BODY text is white in both themes. The Prism
+   highlighter paints the base text from a resolved theme object, and that
+   color follows --syntax-variable — a blue (#9cdcfe dark, #001080 light) —
+   so plain `text` blocks and untokenized lines read blue instead of white.
+   !important because the highlighter writes the color INLINE, and a stale
+   inline color can also survive from a cached markdown element tree (the LRU
+   outlives hot reloads). Token spans carry their own inline colors, so
+   syntax highlighting is unaffected — only the base text is forced. */
+.chat-code-block code {
+  color: #ffffff !important;
 }
 .chat-code-header {
   display: flex;
@@ -2348,11 +2496,11 @@ div[data-index]:has(.chat-session-row.menu-open) {
    nothing relied on the card to clip its corners. */
 .chat-diagram-block {
   position: relative;
-  margin: 12px 0;
+  margin: 12px auto;
   border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
   border-radius: var(--radius-sm);
   background: #fff;
-  max-width: 480px;
+  max-width: 720px;
   box-shadow:
     0 1px 2px rgb(0 0 0 / 0.16),
     0 6px 18px rgb(0 0 0 / 0.08);
@@ -3235,19 +3383,34 @@ button.chat-mermaid-open:focus-visible {
 .artifact-kebab-btn:hover {
   background: #fff;
 }
-/* High-contrast dark popup so the actions are always legible over the white
-   diagram canvas (which forced the previous var(--text) colour to blend in). */
+/* Liquid glass, matched to the composer card (same gradient + blur + rim):
+   the menu reads as another frosted surface floating over the diagram rather
+   than an opaque slab. Theme-aware, so text uses var(--text) throughout. */
 .artifact-kebab-menu {
   position: absolute;
   top: calc(100% + 4px);
   right: 0;
   min-width: 186px;
   padding: 5px;
-  background: #23262e;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 45%, transparent),
+    color-mix(in srgb, var(--surface-glass) 25%, transparent)
+  );
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  box-shadow: var(--glass-rim), var(--glass-drop);
   z-index: 3;
+}
+/* Light theme: the same bump the composer card gets, so both stay matched. */
+:root[data-theme="light"] .artifact-kebab-menu {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 55%, transparent),
+    color-mix(in srgb, var(--surface-glass) 38%, transparent)
+  );
 }
 /* Flipped above the button when there isn't room below (the kebab sits at the
    TOP of a diagram card, so near the bottom of the chat the menu ran off the
@@ -3269,19 +3432,19 @@ button.chat-mermaid-open:focus-visible {
   font-weight: 600;
   letter-spacing: 0.02em;
   text-align: center;
-  border: 1px solid rgba(255, 255, 255, 0.14);
+  border: 1px solid var(--border);
   border-radius: var(--radius-xs);
-  background: rgba(255, 255, 255, 0.04);
-  color: rgba(242, 243, 245, 0.9);
+  background: color-mix(in srgb, var(--text) 5%, transparent);
+  color: var(--text);
   cursor: pointer;
   box-shadow: none;
 }
 .artifact-kebab-format-btn:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.14);
-  border-color: rgba(255, 255, 255, 0.28);
+  background: color-mix(in srgb, var(--text) 13%, transparent);
+  border-color: color-mix(in srgb, var(--text) 22%, var(--border));
 }
 .artifact-kebab-format-btn:disabled {
-  color: rgba(242, 243, 245, 0.35);
+  color: var(--text-dim);
   cursor: default;
 }
 .artifact-kebab-item {
@@ -3293,21 +3456,21 @@ button.chat-mermaid-open:focus-visible {
   border: none;
   border-radius: var(--radius-xs);
   background: transparent;
-  color: #f2f3f5;
+  color: var(--text);
   cursor: pointer;
 }
 .artifact-kebab-item:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.12);
+  background: color-mix(in srgb, var(--text) 13%, transparent);
 }
 .artifact-kebab-item:disabled {
-  color: rgba(242, 243, 245, 0.4);
+  color: var(--text-dim);
   cursor: default;
 }
 /* Export options inside the kebab menu (PNG scale + transparent backdrop). */
 .artifact-kebab-divider {
   height: 1px;
   margin: 5px 8px;
-  background: rgba(255, 255, 255, 0.12);
+  background: var(--border);
 }
 .artifact-kebab-option-row {
   /* Stacked: the label owns the first line, the scale control spans the full
@@ -3321,7 +3484,7 @@ button.chat-mermaid-open:focus-visible {
 .artifact-kebab-option-label {
   font-size: 11px;
   line-height: 1.2;
-  color: rgba(242, 243, 245, 0.55);
+  color: var(--text-dim);
 }
 .artifact-kebab-scale-seg {
   display: flex;
@@ -3334,15 +3497,15 @@ button.chat-mermaid-open:focus-visible {
   font-size: 11px;
   line-height: 1;
   text-align: center;
-  border: 1px solid rgba(255, 255, 255, 0.14);
+  border: 1px solid var(--border);
   border-radius: 5px;
   background: transparent;
-  color: rgba(242, 243, 245, 0.75);
+  color: var(--text-dim);
   cursor: pointer;
   box-shadow: none;
 }
 .artifact-kebab-scale-btn:hover {
-  background: rgba(255, 255, 255, 0.1);
+  background: color-mix(in srgb, var(--text) 10%, transparent);
 }
 .artifact-kebab-scale-btn[aria-pressed="true"] {
   background: #88c0d0;
@@ -3377,7 +3540,7 @@ button.chat-mermaid-open:focus-visible {
   position: relative; /* anchors the hover kebab to THIS block — without it
                          .chat-diagram-actions resolves against the message
                          bubble and lands in the message's far corner */
-  margin: 12px 0;
+  margin: 12px auto;
   border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
   border-radius: var(--radius-sm);
   /* Visible, like .chat-diagram-block: the kebab dropdown opens BELOW the
@@ -3386,7 +3549,11 @@ button.chat-mermaid-open:focus-visible {
   overflow: visible;
   background: transparent;
   box-shadow: var(--glass-rim-soft);
-  max-width: 520px;
+  /* Wide diagrams were shrinking to 520px, which made node text hard to read.
+     Match the reading column (760px) so a wide flowchart renders near its
+     natural size; narrow diagrams keep their own max-width (mermaid's inline
+     style), so they are never upscaled/blurred. */
+  max-width: 760px;
   transition:
     border-color 0.16s var(--ease),
     box-shadow 0.16s var(--ease);
@@ -5471,22 +5638,19 @@ button.chat-mermaid-open:focus-visible {
   }
   /* The composer compacts to a 12px side floor here; the docked notch cards
      must follow or they misalign with the composer card they're fused to
-     (2px step out on both edges — visible on the question card's borders). */
+     (2px step out on both edges — visible on the question card's borders).
+     The citation strip rides inside a .plan-preview of its own now, so the
+     wrapper's padding compacts it too — no separate strip margin. */
   .chat-pane .chat-composer-dock .plan-preview,
   .chat-pane .composer-approval-wrap {
     padding-left: 12px;
     padding-right: 12px;
   }
-  .chat-pane .citation-report-strip {
-    margin: 0 12px 8px;
-  }
 }
-/* Under ~400px: further squeeze — tighter bubbles column, smaller jump pill
-   offsets handled by the dock measurement, hide the citation strip's detail
-   tail (it wraps badly at this width). */
+/* Under ~400px: further squeeze — tighter bubbles column. The citation
+   strip's detail tail is already hidden below 640px (see its own rule). */
 @container chat-pane (max-width: 400px) {
   .chat-pane .chat-messages { gap: 8px; }
-  .chat-pane .citation-report-strip { margin: 0 8px 6px; }
 }
 
 /* Turn-rail clearance: the rail overlays the pane's left edge (22px wide;
@@ -5508,18 +5672,12 @@ button.chat-mermaid-open:focus-visible {
   .chat-pane:has(.turn-rail) .composer-approval-wrap {
     padding-left: max(30px, calc((100% - 780px) / 2));
   }
-  .chat-pane:has(.turn-rail) .citation-report-strip {
-    margin-left: max(30px, calc((100% - 780px) / 2));
-  }
 }
 .popout-chat-root:has(.turn-rail) .chat-messages,
 .popout-chat-root:has(.turn-rail) .chat-composer,
 .popout-chat-root:has(.turn-rail) .chat-composer-dock .plan-preview,
 .popout-chat-root:has(.turn-rail) .composer-approval-wrap {
   padding-left: max(30px, calc((100% - 780px) / 2));
-}
-.popout-chat-root:has(.turn-rail) .citation-report-strip {
-  margin-left: max(30px, calc((100% - 780px) / 2));
 }
 
 /* ---------- Git tools sidebar clearance (right edge) ----------
@@ -5579,23 +5737,42 @@ button.chat-mermaid-open:focus-visible {
 /* Rendered above the composer after a research turn completes: what the
    mechanical ledger lint verified about the delivered report. One compact
    row — health dot · label · counts — with the hint as a truncating tail
-   (full text on hover via title). Inherits glass surface tokens so it reads
-   as part of the composer cluster, not a floating alert. */
+   (full text on hover via title). Styled as a FUSED NOTCH on the composer
+   card, the goal notch's exact treatment: 18px side inset, top-only radius,
+   no bottom border, rim-only shadow, the composer card's liquid glass body.
+   The .plan-preview wrapper (CitationReportStrip) supplies the dock column
+   and the —1px seam seal; the strip itself is the tab. */
 .citation-report-strip {
   display: flex;
   align-items: center;
   gap: 8px;
   flex: none;
-  margin: 0 16px 8px;
+  margin: 0 18px;
   padding: 7px 12px;
-  border-radius: var(--radius-sm);
-  background: var(--surface-2);
   border: 1px solid var(--border);
-  box-shadow: var(--glass-rim-soft);
+  border-bottom: none;
+  border-radius: 12px 12px 0 0;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 45%, transparent),
+    color-mix(in srgb, var(--surface-glass) 25%, transparent)
+  );
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  box-shadow: var(--glass-rim);
   font-size: 12px;
   line-height: 1.4;
   color: var(--text);
   min-width: 0;
+}
+/* Light theme: the same bump the composer card and goal notch get, so the
+   tab stays matched to the card it fuses onto. */
+:root[data-theme="light"] .citation-report-strip {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 55%, transparent),
+    color-mix(in srgb, var(--surface-glass) 38%, transparent)
+  );
 }
 .citation-report-strip-dot {
   width: 8px;

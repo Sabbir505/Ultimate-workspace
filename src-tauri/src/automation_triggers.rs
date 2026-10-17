@@ -696,6 +696,7 @@ mod tests {
             trigger_type,
             trigger_config,
             chat_mode: None,
+            bot_id: None,
         }
     }
 
@@ -858,6 +859,7 @@ mod tests {
             chat_mode: "per_run".into(),
             last_trigger_state: None,
             last_event_run_at: None,
+            bot_id: None,
         });
         assert!(fresh.is_some(), "create generates a secret");
 
@@ -910,6 +912,7 @@ mod tests {
             chat_mode: "per_run".into(),
             last_trigger_state: None,
             last_event_run_at: None,
+            bot_id: None,
         }
     }
 

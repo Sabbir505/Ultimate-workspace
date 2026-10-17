@@ -426,6 +426,14 @@ struct PreparedRun {
     /// (last_run_at vs last_event_run_at) and the automation_runs.source
     /// label from it.
     source: RunSource,
+    /// `bot_runs.id` when this is a bot's standing job. `finalize` closes that
+    /// row and posts the thread summary from it (docs/architecture/BOTS.md).
+    bot_run_id: Option<String>,
+    /// Holds the bot's in-memory "busy" flag for the whole scheduled run, so
+    /// the rail's dot pulses while a job works and a manual "Run now" is
+    /// refused until it finishes. Dropped with `PreparedRun` after `finalize`.
+    /// None for non-bot runs.
+    bot_run_guard: Option<crate::bot_runs::RunGuard>,
 }
 
 fn prepare_run(db: &Arc<Mutex<Connection>>, automation: &Automation, source: RunSource) -> Result<Option<PreparedRun>, String> {
@@ -585,6 +593,93 @@ fn prepare_run_inner(db: &Arc<Mutex<Connection>>, automation: &Automation, sourc
     //     The row's pointer is re-pointed at the newest session so "Open run
     //     log", the empty-session sweeper and the FK guards keep working.
     let per_run = automation.chat_mode != crate::db::CHAT_MODE_SHARED;
+
+    // A BOT-BOUND job runs in the bot's own RUN session (Revision 2): the
+    // session carries `bot_role = 'run'`, so the bot's persona and memory
+    // apply with no extra plumbing AND the permission gate recognises it as a
+    // background execution (chat::bot_policy) — write-class calls queue for
+    // the owner instead of executing. A disabled bot is skipped outright:
+    // `enabled = false` is the owner's "do not run my jobs" switch.
+    if let Some(bot_id) = automation.bot_id.clone() {
+        let conn = db.lock();
+        let bot = match crate::db::bots::get_bot(&conn, &bot_id) {
+            Ok(Some(bot)) => bot,
+            Ok(None) => {
+                // The bot was deleted underneath the job; delete_bot removes
+                // bound jobs in its transaction, so this is a stale row read
+                // from a cached list. Refuse and leave the guards released.
+                // (Release the DB guard FIRST — stamp_skipped_once takes it,
+                // and this mutex is not reentrant.)
+                drop(conn);
+                stamp_skipped_once(db, automation);
+                return Ok(None);
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                drop(conn);
+                release_guards(&automation.id, &lock_path);
+                return Err(msg);
+            }
+        };
+        if !bot.enabled {
+            crate::relay_eprintln!(
+                "[automations] {} skipped: bot {} is disabled (awaiting approval)",
+                automation.id,
+                bot_id
+            );
+            drop(conn);
+            stamp_skipped_once(db, automation);
+            return Ok(None);
+        }
+        match crate::db::bots::start_bot_run(
+            &conn,
+            &bot_id,
+            Some(&automation.id),
+            &automation.name,
+            "job",
+        ) {
+            Ok((bot_run_id, sid)) => {
+                // Mark the bot busy for the duration of the job (non-exclusive,
+                // so two different jobs may still overlap) — this is what makes
+                // the rail pulse for a scheduled run and blocks a concurrent
+                // manual run.
+                let bot_run_guard = Some(crate::bot_runs::mark_running(&bot_id));
+                // Keep the automation's own pointer fresh so "Open run log" and
+                // the empty-session sweeper behave (the run session is hidden
+                // from Chat History — see the Bots view's activity strip).
+                let _ = set_automation_chat_session(&conn, &automation.id, Some(&sid));
+                drop(conn);
+                let run_id = {
+                    let conn = db.lock();
+                    match start_run(&conn, &automation.id, Some(&sid), source.as_str()) {
+                        Ok(id) => id,
+                        Err(e) => {
+                            let msg = e.to_string();
+                            drop(conn);
+                            release_guards(&automation.id, &lock_path);
+                            return Err(msg);
+                        }
+                    }
+                };
+                return Ok(Some(PreparedRun {
+                    chat_session_id: sid,
+                    lock_path,
+                    run_id,
+                    cancel,
+                    source,
+                    bot_run_id: Some(bot_run_id),
+                    bot_run_guard,
+                }));
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                drop(conn);
+                release_guards(&automation.id, &lock_path);
+                return Err(msg);
+            }
+        }
+    }
+
     let chat_session_id = {
         let conn = db.lock();
         // In per_run mode there is nothing to reuse — always create below.
@@ -690,7 +785,15 @@ fn prepare_run_inner(db: &Arc<Mutex<Connection>>, automation: &Automation, sourc
             }
         }
     };
-    Ok(Some(PreparedRun { chat_session_id, lock_path, run_id, cancel, source }))
+    Ok(Some(PreparedRun {
+        chat_session_id,
+        lock_path,
+        run_id,
+        cancel,
+        source,
+        bot_run_id: None,
+        bot_run_guard: None,
+    }))
 }
 
 /// `<db file>.automation-<id>.lock` — next to relay.db so every process
@@ -864,6 +967,30 @@ fn execute(
         )
     });
     let result = match harness.as_str() {
+        // Bot-bound jobs run through the bot runner: persona + memory + the
+        // tool loop whose writes queue for the owner. The headless
+        // `relay-automation` binary has no AppHandle (so no tool loop) — it
+        // still gets the bot's persona and engine through the API one-shot,
+        // which is how "run while Relay is closed" stays true where a
+        // scheduler is registered.
+        _ if automation.bot_id.is_some() => match app {
+            Some(app) => crate::chat::run_bot_one_shot(
+                app,
+                &prepared.chat_session_id,
+                &prompt,
+                &provider,
+                &model,
+                Some(&prepared.cancel),
+            ),
+            None => crate::chat::run_one_shot_chat(
+                db,
+                &prepared.chat_session_id,
+                &prompt,
+                &provider,
+                &model,
+                Some(&prepared.cancel),
+            ),
+        },
         "claude_code" | "opencode" | "pi" | "omp" | "commandcode" => {
             agent_sessions::run_one_shot(
                 app,
@@ -946,6 +1073,31 @@ fn finalize(
                 "[automations] finish_run failed for run {} of {}: {e}",
                 prepared.run_id, automation.id
             );
+        }
+        // Bot jobs also close their bot_runs row and post ONE summary into the
+        // bot's conversation: the thread stays a conversation, the transcript
+        // stays in the (hidden) run session.
+        if let (Some(bot_run_id), Some(bot_id)) =
+            (prepared.bot_run_id.as_deref(), automation.bot_id.as_deref())
+        {
+            let bot_status = match status.as_str() {
+                "ok" => "ok",
+                s if s == STOPPED_STATUS => "stopped",
+                _ => "error",
+            };
+            // The run's own final assistant text is the honest summary — not a
+            // re-phrasing of it.
+            let text = crate::bot_runs::last_assistant_text(&conn, &prepared.chat_session_id);
+            let detail = if text.trim().is_empty() { summary.clone() } else { text };
+            let _ = crate::db::bots::finish_bot_run(&conn, bot_run_id, bot_status, &detail);
+            let _ = crate::db::bots::post_run_summary(
+                &conn,
+                bot_id,
+                &automation.name,
+                bot_status,
+                &detail,
+            );
+            let _ = crate::db::bots::prune_runs(&conn, bot_id, crate::db::bots::BOT_RUN_KEEP);
         }
     }
     release_guards(&automation.id, &prepared.lock_path);
@@ -1198,6 +1350,144 @@ fn summarize(status: &str) -> String {
 mod tests {
     use super::*;
 
+    /// A bot's standing job must run in its OWN run session — never in the
+    /// bot's conversation, never in the automation's own run log — and a
+    /// disabled bot must not run at all. This is the integration-level twin of
+    /// `db::bots`' thread-vs-run tests: it pins the contract `prepare_run`
+    /// upholds for the scheduler, the "Run now" button and the Windows
+    /// sidecar alike.
+    #[test]
+    fn bot_jobs_prepare_a_run_session_and_refuse_a_disabled_bot() {
+        let conn = std::sync::Arc::new(parking_lot::Mutex::new(crate::db::mem()));
+        let (bot_id, automation, disabled, thread) = {
+            let c = conn.lock();
+            let bot = crate::db::bots::create_bot(
+                &c,
+                &crate::db::BotInput {
+                    name: "Atlas".into(),
+                    description: None,
+                    emoji: None,
+                    color: None,
+                    pet: Some("fox".into()),
+                    system_prompt: Some("You are Atlas.".into()),
+                    provider: None,
+                    model: None,
+                    tools_enabled: None,
+                    memory_enabled: None,
+                    enabled: Some(true),
+                    inherit_global_prompt: None,
+                    memory_read_default: None,
+                },
+            )
+            .unwrap();
+            let mk = |name: &str, bot_id: Option<String>| {
+                crate::db::automations::create_automation(
+                    &c,
+                    &crate::db::AutomationInput {
+                        name: name.into(),
+                        prompt: "Sweep the inbox.".into(),
+                        harness: "chat".into(),
+                        model: None,
+                        cwd: None,
+                        schedule: "0 9 * * *".into(),
+                        enabled: Some(true),
+                        origin: Some("user".into()),
+                        trigger_type: Some("cron".into()),
+                        trigger_config: Some("{}".into()),
+                        chat_mode: None,
+                        bot_id,
+                    },
+                )
+                .unwrap()
+            };
+            let owned = mk("Morning sweep", Some(bot.id.clone()));
+            // A second bot, disabled: its jobs are skipped outright.
+            let off = crate::db::bots::create_bot(
+                &c,
+                &crate::db::BotInput {
+                    name: "Sleeper".into(),
+                    description: None,
+                    emoji: None,
+                    color: None,
+                    pet: None,
+                    system_prompt: None,
+                    provider: None,
+                    model: None,
+                    tools_enabled: None,
+                    memory_enabled: None,
+                    enabled: Some(false),
+                    inherit_global_prompt: None,
+                    memory_read_default: None,
+                },
+            )
+            .unwrap();
+            let off_job = mk("Nightly", Some(off.id.clone()));
+            let thread = crate::db::ensure_bot_session(&c, &bot.id).unwrap();
+            (bot.id, owned, off_job, thread)
+        };
+
+        // Enabled bot: a fresh run session per run, tagged with the job.
+        let prepared = prepare_run(&conn, &automation, RunSource::Manual)
+            .unwrap()
+            .expect("an enabled bot's job prepares a run");
+        let run_session = {
+            let c = conn.lock();
+            crate::db::get_chat_session(&c, &prepared.chat_session_id)
+                .unwrap()
+                .expect("run session exists")
+        };
+        assert_eq!(run_session.bot_id.as_deref(), Some(bot_id.as_str()));
+        assert_eq!(run_session.bot_role.as_deref(), Some("run"));
+        assert_eq!(run_session.bot_job_id.as_deref(), Some(automation.id.as_str()));
+        assert_ne!(run_session.id, thread, "a run must never be the thread");
+        assert!(prepared.bot_run_id.is_some(), "runs are tracked for the strip");
+
+        // Finish the run the way the scheduler does (this releases the
+        // overlap guards AND closes the bot_runs row + posts the thread
+        // summary), then start a second one: it must get its OWN session and
+        // leave the thread alone.
+        finalize(None, &conn, &automation, &prepared, Ok(()));
+        {
+            let c = conn.lock();
+            let runs = crate::db::bots::list_bot_runs(&c, &bot_id, 5).unwrap();
+            assert_eq!(runs[0].status, "ok", "finalize closes the run row");
+            let msgs = crate::db::list_active_chat_messages(&c, &thread).unwrap();
+            assert_eq!(msgs.len(), 1, "one summary lands in the thread");
+            assert!(msgs[0].content.contains("Morning sweep"));
+        }
+        let second = prepare_run(&conn, &automation, RunSource::Manual)
+            .unwrap()
+            .expect("second run");
+        assert_ne!(second.chat_session_id, run_session.id);
+        finalize(None, &conn, &automation, &second, Ok(()));
+        {
+            // Scoped: the parking_lot mutex is NOT reentrant, so a second
+            // lock() while this guard lives would hang the test (it did).
+            let c = conn.lock();
+            assert_eq!(
+                crate::db::ensure_bot_session(&c, &bot_id).unwrap(),
+                thread,
+                "a new run must not become the bot's thread"
+            );
+        }
+
+        // Disabled bot: skipped, and no run session is created for it.
+        let off_job_bot = disabled.bot_id.clone().unwrap_or_default();
+        let count_runs = |bot: &str| -> i64 {
+            let c = conn.lock();
+            c.query_row(
+                "SELECT COUNT(*) FROM bot_runs WHERE bot_id = ?1",
+                rusqlite::params![bot],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        let before = count_runs(&off_job_bot);
+        let skipped = prepare_run(&conn, &disabled, RunSource::Scheduled).unwrap();
+        assert!(skipped.is_none(), "a disabled bot's job must be skipped");
+        assert_eq!(count_runs(&off_job_bot), before, "no run row for a disabled bot");
+    }
+
     #[test]
     fn unattended_rules_are_appended_once() {
         let wrapped = ensure_unattended_rules("Do the thing.");
@@ -1338,6 +1628,7 @@ mod tests {
             chat_mode: "per_run".to_string(),
             last_trigger_state: None,
             last_event_run_at: None,
+            bot_id: None,
         };
         let p = webhook_payload(&a, "ok", "Completed", 1234);
         assert_eq!(p["event"], "automation.run_finished");
@@ -1401,6 +1692,7 @@ mod tests {
                     // Shared mode is the case under test: the stored pointer
                     // is the ONE run log and must be re-validated.
                     chat_mode: Some("shared".into()),
+                    bot_id: None,
                 },
             )
             .unwrap();
@@ -1456,6 +1748,7 @@ mod tests {
                     trigger_type: None,
                     trigger_config: None,
                     chat_mode: chat_mode.map(str::to_string),
+                    bot_id: None,
                 },
             )
             .unwrap();
@@ -1553,6 +1846,7 @@ mod tests {
                     trigger_type: None,
                     trigger_config: None,
                     chat_mode: None,
+                    bot_id: None,
                 },
             )
             .unwrap();
@@ -1603,6 +1897,7 @@ mod tests {
                     trigger_type: None,
                     trigger_config: None,
                     chat_mode: None,
+                    bot_id: None,
                 },
             )
             .unwrap()
@@ -1639,6 +1934,7 @@ mod tests {
                 trigger_type: Some("git".into()),
                 trigger_config: Some("{\"cwd\":\"D:/repo\"}".into()),
                 chat_mode: None,
+                bot_id: None,
             },
         )
         .unwrap();
@@ -1659,6 +1955,7 @@ mod tests {
                 trigger_type: Some("gmail".into()),
                 trigger_config: Some("{}".into()),
                 chat_mode: None,
+                bot_id: None,
             },
         )
         .unwrap();
@@ -1680,6 +1977,7 @@ mod tests {
                 trigger_type: None,
                 trigger_config: None,
                 chat_mode: None,
+                bot_id: None,
             },
         )
         .unwrap();
@@ -1714,6 +2012,7 @@ mod tests {
                     trigger_type: None,
                     trigger_config: None,
                     chat_mode: None,
+                    bot_id: None,
                 },
             )
             .unwrap()

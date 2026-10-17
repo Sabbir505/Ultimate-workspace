@@ -158,9 +158,12 @@ pub fn fetch_page(
     let limit_plus_one = (limit + 1) as i64;
     let mut stmt = db
         .prepare(
+            // Display rows only: a sidechat's hidden context seed
+            // (`sidechat_seed`) must not show on the phone either.
             "SELECT id, role, content, created_at, input_tokens, output_tokens, cost_usd, started_at, completed_at
          FROM chat_messages
          WHERE chat_session_id = ?1 AND (?2 IS NULL OR id < ?2)
+           AND (kind IS NULL OR kind != 'sidechat_seed')
          ORDER BY id DESC
          LIMIT ?3",
         )
@@ -192,6 +195,10 @@ pub fn fetch_page(
                     tool_time_ms: None,
                     ttft_ms: None,
                     tokens_per_second: None,
+                    // The query above already excludes the hidden
+                    // `sidechat_seed` row, so the display payload carries no
+                    // command-only marker.
+                    kind: None,
                 })
             },
         )
@@ -1593,8 +1600,11 @@ fn handle_regenerate_message(
         }
         let row: Option<(i64, String)> = conn
             .query_row(
+                // The sidechat context seed (`sidechat_seed`) is not a real
+                // user message — regenerating must never re-send it.
                 "SELECT id, content FROM chat_messages
                  WHERE chat_session_id = ?1 AND role = 'user' AND superseded_by IS NULL
+                   AND (kind IS NULL OR kind != 'sidechat_seed')
                  ORDER BY id DESC LIMIT 1",
                 rusqlite::params![chat_session_id],
                 |r| Ok((r.get(0)?, r.get(1)?)),

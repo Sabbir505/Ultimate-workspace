@@ -887,6 +887,15 @@ mod tests {
     /// classification of the tool registry for harness sessions; the
     /// exhaustive test below fails when a new tool lands in neither list.
     const BRIDGE_EXCLUDED_TOOLS: &[(&str, &str)] = &[
+        // Bots: authoring/running a bot from a harness CLI would have no
+        // approval card (the bridge has no live turn) — the built-in chat is
+        // the only surface where consent can be collected properly.
+        ("list_bots", "bots are managed from the built-in chat"),
+        ("create_bot", "bots are managed from the built-in chat"),
+        ("update_bot", "bots are managed from the built-in chat"),
+        ("delete_bot", "bots are managed from the built-in chat"),
+        ("run_bot", "bots are managed from the built-in chat"),
+        ("ask_bot", "bots are managed from the built-in chat"),
         // Harness CLIs have their own web search / shell / code execution —
         // Relay's pipeline for these is built-in-chat-specific.
         ("web_search", "harness CLIs search the web natively"),

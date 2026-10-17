@@ -199,6 +199,11 @@ pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) ->
             GET_AUTOMATION_DESC,
             automation_id_parameters(),
         ),
+        // Bots — list is read-only and always on; ask_bot delegates a question
+        // (read-class: the run it starts is itself gated). The CRUD/run half
+        // follows the mutating gate below.
+        openai_fn(LIST_BOTS, LIST_BOTS_DESC, no_parameters()),
+        openai_fn(ASK_BOT, ASK_BOT_DESC, ask_bot_parameters()),
         // Subagent — the read-only list is always on (mirrors automations); the
         // CRUD trio rides the mutating gating + the subagent_write family flag
         // below. Lets the model author the subagent, not just run it.
@@ -386,6 +391,17 @@ pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) ->
             RUN_AUTOMATION_NOW_DESC,
             automation_id_parameters(),
         ));
+    }
+    // Bot CRUD/run tools — authoring a bot is the moment of consent (its
+    // standing jobs and runs happen away from the user), so the write half is
+    // both mutating-gated AND family-locked, exactly like automations:
+    // unlocked via `attach_connector("bots")` or the send-time keyword
+    // fast-path, which is also what keeps a fresh turn's schema budget flat.
+    if sandbox.allows_mutating_tools() && caps.bots_write {
+        specs.push(openai_fn(CREATE_BOT, CREATE_BOT_DESC, create_bot_parameters()));
+        specs.push(openai_fn(UPDATE_BOT, UPDATE_BOT_DESC, update_bot_parameters()));
+        specs.push(openai_fn(DELETE_BOT, DELETE_BOT_DESC, bot_id_parameters()));
+        specs.push(openai_fn(RUN_BOT, RUN_BOT_DESC, run_bot_parameters()));
     }
     // Subagent CRUD — the model authoring its own subagents. Gated on BOTH the
     // mutating posture AND the subagent_write family flag: the flag is false for
@@ -677,6 +693,9 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy)
             GET_AUTOMATION_DESC,
             automation_id_parameters(),
         ),
+        // Bots — mirror of the OpenAI read block.
+        anthropic_fn(LIST_BOTS, LIST_BOTS_DESC, no_parameters()),
+        anthropic_fn(ASK_BOT, ASK_BOT_DESC, ask_bot_parameters()),
         anthropic_fn(LIST_SUBAGENTS, LIST_SUBAGENTS_DESC, no_parameters()),
         // Session Mesh — mirror of the OpenAI block above: the whole family
         // rides caps.session_mesh (locked by default, attach-to-unlock).
@@ -857,6 +876,13 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy)
             RUN_AUTOMATION_NOW_DESC,
             automation_id_parameters(),
         ));
+    }
+    // Bot CRUD/run tools — mirror of the OpenAI block above.
+    if sandbox.allows_mutating_tools() && caps.bots_write {
+        specs.push(anthropic_fn(CREATE_BOT, CREATE_BOT_DESC, create_bot_parameters()));
+        specs.push(anthropic_fn(UPDATE_BOT, UPDATE_BOT_DESC, update_bot_parameters()));
+        specs.push(anthropic_fn(DELETE_BOT, DELETE_BOT_DESC, bot_id_parameters()));
+        specs.push(anthropic_fn(RUN_BOT, RUN_BOT_DESC, run_bot_parameters()));
     }
     // Subagent CRUD — mirror of the OpenAI block above (flag + posture gating).
     if caps.subagent_write && sandbox.allows_mutating_tools() {
@@ -2011,6 +2037,24 @@ const DELETE_AUTOMATION_DESC: &str = "Delete an automation by id, permanently an
 const RUN_AUTOMATION_NOW_DESC: &str = "Fire one run of an automation immediately; \
     it executes in the background and lands in the run history.";
 
+const LIST_BOTS_DESC: &str = "List the user's bots: id, emoji, name, description, \
+    pet, jobs, pending approvals, running state. Call for ids.";
+
+const CREATE_BOT_DESC: &str = "Create a bot (named agent: persona, memory, pet, \
+    thread). Lands DISABLED until the user approves it.";
+
+const UPDATE_BOT_DESC: &str = "Update a bot by id (from list_bots). Only passed \
+    fields change. Enabling a bot is the user's action.";
+
+const DELETE_BOT_DESC: &str = "Delete a bot by id. Its jobs and runs go with it; \
+    its conversation and memories stay.";
+
+const RUN_BOT_DESC: &str = "Run a bot now in its own run session. Reads run; \
+    writes queue for the user's approval. Optional `prompt`.";
+
+const ASK_BOT_DESC: &str = "Ask a bot a question; returns its answer from a \
+    headless run. Use it to delegate to a specialist bot.";
+
 // ---- Subagent (declarative subagents) tool descriptions + schemas ----
 
 const LIST_SUBAGENTS_DESC: &str = "List the user's subagents (named reusable \
@@ -2343,6 +2387,79 @@ const AUTOMATION_AGENTS: [&str; 10] = [
     "openai_responses",
     "local_gguf",
 ];
+
+fn ask_bot_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "bot_id": { "type": "string", "description": "From list_bots." },
+            "question": { "type": "string", "description": "Self-contained." }
+        },
+        "required": ["bot_id", "question"],
+    })
+}
+
+fn bot_id_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "bot_id": { "type": "string", "description": "From list_bots." }
+        },
+        "required": ["bot_id"],
+    })
+}
+
+fn create_bot_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "name": { "type": "string", "description": "1-40 chars, unique." },
+            "description": { "type": "string", "description": "One line for the rail." },
+            "emoji": { "type": "string" },
+            "pet": { "type": "string", "enum": ["cat", "fox", "panda", "dragon", "axolotl", "robot"] },
+            "persona": { "type": "string", "description": "Behaviour. Layers on the user's assistant prompt by default." },
+            "provider": { "type": "string", "description": "Pinned engine; omit to inherit the chat's." },
+            "model": { "type": "string" },
+            "tools_enabled": { "type": "boolean", "description": "false = chat-only." },
+            "memory_enabled": { "type": "boolean", "description": "Own memory namespace." },
+            "inherit_global_prompt": { "type": "boolean" },
+            "memory_read_default": { "type": "boolean", "description": "Read (never write) the user's memories." }
+        },
+        "required": ["name"],
+    })
+}
+
+fn update_bot_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "bot_id": { "type": "string", "description": "The bot to change." },
+            "name": { "type": "string", "description": "1-40 chars, unique." },
+            "description": { "type": "string" },
+            "emoji": { "type": "string" },
+            "pet": { "type": "string", "enum": ["cat", "fox", "panda", "dragon", "axolotl", "robot"] },
+            "persona": { "type": "string" },
+            "provider": { "type": "string" },
+            "model": { "type": "string" },
+            "tools_enabled": { "type": "boolean" },
+            "memory_enabled": { "type": "boolean" },
+            "inherit_global_prompt": { "type": "boolean" },
+            "memory_read_default": { "type": "boolean" }
+        },
+        "required": ["bot_id"],
+    })
+}
+
+fn run_bot_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "bot_id": { "type": "string", "description": "From list_bots." },
+            "prompt": { "type": "string", "description": "Optional; omit for the bot's description." }
+        },
+        "required": ["bot_id"],
+    })
+}
 
 fn create_automation_parameters() -> Value {
     // The engine list stays static, but `agent:...` values route through the
@@ -3152,6 +3269,10 @@ mod tests {
     /// on `ToolCaps.browser` / memory on `ToolCaps.memory` (default surface
     /// 45.0k → 36.5k chars; every-tool-on 39.4k).
     #[test]
+    /// The all-on budget is a deliberate checkpoint, not a target: raising it
+    /// is a decision. Latest raise (bots, 2026-10-15): the bots family adds 6
+    /// tools (~1.6k chars trimmed) to the unlocked registry, which is the
+    /// harness/subagent surface where every family rides.
     fn no_single_tool_spec_blows_its_budget() {
         // The `Task` enum is registry-driven, so a parallel test republishing
         // its own subagent would move this total for reasons that have nothing to
@@ -3348,8 +3469,8 @@ mod tests {
         // chars, not the ~1.7k the bump assumed, and it rides this aggregate
         // too (it is ungated, so every surface carries it).
         assert!(
-            all_on < 74_000,
-            "all-on tool specs total {all_on} chars (budget 74_000) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
+            all_on < 78_000,
+            "all-on tool specs total {all_on} chars (budget 78_000) — the registry is re-bloating; trim descriptions/schemas or raise the budget deliberately"
         );
     }
 
@@ -3816,6 +3937,7 @@ mod tests {
         unlocked.unlock_family(crate::chat::tools::FAMILY_SESSION_MESH);
         unlocked.unlock_family(crate::chat::tools::FAMILY_AUTOMATIONS);
         unlocked.unlock_family(crate::chat::tools::FAMILY_TOTP);
+        unlocked.unlock_family(crate::chat::tools::FAMILY_BOTS);
         let mut research_on = ToolCaps::default();
         research_on.research = true;
         for (name, build) in [
@@ -3851,6 +3973,10 @@ mod tests {
                 crate::chat::tools::DELETE_AUTOMATION,
                 crate::chat::tools::RUN_AUTOMATION_NOW,
                 crate::chat::tools::TOTP_CODE,
+                crate::chat::tools::CREATE_BOT,
+                crate::chat::tools::UPDATE_BOT,
+                crate::chat::tools::DELETE_BOT,
+                crate::chat::tools::RUN_BOT,
             ] {
                 assert!(!l.iter().any(|x| x == gone),
                     "{name}: `{gone}` must be family-locked out of the default schema");
@@ -3861,6 +3987,10 @@ mod tests {
             // locked families are always one call away.
             assert!(l.iter().any(|x| x == crate::chat::tools::LIST_AUTOMATIONS));
             assert!(l.iter().any(|x| x == crate::chat::tools::GET_AUTOMATION));
+            // Same contract for bots: list + the read-class delegation stay
+            // visible; authoring waits for the unlock.
+            assert!(l.iter().any(|x| x == crate::chat::tools::LIST_BOTS));
+            assert!(l.iter().any(|x| x == crate::chat::tools::ASK_BOT));
             let attach_spec = build(&locked, permission::SandboxPolicy::WorkspaceWrite)
                 .into_iter()
                 .find(|s| {
@@ -3898,14 +4028,13 @@ mod tests {
             }
             assert!(!r.iter().any(|x| x == crate::chat::tools::LIST_SESSIONS),
                 "{name}: research mode must not silently unlock the mesh family");
-            // …and a full unlock admits exactly locked+14 (family tools),
+            // …and a full unlock admits exactly locked+21 (family tools),
             // with wire-format parity of the whole array.
             let u = names(&unlocked);
             assert_eq!(
-                l.len() + 17,
+                l.len() + 21,
                 u.len(),
-                "{name}: unlock delta must be exactly the 17 family tools (mesh 5 + 
-                 automations 6 + totp 1 + research 2 + subagent CRUD 3)"
+                "{name}: unlock delta must be exactly the 21 family tools (mesh 5 +                  automations 6 + totp 1 + research 2 + subagent CRUD 3 + bot CRUD/run 4)"
             );
             for gone in [
                 crate::chat::tools::ADD_SOURCE_NOTE,

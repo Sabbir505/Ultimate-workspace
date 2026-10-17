@@ -43,6 +43,9 @@ export interface Automation {
    *  run, so no run inherits the previous run's context/cost) or "shared"
    *  (one run-log chat for every run). Selectable in the create/edit form. */
   chatMode: string;
+  /** The bot whose standing job this is (docs/architecture/BOTS.md). null =
+   *  unowned: the run behaves exactly as it did before bots existed. */
+  botId?: string | null;
 }
 export interface AutomationInput {
   name: string;
@@ -57,6 +60,9 @@ export interface AutomationInput {
   /** "per_run" (default on create) | "shared". Omit on update to keep the
    *  stored policy. */
   chatMode?: string;
+  /** Bind this job to a bot (its runs execute as that bot, in its own run
+   *  sessions). Omit for an unowned automation. */
+  botId?: string | null;
 }
 export const listAutomations = () => safeInvoke<Automation[]>("list_automations");
 export const createAutomation = (input: AutomationInput) =>

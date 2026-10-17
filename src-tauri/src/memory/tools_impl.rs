@@ -35,7 +35,7 @@ pub async fn memory_save(app: &AppHandle, chat_session_id: &str, args: &Value) -
 
 /// `memory_recall` — hybrid search over the store; returns records with
 /// provenance and confidence so the model can cite/qualify them.
-pub fn memory_recall(app: &AppHandle, args: &Value) -> String {
+pub fn memory_recall(app: &AppHandle, chat_session_id: &str, args: &Value) -> String {
     let Some(query) = args.get("query").and_then(|v| v.as_str()).map(str::trim).filter(|q| !q.is_empty()) else {
         return "Error: memory_recall requires a non-empty \"query\".".into();
     };
@@ -48,17 +48,46 @@ pub fn memory_recall(app: &AppHandle, args: &Value) -> String {
         .unwrap_or(8);
 
     let db = app.state::<crate::DbState>();
-    // Synchronous search: FTS-only leg here (the tool loop is async, but the
-    // sidecar embedding adds an await + this tool's value is exact recall;
-    // keyword+recency ranking is the low-latency default). Embedding-augmented
-    // recall is available through `search_and_touch`'s callers with sidecar.
+    // Per-bot memory scoping (docs/architecture/BOTS.md): a bot thread recalls
+    // its OWN namespace, plus the user's `default` memories when the bot opted
+    // into read-through (`memory_read_default`). A plain chat still reads
+    // exactly `default`. One query per profile, merged — the store's SQL stays
+    // single-profile, so no other call site changes shape.
+    let profiles = {
+        let conn = db.0.lock();
+        db::bots::read_profiles_for_session(&conn, chat_session_id)
+            .unwrap_or_else(|_| vec!["default".to_string()])
+    };
     let hits = {
         let conn = db.0.lock();
-        search_and_touch(&conn, "default", project_id, query, None, limit * 2)
+        let mut per_profile: Vec<Vec<crate::memory::model::MemoryRecord>> = Vec::new();
+        for profile in &profiles {
+            match search_and_touch(&conn, profile, project_id, query, None, limit * 2) {
+                Ok(hs) => per_profile.push(hs),
+                Err(e) => return format!("Error: memory_recall failed: {e}"),
+            }
+        }
+        // Round-robin by RANK so each profile's own retrieval order survives:
+        // concatenating then re-sorting by importance threw away the hybrid
+        // scores `search_and_touch` returned. Dedup across profiles on the way
+        // (the same row can only come from one, but never offer it twice).
+        let mut seen = std::collections::HashSet::new();
+        let mut merged: Vec<crate::memory::model::MemoryRecord> = Vec::new();
+        let max_len = per_profile.iter().map(|v| v.len()).max().unwrap_or(0);
+        for i in 0..max_len {
+            for list in &per_profile {
+                if let Some(m) = list.get(i) {
+                    if seen.insert(m.id.clone()) {
+                        merged.push(m.clone());
+                    }
+                }
+            }
+        }
+        Ok::<_, String>(merged)
     };
     let hits = match hits {
         Ok(h) => h,
-        Err(e) => return format!("Error: memory_recall failed: {e}"),
+        Err(e) => return format!("Error: {e}"),
     };
     let hits: Vec<_> = hits
         .into_iter()
@@ -96,14 +125,30 @@ pub fn memory_recall(app: &AppHandle, args: &Value) -> String {
 
 /// `memory_forget` — retires a memory by id (history preserved; only the
 /// user's purge in Settings hard-deletes).
-pub fn memory_forget(app: &AppHandle, args: &Value) -> String {
+pub fn memory_forget(app: &AppHandle, chat_session_id: &str, args: &Value) -> String {
     let Some(id) = args.get("memory_id").and_then(|v| v.as_str()).map(str::trim).filter(|i| !i.is_empty()) else {
         return "Error: memory_forget requires a \"memory_id\" (from memory_recall).".into();
     };
     let db = app.state::<crate::DbState>();
     let conn = db.0.lock();
+    // Writes never cross namespaces (docs/architecture/BOTS.md): a bot thread
+    // may retire a memory it holds, never one of the user's — not even when
+    // read-through recall showed it an id.
+    let own_profile = db::bots::write_profile_for_session(&conn, chat_session_id)
+        .unwrap_or_else(|_| "default".to_string());
     match db::get_memory(&conn, id) {
         Ok(Some(m)) => {
+            if m.profile != own_profile {
+                // Direction-aware so the reason is truthful both ways: a plain
+                // chat must not reach into a bot's namespace, and a bot must
+                // not forget the user's (or another bot's) memory.
+                let whose = match (own_profile.as_str(), m.profile.as_str()) {
+                    ("default", _) => "belongs to a bot's memory, not to this chat",
+                    (_, "default") => "belongs to the user's own memory, not to this bot",
+                    _ => "belongs to another bot's memory",
+                };
+                return format!("Error: memory {id} {whose} — it cannot be forgotten from here.");
+            }
             if m.status != crate::memory::model::status::ACTIVE {
                 return format!("Memory {id} is already {status} — nothing to forget.", status = m.status);
             }
@@ -112,8 +157,12 @@ pub fn memory_forget(app: &AppHandle, args: &Value) -> String {
                     let _ = db::log_memory_op(&conn, "agent_tool", None, &m.content, "FORGET", &[id.to_string()], "retired via memory_forget");
                     // Drop the stored document so the injected text (the
                     // deterministic fallback render) reflects the retirement
-                    // immediately; the next merge rebuilds it.
-                    let _ = crate::memory::document::set_document(&conn, None, "");
+                    // immediately; the next merge rebuilds it. Only for the
+                    // user's own profile — a bot's rows never feed that
+                    // document.
+                    if m.profile == "default" {
+                        let _ = crate::memory::document::set_document(&conn, None, "");
+                    }
                     format!("Forgotten (retired, history kept): \"{}\"", m.content)
                 }
                 Err(e) => format!("Error: memory_forget failed: {e}"),

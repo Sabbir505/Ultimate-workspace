@@ -93,6 +93,11 @@ pub(crate) use automations::{
 mod subagents;
 pub(crate) use subagents::{execute_subagent_tool, is_subagent_tool, is_mutating_subagent_tool};
 
+/// Bots (named persistent agents) — same family shape as automations: consts
+/// above, executor + classifiers here, dispatch in the family ladder.
+mod bots;
+pub(crate) use bots::{bot_tool_summary, execute_bot_tool, is_bot_tool, is_mutating_bot_tool};
+
 /// `get_capabilities` — in-process connector/MCP availability report so the
 /// model NEVER spawns a shell just to introspect what's connected. Two
 /// variants: the per-turn report (this module's dispatch) and the app-level
@@ -309,6 +314,29 @@ pub const UPDATE_AUTOMATION: &str = "update_automation";
 pub const DELETE_AUTOMATION: &str = "delete_automation";
 /// Fire one run of an automation immediately (same path the scheduler uses).
 pub const RUN_AUTOMATION_NOW: &str = "run_automation_now";
+
+// ---- Bots (named persistent agents — docs/architecture/BOTS.md) ----
+//
+// The main chat manages bots conversationally: read/list answer inline, the
+// write half is approval-carded in every posture (like automations), and
+// agent-created bots land DISABLED until the owner approves them in the Bots
+// view. `ask_bot` is read-class on purpose — the delegated run it starts is
+// itself gated by `chat::bot_policy`, so delegating a question never needs the
+// user's consent, while writing on the bot's behalf does.
+
+/// List the user's bots (id, name, description, pet, jobs, pending approvals).
+pub const LIST_BOTS: &str = "list_bots";
+/// Create a bot — a named agent with its own persona, memory, and thread.
+/// Created disabled until the user approves it in the Bots view.
+pub const CREATE_BOT: &str = "create_bot";
+/// Update a bot's name, description, persona, pet, engine or toggles by id.
+pub const UPDATE_BOT: &str = "update_bot";
+/// Delete a bot by id. Its thread stays in chat history as a normal chat.
+pub const DELETE_BOT: &str = "delete_bot";
+/// Trigger a run of a bot now, in its own run session.
+pub const RUN_BOT: &str = "run_bot";
+/// Hand a question to a bot and get its answer back (read-class delegation).
+pub const ASK_BOT: &str = "ask_bot";
 
 // ---- Subagent (declarative subagents — chat/subagent.rs) ----
 //
@@ -586,6 +614,12 @@ pub struct ToolCaps {
     /// `attach_connector("automations")` or the send-time keyword fast-path
     /// (`prompts::detect_family_unlocks`).
     pub automations_write: bool,
+    /// Bot WRITE half (`create_bot` / `update_bot` / `delete_bot` /
+    /// `run_bot`) unlocked for this turn. `list_bots` and the read-class
+    /// `ask_bot` stay always-on. Locked by default — the family is
+    /// attach-to-unlock like automations, and the keyword fast-path
+    /// (`prompts::detect_family_unlocks`) pre-unlocks an obvious ask.
+    pub bots_write: bool,
     /// Subagent WRITE half (`create/update/delete_subagent`) offered this turn.
     /// `list_subagents` stays always-on. True for every main-loop turn
     /// (authoring an agent is approval-carded at dispatch in EVERY posture,
@@ -624,16 +658,21 @@ pub struct ToolCaps {
 pub const FAMILY_SESSION_MESH: &str = "session-mesh";
 pub const FAMILY_AUTOMATIONS: &str = "automations";
 pub const FAMILY_TOTP: &str = "totp";
+pub const FAMILY_BOTS: &str = "bots";
 
-pub const UNLOCKABLE_FAMILIES: [(&str, &str); 3] = [
+pub const UNLOCKABLE_FAMILIES: [(&str, &str); 4] = [
     (FAMILY_SESSION_MESH, "Session Mesh"),
     (FAMILY_AUTOMATIONS, "Automations"),
     (FAMILY_TOTP, "TOTP codes"),
+    (FAMILY_BOTS, "Bots"),
 ];
 
 /// True when `id` names an unlockable built-in family (vs a real connector).
 pub fn is_unlockable_family(id: &str) -> bool {
-    matches!(id, FAMILY_SESSION_MESH | FAMILY_AUTOMATIONS | FAMILY_TOTP)
+    matches!(
+        id,
+        FAMILY_SESSION_MESH | FAMILY_AUTOMATIONS | FAMILY_TOTP | FAMILY_BOTS
+    )
 }
 
 /// Comma-separated tool names a family unlock admits — the attach result
@@ -647,6 +686,7 @@ pub fn family_tool_list(id: &str) -> &'static str {
             "create_automation, update_automation, delete_automation, run_automation_now"
         }
         FAMILY_TOTP => "totp_code",
+        FAMILY_BOTS => "create_bot, update_bot, delete_bot, run_bot",
         _ => "",
     }
 }
@@ -667,6 +707,7 @@ impl ToolCaps {
             FAMILY_SESSION_MESH => !std::mem::replace(&mut self.session_mesh, true),
             FAMILY_AUTOMATIONS => !std::mem::replace(&mut self.automations_write, true),
             FAMILY_TOTP => !std::mem::replace(&mut self.totp, true),
+            FAMILY_BOTS => !std::mem::replace(&mut self.bots_write, true),
             _ => false,
         }
     }
@@ -684,6 +725,7 @@ impl ToolCaps {
             automations_write: true,
             subagent_write: true,
             totp: true,
+            bots_write: true,
             ..ToolCaps::default()
         }
     }
@@ -724,6 +766,7 @@ impl Default for ToolCaps {
             automations_write: false,
             subagent_write: false,
             totp: false,
+            bots_write: false,
             unlockable_families: std::sync::Arc::new(unlockable_family_pairs()),
             allow: None,
         }
@@ -2282,6 +2325,7 @@ mod tests {
         // unlocked, both provider schemas carry all six.
         let unlocked = ToolCaps {
             automations_write: true,
+            bots_write: true,
             ..ToolCaps::default()
         };
         let plain = openai_names(&ToolCaps::default(), SandboxPolicy::WorkspaceWrite);

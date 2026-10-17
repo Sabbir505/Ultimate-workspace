@@ -351,6 +351,12 @@ pub(crate) fn is_mutating_tool(name: &str) -> bool {
     if crate::chat::tools::is_mutating_subagent_tool(name) {
         return true;
     }
+    // Bot authoring/deleting/running: a bot is a persisted identity, and a run
+    // consumes tokens unattended. list_bots / ask_bot stay allowed — ask_bot's
+    // own run is gated by chat::bot_policy.
+    if crate::chat::tools::is_mutating_bot_tool(name) {
+        return true;
+    }
     // Session Mesh writes: messaging consumes another session's tokens and
     // spawn_session creates a session. The read trio (list/read/search) stays
     // allowed during research — plan mode is about not CHANGING things.

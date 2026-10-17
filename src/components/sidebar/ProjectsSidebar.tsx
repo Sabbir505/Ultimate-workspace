@@ -26,13 +26,23 @@ import { useProjectsSidebarStore } from "../../state/projectsSidebar";
 import { useChatStore } from "../../state/chat";
 import { useUiStore } from "../../state/ui";
 import { seedSelectionFrom } from "../../lib/lastSelection";
-import { ChatSessionRowMemo, type ChatSessionRowData } from "../chat/ChatSessionRow";
+import { groupChatSessions, nestedParentId } from "../../lib/chatSessionGroups";
+import {
+  ChatSessionGroupHeader,
+  ChatSessionRowMemo,
+  type ChatSessionRowData,
+} from "../chat/ChatSessionRow";
 import { useRelativeTimeTick } from "../../hooks/useRelativeTimeTick";
 import { relativeTime } from "../../lib/relativeTime";
 
 /** Chats visible per project before "Show more" — and the step size of
- *  each subsequent reveal. */
+ *  each subsequent reveal. Counts top-level (parent) chats; a parent's nested
+ *  spawn children always travel with it. */
 const PAGE_SIZE = 5;
+
+/** Stable empty map for the "needs input" selectors (same rationale as the
+ *  main Sidebar). */
+const EMPTY_MAP: Record<string, never> = {};
 
 export function ProjectsSidebar() {
   const open = useProjectsSidebarStore((s) => s.open);
@@ -52,6 +62,21 @@ export function ProjectsSidebar() {
   // Every streaming id — the nested rows need the spinner even when the
   // chat is open elsewhere (same rule as the main sidebar).
   const streamingIds = useChatStore(useShallow((s) => Object.keys(s.streaming)));
+  const streamingSet = useMemo(() => new Set(streamingIds), [streamingIds]);
+  // Sessions paused on a pending approval/question/plan — the "Needs input"
+  // section (identical rule to the main Sidebar's Chat History).
+  const pendingApprovals = useChatStore((s) => s.pendingApprovals ?? EMPTY_MAP);
+  const pendingQuestions = useChatStore((s) => s.pendingQuestions ?? EMPTY_MAP);
+  const pendingPlanProposals = useChatStore((s) => s.pendingPlanProposals ?? EMPTY_MAP);
+  const chatsNeedingInput = useMemo(
+    () =>
+      new Set([
+        ...Object.keys(pendingApprovals),
+        ...Object.keys(pendingQuestions),
+        ...Object.keys(pendingPlanProposals),
+      ]),
+    [pendingApprovals, pendingQuestions, pendingPlanProposals],
+  );
   const activeChatSessionId = useChatStore((s) => s.activeChatSessionId);
   const lastSelection = useChatStore((s) => s.lastSelection);
   const chatConfig = useChatStore((s) => s.config);
@@ -95,6 +120,9 @@ export function ProjectsSidebar() {
   const chatsByProject = useMemo(() => {
     const byProject: Record<string, ChatSessionRowData[]> = {};
     for (const s of chatSessions) {
+      // Bot sessions (thread + runs) live in the Bots view rail, not nested in
+      // the projects list (see the same filter in Sidebar's Chat History).
+      if (s.botId != null || s.botRole === "run") continue;
       const projectId = s.projectId ?? sessionProjects[s.id] ?? null;
       if (!projectId) continue;
       const branchName = s.worktreePath
@@ -120,6 +148,10 @@ export function ProjectsSidebar() {
         branchName,
         agent: s.agent ?? null,
         provider: s.provider ?? null,
+        // Child provenance — nests agent-spawned sessions and sidechats
+        // under their parent within this project's list (see the grouping
+        // pass below).
+        parentId: nestedParentId(s.origin),
       });
     }
     for (const list of Object.values(byProject)) {
@@ -176,9 +208,17 @@ export function ProjectsSidebar() {
     const isOpen = !!expanded[project.id];
     const chats = chatsByProject[project.id] ?? [];
     const visibleCount = visibleCounts[project.id] ?? PAGE_SIZE;
-    const visible = chats.slice(0, visibleCount);
     const branch = gitStatuses[project.id]?.branch ?? null;
-    const hasMore = chats.length > visible.length;
+    // Same tri-section grouping + spawn-tree nesting as Chat History, scoped
+    // to this project. `maxRoots` pages over TOP-LEVEL chats (a nested child
+    // always travels with its parent), keeping the "5 recent, Show more" rule.
+    const groups = groupChatSessions(chats, {
+      isWorking: (r) => streamingSet.has(r.id),
+      needsInput: (r) => chatsNeedingInput.has(r.id),
+      maxRoots: visibleCount,
+    });
+    const hasMore = groups.hasMore;
+    const canShowLess = visibleCount > PAGE_SIZE;
     return (
       <div className={`sidebar-project-node${isStashed ? " is-stashed" : ""}`} key={project.id}>
         <div
@@ -255,23 +295,33 @@ export function ProjectsSidebar() {
               <span className="projects-sidebar-nochats">No chats yet</span>
             ) : (
               <>
-                {visible.map((s) => (
-                  <ChatSessionRowMemo
-                    key={s.id}
-                    session={s}
-                    active={s.id === activeChatSessionId}
-                    working={streamingIds.includes(s.id)}
-                    onSelect={handleSelectChat}
-                    onDelete={handleDeleteChat}
-                    onRename={handleRenameChat}
-                    onToggleStar={handleToggleStar}
-                    onSetUnread={handleSetUnread}
-                    onExport={handleExportChat}
-                    onOpenSplit={handleOpenSplitChat}
-                    onFork={handleForkChat}
-                  />
+                {groups.sections.map((section) => (
+                  <div className="chat-group" key={section.key}>
+                    <ChatSessionGroupHeader label={section.label} />
+                    {section.rows.map((row) => (
+                      <ChatSessionRowMemo
+                        key={row.session.id}
+                        session={row.session}
+                        active={row.session.id === activeChatSessionId}
+                        working={row.working}
+                        nested={row.nested}
+                        depth={row.depth}
+                        lastChild={row.lastChild}
+                        completed={row.completed}
+                        needsInput={row.needsInput}
+                        onSelect={handleSelectChat}
+                        onDelete={handleDeleteChat}
+                        onRename={handleRenameChat}
+                        onToggleStar={handleToggleStar}
+                        onSetUnread={handleSetUnread}
+                        onExport={handleExportChat}
+                        onOpenSplit={handleOpenSplitChat}
+                        onFork={handleForkChat}
+                      />
+                    ))}
+                  </div>
                 ))}
-                {(hasMore || visibleCount > PAGE_SIZE) && (
+                {(hasMore || canShowLess) && (
                   <button
                     type="button"
                     className="sidebar-projects-more"

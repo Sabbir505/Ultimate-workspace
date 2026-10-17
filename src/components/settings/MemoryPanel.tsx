@@ -435,8 +435,7 @@ export function MemoryPanel() {
           <h2>Memory</h2>
           <p className="muted">
             One human-readable profile the assistant remembers across chats —
-            stored locally, shown in full, and merged automatically as new
-            facts arrive.
+            stored locally and merged automatically.
           </p>
         </div>
         <label className="memory-toggle">
@@ -470,10 +469,9 @@ export function MemoryPanel() {
           </select>
         </div>
         <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>
-          Scans retrieved memories and document excerpts for instruction-injection
-          patterns (e.g. “ignore previous instructions”) before they reach the
-          model. Flagging wraps the block in an untrusted-data warning; stripping
-          also redacts the matched phrases.
+          Scans retrieved memories and document excerpts for injection patterns
+          (e.g. “ignore previous instructions”). Flagging wraps the block in a
+          warning; stripping also redacts matches.
         </div>
       </div>
 
@@ -489,12 +487,9 @@ export function MemoryPanel() {
           </span>
         </div>
         <p className="muted memory-doc-note">
-          New memories are merged into this document automatically — duplicates
-          folded, contradictions resolved. Each turn loads the facts relevant
-          to your request, plus a few standing identity facts; when nothing
-          matches, this document itself is what the assistant sees (trimmed to
-          fit the turn). Edit it freely; this is the pool the assistant loads
-          from.
+          New memories are merged here automatically — duplicates folded,
+          contradictions resolved. Each turn loads the facts relevant to your
+          request plus a few standing identity facts. Edit it freely.
         </p>
         <textarea
           className="memory-doc-editor"
@@ -535,7 +530,7 @@ export function MemoryPanel() {
             {history === null ? (
               <span className="muted">Loading…</span>
             ) : history.length === 0 ? (
-              <span className="muted">No stored versions yet — merges and saves will appear here.</span>
+              <span className="muted">No stored versions yet.</span>
             ) : (
               history.map((v) => (
                 <div key={v.id} className="memory-doc-version">
@@ -626,13 +621,13 @@ export function MemoryPanel() {
         {extractModelSaved && <span className="memory-doc-flash">Saved ✓</span>}
         {extractAgentIsHarness && (
           <span className="memory-doc-error memory-extract-model-hint">
-            CLI harnesses are interactive agent turns and can't run the
-            background memory pipeline — pick a Cloud API or Local model.
+            CLI harnesses can't run the background memory pipeline — pick a
+            Cloud API or Local model.
           </span>
         )}
         <span className="muted memory-extract-model-hint">
-          Runs the background pipeline (extraction, judging, document merges) —
-          a small local or cheap cloud model keeps it inexpensive.
+          Runs extraction, judging, and document merges — a small local or
+          cheap cloud model keeps it inexpensive.
         </span>
       </div>
 
@@ -659,8 +654,8 @@ export function MemoryPanel() {
         {listTab === "entries" ? (
           <>
             <p className="muted">
-              The underlying fact records — everything the memory document was
-              built from. Search, edit, or forget individual facts.
+              The underlying fact records. Search, edit, or forget individual
+              facts.
             </p>
             <div className="memory-toolbar">
               <input
@@ -765,7 +760,7 @@ export function MemoryPanel() {
                 <li className="muted memory-empty">
                   {status?.enabled
                     ? "Nothing here yet — the assistant learns as you chat."
-                    : "Memory is off. Turn it on to let the assistant remember across chats."}
+                    : "Memory is off — turn it on to remember across chats."}
                 </li>
               )}
             </ul>
@@ -773,8 +768,8 @@ export function MemoryPanel() {
         ) : (
           <div className="memory-audit">
             <p className="muted">
-              Every write decision the memory pipeline has made — judge
-              operations, document merges, and your own edits, newest first.
+              Every write decision the pipeline has made — judge operations,
+              merges, and your edits, newest first.
             </p>
             {ops === null ? (
               <span className="muted">Loading…</span>
@@ -847,9 +842,8 @@ export function MemoryPanel() {
           }
         >
           <p>
-            This permanently erases the memory document, every raw fact entry,
-            and the full history — including evidence quotes. It cannot be
-            undone.
+            Permanently erases the memory document, all raw fact entries, and
+            the full history. This cannot be undone.
           </p>
           <input
             className="memory-purge-confirm"

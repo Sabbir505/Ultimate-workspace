@@ -127,12 +127,19 @@ pub struct Applied {
 ///
 /// NOTE: the caller must already hold the `DbState` lock (all fns here take
 /// `&Connection`).
+/// `profile` is the namespace the writes land in — `default` for the user's
+/// own memory, `bot:<id>` for a bot's (docs/architecture/BOTS.md). The judge's
+/// comparison pool (`input.similar`) is fetched from the SAME profile by the
+/// caller, so a bot's candidate can never UPDATE or DELETE one of the user's
+/// rows.
+#[allow(clippy::too_many_arguments)]
 pub fn apply_judge_op(
     conn: &Connection,
     input: &JudgeInput<'_>,
     op: &JudgeOp,
     session_id: Option<&str>,
     project_id: Option<&str>,
+    profile: &str,
     embedding: Option<Vec<f32>>,
     now: i64,
     origin: &str,
@@ -187,6 +194,7 @@ pub fn apply_judge_op(
                 cand.importance,
                 embedding,
             );
+            rec.profile = profile.to_string();
             rec.origin = origin.to_string();
             rec.valid_from = now;
             db::insert_memory(conn, &rec)?;
@@ -232,6 +240,7 @@ pub fn apply_judge_op(
                 cand.importance,
                 embedding.clone(),
             );
+            rec.profile = profile.to_string();
             rec.origin = origin.to_string();
             rec.keywords = cand_keywords(cand);
             rec.valid_from = now;
@@ -337,7 +346,7 @@ mod tests {
         };
         let similar = vec![(old.clone(), 0.91f32)];
         let input = JudgeInput { candidate: &cand, similar: &similar };
-        let applied = apply_judge_op(&conn, &input, &JudgeOp::Add, Some("s1"), None, None, 1_000,
+        let applied = apply_judge_op(&conn, &input, &JudgeOp::Add, Some("s1"), None, "default", None, 1_000,
                                      crate::memory::model::origin::EXTRACTED).unwrap();
 
         assert_eq!(applied.op, "ADD");
@@ -370,7 +379,7 @@ mod tests {
         };
         let similar = vec![(old.clone(), 0.88f32)];
         let input = JudgeInput { candidate: &cand, similar: &similar };
-        let applied = apply_judge_op(&conn, &input, &JudgeOp::Delete { target_id: "old1".into() }, Some("s1"), None, None, 2_000,
+        let applied = apply_judge_op(&conn, &input, &JudgeOp::Delete { target_id: "old1".into() }, Some("s1"), None, "default", None, 2_000,
                                      crate::memory::model::origin::EXTRACTED).unwrap();
         assert_eq!(applied.op, "DELETE");
         // The change report carries the old fact (to drop from the document)
@@ -402,7 +411,7 @@ mod tests {
         let similar = vec![(old.clone(), 0.9f32)];
         let input = JudgeInput { candidate: &cand, similar: &similar };
         let applied = apply_judge_op(&conn, &input, &JudgeOp::Delete { target_id: "old1".into() },
-                                     Some("s1"), None, None, 2_000, crate::memory::model::origin::AGENT_TOOL).unwrap();
+                                     Some("s1"), None, "default", None, 2_000, crate::memory::model::origin::AGENT_TOOL).unwrap();
         // Tool writes are labeled agent_tool so the unbacked-evidence sweep
         // never flags them (they were born zero-evidence and vanished).
         let new_row = db::get_memory(&conn, applied.new_id.as_deref().unwrap()).unwrap().unwrap();
@@ -429,7 +438,7 @@ mod tests {
         };
         let similar = vec![(old.clone(), 0.6f32)]; // above fetch gate, below ADD_SUPERSEDE_SIMILARITY
         let input = JudgeInput { candidate: &cand, similar: &similar };
-        let applied = apply_judge_op(&conn, &input, &JudgeOp::Add, Some("s1"), None, None, 3_000,
+        let applied = apply_judge_op(&conn, &input, &JudgeOp::Add, Some("s1"), None, "default", None, 3_000,
                                      crate::memory::model::origin::EXTRACTED).unwrap();
         assert_eq!(applied.op, "ADD");
         assert_eq!(applied.old_content, None, "complementary fact must not supersede the existing one");
@@ -457,6 +466,7 @@ mod tests {
             &JudgeOp::Update { target_id: "old1".into(), merged_content: "User likes Rust and dislikes C++ macros at work".into() },
             Some("s1"),
             None,
+            "default",
             None,
             3_000,
             crate::memory::model::origin::EXTRACTED,

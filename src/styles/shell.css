@@ -164,6 +164,8 @@
   flex-direction: column;
   gap: 1px;
   overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 .glass-select-option-hint {
   font-size: 10px;
@@ -185,37 +187,38 @@
   height: 100%;
   background: var(--bg-tint);
   position: relative;
+  /* Height of the bottom title bar (compact padding + 28px entries + border,
+     the mirror of --toolbar-h at the top). The three shell columns stop above
+     it (heights below) and the bar itself is absolutely anchored to the app's
+     bottom edge, so nothing ever runs beneath the bar's frost. */
+  --bottombar-h: 37px;
 }
-/* Ambient color wash behind the glass. The window blur is uniform; this soft
-   radial tint gives the translucent surfaces something to refract so the UI
-   reads as "liquid" rather than a flat sheet. Purely decorative, sits under
-   every surface (z-index: 0 on .app, surfaces are ≥1). The top-center band
-   exists for the title bar: the toolbar is the one glass surface whose
-   backdrop is otherwise flat --bg-tint (nothing scrolls under it), so without
-   a glow of its own its frost shows nothing and it reads as an opaque strip. */
-.app::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  background:
-    radial-gradient(120% 80% at 12% -8%, color-mix(in srgb, var(--accent) 16%, transparent), transparent 55%),
-    radial-gradient(95% 60% at 60% -16%, color-mix(in srgb, var(--accent) 10%, transparent), transparent 60%),
-    radial-gradient(110% 70% at 100% 0%, color-mix(in srgb, var(--state-diff) 9%, transparent), transparent 50%);
-  z-index: 0;
-}
+/* The shell chrome draws its tint from ONE shared recipe (--shell-glass-* in
+   tokens.css) over the flat --bg-tint canvas. There is deliberately NO ambient
+   color wash here: a positional radial tint showed through the translucent
+   chrome at the top of the window but not the opaque canvases, so the sidebar,
+   title bar, bottom bar and chat body each read a different shade. With a flat
+   backdrop every chrome surface renders the same color in any theme. */
 .app > * {
   position: relative;
   z-index: 1;
 }
+/* The shell columns stop above the bottom bar (--bottombar-h on .app): the
+   bar is absolutely anchored to the app's bottom edge, so the columns shrink
+   by its height instead of running beneath it. */
+.sidebar,
+.projects-sidebar,
+.main {
+  height: calc(100% - var(--bottombar-h, 37px));
+}
 
 /* ---------- App wallpaper (Settings → Appearance → App wallpaper) ---------- */
-/* The image paints on ::after, a sibling of the ambient wash above (both
-   z-index 0, under every surface): blurred into an ambient backdrop so text
-   over it stays readable, with a scrim in the theme's own bg tone blended
-   over it. The layer only exists while html[data-wallpaper] is set — zero
-   cost with no wallpaper. inset is negative so the blur never samples past
-   the element edge, which would show transparent fringes. */
+/* The image paints on ::after, the one background layer under every surface:
+   blurred into an ambient backdrop so text over it stays readable, with a
+   scrim in the theme's own bg tone blended over it. The layer only exists
+   while html[data-wallpaper] is set — zero cost with no wallpaper. inset is
+   negative so the blur never samples past the element edge, which would show
+   transparent fringes. */
 :root[data-wallpaper] .app {
   /* The shell's own flat canvas steps aside; the big content canvases below
      go translucent so the wallpaper reads through the UI. */
@@ -246,6 +249,7 @@
 :root[data-wallpaper] .vault-view,
 :root[data-wallpaper] .subagent-view,
 :root[data-wallpaper] .wiki-view,
+:root[data-wallpaper] .bots-view,
 :root[data-wallpaper] .logs-view,
 /* The right tool panel column is a canvas too — without this its opaque
    --surface slab read as a black cutout beside the wallpaper'd views. */
@@ -294,16 +298,12 @@
   /* Compact title-bar height — the toolbar doubles as the window chrome. */
   padding: 4px 0 4px 14px;
   border-bottom: 1px solid var(--border);
-  /* The composer card's liquid-glass body, with a touch more body than the
-     card needs: the toolbar's backdrop is the flat top-edge wash (no content
-     scrolls beneath it), so the veil must carry more of the look itself. */
-  background: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--surface-glass) 52%, transparent),
-    color-mix(in srgb, var(--surface-glass) 30%, transparent)
-  );
-  backdrop-filter: blur(24px) saturate(160%);
-  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  /* Shared shell-chrome glass (--shell-glass-* in tokens.css): the exact same
+     recipe the sidebar / projects rail / bottom bar use, so every structural
+     surface tints identically in every theme. */
+  background: linear-gradient(180deg, var(--shell-glass-top), var(--shell-glass-bottom));
+  backdrop-filter: var(--shell-blur);
+  -webkit-backdrop-filter: var(--shell-blur);
   /* Bottom sheen line — a brighter hairline under the toolbar reads as glass
      catching light along its lower edge; glass-drop lifts it off the content
      below like the composer card. */
@@ -320,21 +320,77 @@
   right: 0;
   z-index: 30;
 }
-/* Light theme: the same bump every other glass surface gets, so text keeps
-   contrast on bright backdrops. */
-:root[data-theme="light"] .toolbar {
-  background: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--surface-glass) 55%, transparent),
-    color-mix(in srgb, var(--surface-glass) 38%, transparent)
-  );
-}
 .toolbar > strong {
   letter-spacing: 0.02em;
   font-weight: 600;
 }
 .toolbar .spacer {
   flex: 1;
+}
+
+/* ---------- Bottom bar (mirrored title bar) ----------
+   The window's bottom caption, twin of .toolbar: the SAME shared shell-glass
+   tokens (gradient flipped so the brighter sheen sits where the bar meets the
+   content), same compact height (--bottombar-h on .app), same drag-region
+   behavior — a press on the bar or on any non-interactive child starts the
+   window drag (installTitleBarDrag covers children; buttons keep their
+   clicks). It hosts the workspace view entries that used to be stacked in the
+   sidebar footer — one title-bar-scale icon button each — leaving the rest of
+   the strip as drag space. */
+.bottom-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: var(--bottombar-h, 37px);
+  display: flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-top: 1px solid var(--border);
+  background: linear-gradient(180deg, var(--shell-glass-bottom), var(--shell-glass-top));
+  backdrop-filter: var(--shell-blur);
+  -webkit-backdrop-filter: var(--shell-blur);
+  /* Top sheen — the mirror of the toolbar's bottom sheen line. */
+  box-shadow: var(--glass-rim), var(--glass-drop), 0 -1px 0 0 rgba(255, 255, 255, 0.06) inset;
+  z-index: 5;
+}
+.bottom-bar-nav {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+/* Title-bar-scale icon buttons: a 15px glyph in the toolbar's 28px control
+   height — quiet until hovered/active. */
+.bottom-bar-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-dim);
+  transition: background 0.12s var(--ease), color 0.12s var(--ease);
+}
+/* Wiki build pulse — the sidebar's Wiki-entry dot, anchored to the icon's
+   corner now that the entry lives in the bottom bar. */
+.bottom-bar-btn .sidebar-wiki-running {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+}
+.bottom-bar-btn:hover {
+  background: var(--surface-2);
+  border-color: transparent;
+  color: var(--text);
+}
+.bottom-bar-btn.is-active {
+  background: var(--accent-soft);
+  color: var(--text);
 }
 
 /* ---- Full-page view headers, portaled into the caption ----
@@ -373,7 +429,8 @@
 .toolbar .subagent-header,
 .toolbar .vault-header,
 .toolbar .logs-header,
-.toolbar .wiki-header {
+.toolbar .wiki-header,
+.toolbar .bots-header {
   flex: 1;
   min-width: 0;
   flex-wrap: nowrap;
@@ -2199,6 +2256,15 @@ button.git-goal-stop:hover {
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+/* Light theme: --text-dim (#6a6a6a) at 11.5px over the frosted white body
+   read as barely-there — the blurred bright backdrop washes it out. Darken
+   the panel's secondary text and its header actions; the shared token is
+   right everywhere else, so the override stays scoped to this panel. */
+:root[data-theme="light"] .notif-row-text,
+:root[data-theme="light"] .notif-row-time,
+:root[data-theme="light"] .notif-panel-btn {
+  color: #3f3f3f;
 }
 .notif-row-time {
   flex: none;

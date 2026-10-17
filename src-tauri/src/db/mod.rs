@@ -9,6 +9,8 @@
 
 mod artifacts;
 pub(crate) mod automations;
+pub(crate) mod bot_approvals;
+pub(crate) mod bots;
 mod chat;
 mod checkpoints;
 mod connector_credentials;
@@ -527,8 +529,44 @@ pub fn configure(conn: &Connection) -> DbResult<()> {
     // Research caches grow without bound otherwise: drop rows past their TTL
     // on every open (research_cache.rs also purges on insert).
     research_cache::purge_expired(conn)?;
+    // Bots (docs/architecture/BOTS.md): session binding + standing-job owner.
+    migrate_bots_columns(conn)?;
     migrate_unc_paths(conn)?;
     migrate_provider_base_urls(conn)
+}
+
+/// Bots need three columns on existing databases. Each ALTER swallows its own
+/// "duplicate column name" so re-running is a no-op (see
+/// `migrate_automations_origin` for the pattern).
+///
+/// bot_id / bot_role / bot_job_id on chat_sessions: NULL = a plain chat.
+/// `bot_role` is 'thread' (the bot's conversation) or 'run' (one standing-job
+/// execution, hidden from Chat History). `bot_job_id` is the automation that
+/// spawned a run session.
+///
+/// `automations.bot_id` has NO foreign key on purpose: delete_bot removes the
+/// bot's jobs explicitly inside its transaction, and a dangling job must never
+/// fire.
+fn migrate_bots_columns(conn: &Connection) -> DbResult<()> {
+    for sql in [
+        "ALTER TABLE chat_sessions ADD COLUMN bot_id TEXT",
+        "ALTER TABLE chat_sessions ADD COLUMN bot_role TEXT",
+        "ALTER TABLE chat_sessions ADD COLUMN bot_job_id TEXT",
+        "ALTER TABLE automations ADD COLUMN bot_id TEXT",
+    ] {
+        if let Err(e) = conn.execute(sql, []) {
+            if !e.to_string().contains("duplicate column name") {
+                return Err(e);
+            }
+        }
+    }
+    // The rail asks "is any run live for this bot" and history filters runs
+    // out; both walk (bot_id, bot_role).
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chat_sessions_bot ON chat_sessions(bot_id, bot_role)",
+        [],
+    )?;
+    Ok(())
 }
 
 /// The registry tables shipped as `crew_agents`/`crew_runs`; the feature is
@@ -1225,7 +1263,13 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
           approval_policy TEXT,
           auto_model INTEGER NOT NULL DEFAULT 0,
           effort_level TEXT,
-          origin TEXT
+          origin TEXT,
+          -- Bots (docs/architecture/BOTS.md): NULL = a plain chat. bot_role is
+          -- 'thread' (the bot's own conversation) or 'run' (one standing-job
+          -- execution). (Existing databases gain these via migrate_bots_columns.)
+          bot_id TEXT,
+          bot_role TEXT,
+          bot_job_id TEXT
         );
 
         CREATE TABLE IF NOT EXISTS chat_messages (
@@ -1640,7 +1684,12 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
           trigger_config TEXT NOT NULL DEFAULT '{}',
           chat_mode TEXT NOT NULL DEFAULT 'per_run',
           last_trigger_state TEXT,
-          last_event_run_at INTEGER
+          last_event_run_at INTEGER,
+          -- The bot whose standing job this is (docs/architecture/BOTS.md);
+          -- NULL = unowned. No FK on purpose: delete_bot removes bound jobs
+          -- explicitly, so a job that lost its persona can never fire.
+          -- (Existing databases gain this via migrate_bots_columns.)
+          bot_id TEXT
         );
 
         CREATE TABLE IF NOT EXISTS automation_runs (
@@ -1658,6 +1707,79 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
           ON automation_runs(automation_id, started_at DESC);
         CREATE INDEX IF NOT EXISTS idx_automation_runs_running
           ON automation_runs(status) WHERE finished_at IS NULL;
+
+        -- Named persistent agents ("Bots" — docs/architecture/BOTS.md). A bot is
+        -- an identity, not a chat: persona prompt + pinned engine + memory
+        -- profile + standing jobs, with exactly ONE conversation of its own
+        -- (chat_sessions.bot_role = 'thread'). `pet` picks the docked 3D
+        -- companion on the composer/search-bar strips ('' = none).
+        -- inherit_global_prompt: persona LAYERS on the user's assistant prompt
+        -- (false opts out). memory_read_default: recall may read the user's
+        -- `default` memories too — writes always stay in `bot:<id>`.
+        -- enabled = false skips standing jobs and refuses run_bot, while the
+        -- thread stays usable (an agent-created bot lands disabled pending the
+        -- owner's approval).
+        CREATE TABLE IF NOT EXISTS bots (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          description TEXT NOT NULL DEFAULT '',
+          emoji TEXT NOT NULL DEFAULT '🤖',
+          color TEXT NOT NULL DEFAULT '',
+          pet TEXT NOT NULL DEFAULT '',
+          system_prompt TEXT NOT NULL DEFAULT '',
+          provider TEXT NOT NULL DEFAULT '',
+          model TEXT NOT NULL DEFAULT '',
+          tools_enabled INTEGER NOT NULL DEFAULT 1,
+          memory_enabled INTEGER NOT NULL DEFAULT 1,
+          enabled INTEGER NOT NULL DEFAULT 1,
+          inherit_global_prompt INTEGER NOT NULL DEFAULT 1,
+          memory_read_default INTEGER NOT NULL DEFAULT 0,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        -- Backstop for the friendly ensure_name_free check (a rename race).
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_bots_name_nocase
+          ON bots(name COLLATE NOCASE);
+
+        -- One row per write-class tool call a BACKGROUND bot run wanted to
+        -- make. Nothing about the request is model-written: `summary` is built
+        -- deterministically from the tool name + declared args, so a
+        -- prompt-injected run cannot disguise what it is asking for. Pending
+        -- rows expire after 72h (stale approvals are a hazard, not a
+        -- convenience); `result` carries the replay's outcome or the error.
+        CREATE TABLE IF NOT EXISTS bot_approvals (
+          id TEXT PRIMARY KEY,
+          bot_id TEXT NOT NULL,
+          run_session_id TEXT NOT NULL,
+          tool_name TEXT NOT NULL,
+          args_json TEXT NOT NULL,
+          summary TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending',
+          result TEXT NOT NULL DEFAULT '',
+          created_at INTEGER NOT NULL,
+          resolved_at INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_bot_approvals_bot_status
+          ON bot_approvals(bot_id, status);
+
+        -- One row per headless bot run (standing job, run_bot, ask_bot): the
+        -- activity strip reads it, and it is what makes "which run produced
+        -- this session" answerable without archaeology. Rows and their run
+        -- sessions are pruned together (newest 50 per bot).
+        CREATE TABLE IF NOT EXISTS bot_runs (
+          id TEXT PRIMARY KEY,
+          bot_id TEXT NOT NULL,
+          session_id TEXT NOT NULL,
+          job_id TEXT,
+          job_name TEXT NOT NULL DEFAULT '',
+          source TEXT NOT NULL DEFAULT 'manual',
+          started_at INTEGER NOT NULL,
+          finished_at INTEGER,
+          status TEXT NOT NULL DEFAULT 'running',
+          summary TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_bot_runs_bot
+          ON bot_runs(bot_id, started_at DESC);
 
         -- Declarative subagents ("subagents") — the persisted registry every spawn
         -- surface resolves against (see db/subagent.rs + chat/subagent.rs). The 7
@@ -2193,16 +2315,19 @@ pub use chat::{
     get_chat_session,
     latest_local_session_working_root, list_active_chat_messages, list_chat_messages,
     list_chat_messages_page, list_chat_session_connectors, list_chat_sessions,
+    list_display_chat_messages, list_display_chat_messages_page,
+    list_idle_compact_candidates,
     list_messages_superseded_by, mark_branch_superseded, mark_superseded,
-    permission_label_from_policies, remove_chat_session_connector, search_chat_messages,
-    set_chat_session_agent_def, set_chat_session_auto, set_chat_session_connectors,
+    open_sidechat, permission_label_from_policies, remove_chat_session_connector, search_chat_messages,
+    set_chat_session_agent_def, set_chat_session_auto, set_chat_session_bot,
+    set_chat_session_connectors,
     set_chat_session_cwd_override,
     set_chat_session_plan, set_chat_session_project, set_chat_session_starred,
     set_chat_session_unread, set_chat_session_worktree, touch_chat_session,
     un_mark_branch_superseded, update_chat_message_content, update_chat_session_agent, update_chat_session_effort,
     update_chat_session_model, update_chat_session_permission_mode, update_chat_session_policies,
     update_chat_session_provider, update_chat_session_title, update_chat_session_watch_mode,
-    NewChatMessage,
+    NewChatMessage, SIDECHAT_SEED_KIND,
 };
 
 // artifacts
@@ -2259,6 +2384,22 @@ pub use automations::{
     set_automation_chat_session, set_automation_enabled, set_automation_trigger_state, start_run,
     update_automation, Automation, AutomationInput, AutomationRun, CHAT_MODE_PER_RUN,
     CHAT_MODE_SHARED,
+};
+
+// bots (named persistent agents — docs/architecture/BOTS.md)
+pub use bot_approvals::{
+    count_pending_approvals, expire_stale_approvals, insert_approval, list_approvals,
+    list_pending_approvals, resolve_approval_row, BotApproval,
+};
+pub use bots::{
+    bot_cost_rollups, bot_memory_profile, compose_prompt, create_bot, create_bot_run_session,
+    create_bot_thread_session, delete_bot, delete_orphan_bot_runs, ensure_bot_session,
+    finish_bot_run, get_bot, list_bot_runs, list_bots,
+    list_recent_bot_runs, memory_enabled_for_session, model_for_session, persona_for_session,
+    post_run_summary, prune_runs, read_profiles_for_session, resolve_custom_prompt, set_bot_enabled,
+    start_bot_run, sweep_stale_bot_runs, tools_allowed, update_bot, validate_bot_name,
+    write_profile_for_session, Bot, BotCost, BotInput, BotPatch, BotRun, DeleteBotOutcome, BOT_PETS,
+    BOT_RUN_KEEP, BOT_STALE_RUNNING_SECS,
 };
 
 // subagent (declarative subagents — the persisted agent registry)
@@ -2325,6 +2466,9 @@ pub(crate) fn mem() -> Connection {
     // Same for the subagent-run link column: tests that subagent-spawn (or assert the
     // FK's ON DELETE SET NULL) need it present.
     migrate_chat_session_agent_def(&conn).unwrap();
+    // Bots: the session→bot binding + the automation owner column. Tests that
+    // exercise bot threads, run sessions and standing jobs read these.
+    migrate_bots_columns(&conn).unwrap();
     llm_log::ensure_schema(&conn).unwrap();
     conn
 }
@@ -2462,6 +2606,7 @@ mod tests {
                 trigger_type: None,
                 trigger_config: None,
                 chat_mode: None,
+                bot_id: None,
             },
         )
         .unwrap();

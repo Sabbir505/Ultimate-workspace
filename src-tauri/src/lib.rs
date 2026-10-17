@@ -110,6 +110,7 @@ pub mod automation_triggers;
 pub mod automation_webhook;
 pub mod artifacts;
 mod chat;
+pub mod bot_runs;
 mod commands;
 mod connectors;
 pub mod db;
@@ -275,7 +276,14 @@ pub fn run() {
             let conn = db::open(&db_path)?;
             let shared_db = Arc::new(Mutex::new(conn));
             // Sweep artifacts past their 30-day retention window on startup.
-            chat::commands::sweep_expired_artifacts(&shared_db);
+            // Expired files are archived to `_backups/` first. Resolve the
+            // artifacts dir from the just-opened connection (DbState isn't
+            // managed yet — `artifacts_dir(app)` would fall back to default).
+            let artifacts_dir = {
+                let conn = shared_db.lock();
+                chat::dispatch::artifacts_dir_locked(&conn, app.handle())
+            };
+            chat::commands::sweep_expired_artifacts(&shared_db, &artifacts_dir);
             // Exec-gate approvals (§4.1.4): drop legacy plain-"1" rows so a
             // DB writer can no longer pre-allow execution by writing one.
             // One pass per boot; valid seals survive untouched.
@@ -357,6 +365,19 @@ pub fn run() {
                     &conn,
                     crate::automations::STALE_RUNNING_SECS,
                 );
+                // Same for BOT runs: an app close mid-run left the row (and
+                // the Bots rail) `running` forever, a phantom in-flight run
+                // that opens nothing. Also drop rows whose run session is gone
+                // (written by builds before `delete_chat_session` cleaned up).
+                crate::db::bots::sweep_stale_bot_runs(
+                    &conn,
+                    crate::db::bots::BOT_STALE_RUNNING_SECS,
+                );
+                crate::db::bots::delete_orphan_bot_runs(&conn);
+                // Pending bot approvals expire after 72h; sweep them at boot
+                // too, not only when a list is read (BOTS.md §Unattended
+                // permissions) — a stale approval waits for no inbox otherwise.
+                let _ = crate::db::bot_approvals::expire_stale_approvals(&conn);
             }
             app.manage(DbState(Arc::clone(&shared_db)));
             app.manage(PtyState(PtyManager::new(app.handle().clone(), Arc::clone(&shared_db))));
@@ -543,6 +564,13 @@ pub fn run() {
             // headless one-shot agent turns (see automations.rs). The tick
             // also evaluates git triggers (automation_triggers.rs).
             automations::start(app.handle().clone(), Arc::clone(&shared_db));
+
+            // Idle compaction sweep (chat/idle_compact.rs): every 60s, fold the
+            // aged-out head of long built-in (cloud/local) threads the user has
+            // stepped away from into a running summary — so the next turn
+            // doesn't re-send the whole history. Mirrors Claude Code's idle
+            // compaction; all knobs live under `chat.idle_compaction.*`.
+            chat::idle_compact::start(app.handle().clone(), Arc::clone(&shared_db));
 
             // Inbound webhook trigger listener (automation_webhook.rs):
             // loopback HTTP on an ephemeral port; GET/POST
@@ -797,6 +825,23 @@ pub fn run() {
             commands::git_cmds::uninstall_git_watcher,
             commands::git_cmds::refresh_git_watchers,
             // automations (scheduled headless agent runs)
+            commands::bot_cmds::list_bots,
+            commands::bot_cmds::create_bot,
+            commands::bot_cmds::update_bot,
+            commands::bot_cmds::delete_bot,
+            commands::bot_cmds::set_bot_enabled,
+            commands::bot_cmds::ensure_bot_session,
+            commands::bot_cmds::new_bot_session,
+            commands::bot_cmds::bot_memory_list,
+            commands::bot_cmds::bot_memory_delete,
+            commands::bot_cmds::list_bot_approvals,
+            commands::bot_cmds::list_bot_runs,
+            commands::bot_cmds::bots_running,
+            commands::bot_cmds::stop_bot_run,
+            commands::bot_cmds::get_bot_costs,
+            commands::bot_cmds::run_bot_now,
+            commands::bot_cmds::resolve_bot_approval,
+            commands::bot_cmds::scheduler_available,
             commands::automation_cmds::list_automation_templates,
             commands::automation_cmds::list_automations,
             commands::automation_cmds::create_automation,
@@ -893,6 +938,7 @@ pub fn run() {
             commands::chat_cmds::restore_chat_checkpoint,
             commands::chat_cmds::create_chat_session,
             commands::chat_cmds::fork_chat_session,
+            commands::chat_cmds::open_sidechat,
             commands::chat_cmds::delete_chat_session,
             commands::chat_cmds::delete_all_chat_sessions,
             commands::chat_cmds::delete_empty_chat_sessions,

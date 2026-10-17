@@ -93,7 +93,10 @@ fn title_is_auto_generated(conn: &rusqlite::Connection, chat_session_id: &str) -
         None | Some("") | Some("Untitled") => return true,
         Some(t) => t,
     };
-    let seed = crate::db::list_chat_messages(conn, chat_session_id)
+    // Display rows: in a sidechat the first VISIBLE user message is the
+    // sidechat's own question — the hidden context seed (`sidechat_seed`) is
+    // not what the title comparison is about.
+    let seed = crate::db::list_display_chat_messages(conn, chat_session_id)
         .ok()
         .and_then(|msgs| msgs.into_iter().find(|m| m.role == "user"))
         .and_then(|m| {

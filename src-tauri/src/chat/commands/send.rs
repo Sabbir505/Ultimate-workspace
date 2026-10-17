@@ -724,7 +724,15 @@ pub async fn send_chat_message(
     // stays reachable through the system-prompt manifest + attach meta-tools,
     // so a fresh turn sends only the system prompt + built-in tools.
     // MCP-gallery servers ride the same table under `mcp:<server_id>` keys.
-    let tools_on = tools_enabled.unwrap_or(false);
+    // Bots (docs/architecture/BOTS.md): `tools_enabled = false` means the bot's
+    // turns are assembled with an EMPTY tool set — the toggle used to be
+    // decorative. Non-bot sessions return `true` unconditionally
+    // (`db::bots::tools_allowed`), so their behavior is unchanged.
+    let tools_on = tools_enabled.unwrap_or(false)
+        && {
+            let conn = db.0.lock();
+            db::bots::tools_allowed(&conn, &chat_session_id).unwrap_or(true)
+        };
     let (mut connector_ids, mcp_server_ids): (Vec<String>, Vec<String>) = {
         let conn = db.0.lock();
         let mut cs: Vec<String> = Vec::new();
@@ -789,10 +797,14 @@ pub async fn send_chat_message(
     // 2. Persist the user message.
     {
         let conn = db.0.lock();
-        // session_start hooks fire on a session's FIRST message only.
+        // session_start hooks fire on a session's FIRST message only. A
+        // sidechat's hidden context seed (`sidechat_seed`) is not a message —
+        // the first real turn must still count as the session's start.
         let first_turn = conn
             .query_row(
-                "SELECT COUNT(*) FROM chat_messages WHERE chat_session_id = ?1",
+                "SELECT COUNT(*) FROM chat_messages
+                  WHERE chat_session_id = ?1
+                    AND (kind IS NULL OR kind != 'sidechat_seed')",
                 rusqlite::params![chat_session_id],
                 |r| r.get::<_, i64>(0),
             )
@@ -1185,7 +1197,12 @@ pub async fn send_chat_message(
     };
     let (mut system, prompt_audit) = {
         let conn = db.0.lock();
-        let custom = db::get_setting(&conn, "assistant.systemPrompt").map_err(|e| e.to_string())?;
+        // Persona LAYERS on the user's global prompt (Revision 2). A session
+        // with no bot gets `global` back unchanged, so non-bot behavior is
+        // identical by construction.
+        let global = db::get_setting(&conn, "assistant.systemPrompt").map_err(|e| e.to_string())?;
+        let custom = db::bots::resolve_custom_prompt(&conn, &chat_session_id, global)
+            .map_err(|e| e.to_string())?;
         let mut skills = parse_invoked_skills(&content);
         // Self-improving artifacts telemetry: one open run per invoked skill;
         // the turn lifecycle closes it (applied/failed/corrected). When a
@@ -2145,6 +2162,7 @@ pub(crate) async fn run_prompt_warmup(
         research: false,
         session_mesh: false,
         automations_write: false,
+        bots_write: false,
                 subagent_write: true,
         totp: false,
         unlockable_families: std::sync::Arc::new(

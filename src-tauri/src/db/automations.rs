@@ -73,6 +73,12 @@ pub struct Automation {
     /// the future.
     #[serde(default)]
     pub last_event_run_at: Option<i64>,
+    /// The bot whose standing job this is (docs/architecture/BOTS.md). `None`
+    /// = an unowned automation, which behaves exactly as before bots existed.
+    /// There is no FK on purpose: `delete_bot` deletes the bot's jobs inside
+    /// its own transaction, and a job that lost its persona must never fire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bot_id: Option<String>,
 }
 
 fn default_origin() -> String {
@@ -157,6 +163,11 @@ pub struct AutomationInput {
     /// keeps the stored value on update.
     #[serde(default)]
     pub chat_mode: Option<String>,
+    /// Owner bot id. None = unowned (the pre-bots behavior). None also keeps
+    /// the stored value on update, so the editor can't accidentally orphan a
+    /// bot's job by saving a form that never knew about the binding.
+    #[serde(default)]
+    pub bot_id: Option<String>,
 }
 
 fn map_automation(row: &Row) -> rusqlite::Result<Automation> {
@@ -183,17 +194,18 @@ fn map_automation(row: &Row) -> rusqlite::Result<Automation> {
             .unwrap_or_else(|_| default_chat_mode()),
         last_trigger_state: row.get("last_trigger_state").unwrap_or(None),
         last_event_run_at: row.get("last_event_run_at").unwrap_or(None),
+        bot_id: row.get("bot_id").unwrap_or(None),
     })
 }
 
 const COLUMNS: &str =
-    "id, name, prompt, harness, model, cwd, schedule, enabled, last_run_at, last_status, chat_session_id, created_at, origin, trigger_type, trigger_config, chat_mode, last_trigger_state, last_event_run_at";
+    "id, name, prompt, harness, model, cwd, schedule, enabled, last_run_at, last_status, chat_session_id, created_at, origin, trigger_type, trigger_config, chat_mode, last_trigger_state, last_event_run_at, bot_id";
 
 pub fn create_automation(conn: &Connection, input: &AutomationInput) -> DbResult<Automation> {
     let id = new_id();
     conn.execute(
-        "INSERT INTO automations (id, name, prompt, harness, model, cwd, schedule, enabled, created_at, origin, trigger_type, trigger_config, chat_mode)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        "INSERT INTO automations (id, name, prompt, harness, model, cwd, schedule, enabled, created_at, origin, trigger_type, trigger_config, chat_mode, bot_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             id,
             input.name,
@@ -208,6 +220,7 @@ pub fn create_automation(conn: &Connection, input: &AutomationInput) -> DbResult
             input.trigger_type.as_deref().filter(|t| !t.is_empty()).unwrap_or("cron"),
             input.trigger_config.as_deref().unwrap_or("{}"),
             input.chat_mode.as_deref().filter(|m| !m.is_empty()).unwrap_or(CHAT_MODE_PER_RUN),
+            input.bot_id.as_deref().filter(|b| !b.is_empty()),
         ],
     )?;
     get_automation(conn, &id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)
@@ -221,7 +234,8 @@ pub fn update_automation(
     conn.execute(
         "UPDATE automations SET name = ?2, prompt = ?3, harness = ?4, model = ?5, cwd = ?6, schedule = ?7,
            trigger_type = COALESCE(?8, trigger_type), trigger_config = COALESCE(?9, trigger_config),
-           chat_mode = COALESCE(?10, chat_mode)
+           chat_mode = COALESCE(?10, chat_mode),
+           bot_id = CASE WHEN ?11 IS NULL THEN bot_id ELSE NULLIF(?11, '') END
          WHERE id = ?1",
         params![
             automation_id,
@@ -236,6 +250,10 @@ pub fn update_automation(
             input.trigger_type,
             input.trigger_config,
             input.chat_mode,
+            // Bot binding: None = keep (the chat tool's update passes None, so
+            // it never rebinds); "" = unbind (the editor's "No bot"); an id =
+            // bind. Create is unchanged (INSERT, empty filtered to NULL).
+            input.bot_id.as_deref(),
         ],
     )?;
     Ok(())
@@ -646,6 +664,7 @@ mod tests {
                 trigger_type: None,
                 trigger_config: None,
                 chat_mode: None,
+                bot_id: None,
             },
         )
         .unwrap();
@@ -895,7 +914,62 @@ mod tests {
             trigger_type: None,
             trigger_config: None,
             chat_mode: None,
+            bot_id: None,
         }
+    }
+
+    #[test]
+    fn update_can_bind_rebind_and_unbind_a_bot() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        let bot = crate::db::bots::create_bot(
+            &conn,
+            &crate::db::BotInput {
+                name: "Atlas".into(),
+                description: None,
+                emoji: None,
+                color: None,
+                pet: None,
+                system_prompt: None,
+                provider: None,
+                model: None,
+                tools_enabled: None,
+                memory_enabled: None,
+                enabled: None,
+                inherit_global_prompt: None,
+                memory_read_default: None,
+            },
+        )
+        .unwrap();
+        let a = create_automation(&conn, &input("Sweep")).unwrap();
+        assert_eq!(a.bot_id, None);
+
+        // Bind.
+        let mut upd = input("Sweep");
+        upd.bot_id = Some(bot.id.clone());
+        update_automation(&conn, &a.id, &upd).unwrap();
+        assert_eq!(
+            get_automation(&conn, &a.id).unwrap().unwrap().bot_id.as_deref(),
+            Some(bot.id.as_str())
+        );
+
+        // "" unbinds (the editor's "No bot").
+        let mut unbind = input("Sweep");
+        unbind.bot_id = Some(String::new());
+        update_automation(&conn, &a.id, &unbind).unwrap();
+        assert_eq!(get_automation(&conn, &a.id).unwrap().unwrap().bot_id, None);
+
+        // None keeps the stored binding (the chat tool's partial update).
+        let mut rebind = input("Sweep");
+        rebind.bot_id = Some(bot.id.clone());
+        update_automation(&conn, &a.id, &rebind).unwrap();
+        let mut keep = input("Sweep");
+        keep.bot_id = None;
+        update_automation(&conn, &a.id, &keep).unwrap();
+        assert_eq!(
+            get_automation(&conn, &a.id).unwrap().unwrap().bot_id.as_deref(),
+            Some(bot.id.as_str())
+        );
     }
 
     #[test]

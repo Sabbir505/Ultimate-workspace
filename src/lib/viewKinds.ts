@@ -10,3 +10,10 @@ import type { ActiveView } from "../state/ui";
 export function isOverlayView(view: ActiveView): boolean {
   return view === "settings" || view === "skills" || view === "cost";
 }
+
+/** Full-screen views: the wiki / vault / bots surfaces carry their own rails
+ *  and own the whole window — the sidebar and projects panel slide away while
+ *  one is open (App shell), and docked bot pets must not float over them. */
+export function isFullScreenView(view: ActiveView): boolean {
+  return view === "wiki" || view === "vault" || view === "bots";
+}

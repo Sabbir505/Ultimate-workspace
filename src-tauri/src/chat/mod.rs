@@ -14,6 +14,7 @@ pub mod codeexec;
 pub mod commands;
 pub mod compaction;
 pub mod context_windows;
+pub mod idle_compact;
 pub mod subagents;
 pub mod dispatch;
 pub mod docdesign;
@@ -59,6 +60,12 @@ use tauri::{AppHandle, Emitter, Manager};
 // scaffolding, and the final assembler) lives in `prompts.rs`. Re-export the
 // entry points that `commands.rs` calls via `crate::chat::*`.
 pub use prompts::{build_system_prompt, is_research_request, strip_research_prefix};
+
+mod bot_policy;
+pub use bot_policy::{
+    denied_result_text, gate, is_write_class, queue_if_background_write,
+    queued_result_text, summarize_tool_call, Gate, RunOrigin,
+};
 
 use crate::db;
 use crate::types::*;
@@ -692,6 +699,8 @@ impl ChatManager {
                     .iter()
                     .any(|f| f == tools::FAMILY_SESSION_MESH),
                 subagent_write: true,
+                bots_write: pre_unlocked_families
+                    .contains(&crate::chat::tools::FAMILY_BOTS.to_string()),
                 automations_write: pre_unlocked_families
                     .iter()
                     .any(|f| f == tools::FAMILY_AUTOMATIONS),
@@ -2337,15 +2346,21 @@ pub fn run_one_shot_chat(
         return Err("No model configured for this provider".into());
     }
 
-    let system_prompt = {
+    // Persona LAYERS on the global prompt (Revision 2): a bot-bound session
+    // (its thread or a run) picks up the bot's persona here, which is what
+    // makes even the tool-less headless path persona-correct. Non-bot sessions
+    // get the global prompt back unchanged.
+    let system = {
         let conn = db.lock();
-        crate::db::get_setting(&conn, "assistant.systemPrompt")
+        let global = crate::db::get_setting(&conn, "assistant.systemPrompt")
+            .ok()
+            .flatten();
+        crate::db::bots::resolve_custom_prompt(&conn, chat_session_id, global)
             .ok()
             .flatten()
             .unwrap_or_default()
     };
-
-    let system = system_prompt.trim().to_string();
+    let system = system.trim().to_string();
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
@@ -2428,6 +2443,331 @@ pub fn run_one_shot_chat(
                 started_at: Some(started_at),
                 completed_at: Some(crate::db::now_ts()),
                 ..crate::db::NewChatMessage::assistant(chat_session_id, &response_text)
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        crate::db::touch_chat_session(&conn, chat_session_id).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Headless one-shot for a BOT RUN (docs/architecture/BOTS.md).
+///
+/// Same provider plumbing as `run_one_shot_chat`, with three differences that
+/// define what a bot run IS:
+///   * the system prompt is `db::bots::resolve_custom_prompt` — the user's
+///     global assistant prompt with the bot's persona layered on top (or the
+///     persona alone when the bot opted out of inheriting);
+///   * the turn has a real TOOL LOOP, so a standing job can read files,
+///     search, use the vault and recall its own memory instead of being a
+///     chat-only echo;
+///   * write-class tool calls never execute: they are queued for the owner by
+///     `chat::bot_policy` (keyed on the run session's `bot_role = 'run'`).
+///
+/// Blocking — runs the async tool loop on a temporary tokio runtime, so the
+/// caller owns the thread (see `crate::bot_runs`).
+pub fn run_bot_one_shot(
+    app: &AppHandle,
+    chat_session_id: &str,
+    prompt: &str,
+    provider_str: &str,
+    model_str: &str,
+    cancel: Option<&AtomicBool>,
+) -> Result<(), String> {
+    let db_state = app.state::<crate::DbState>();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("tokio runtime: {e}"))?;
+
+    // An "inherit" bot starts on ("auto", "auto") — resolve a concrete engine
+    // the same way a fresh Auto chat does, so a standing job is never stuck
+    // without a provider. A pinned bot always resolves to its own pair.
+    let (provider_str, model_str) = if provider_str.is_empty() || provider_str == "auto" {
+        rt.block_on(crate::chat::commands::resolve_auto_session_pick(
+            &db_state,
+            provider_str,
+            model_str,
+            0,
+            false,
+        ))?
+    } else {
+        (provider_str.to_string(), model_str.to_string())
+    };
+
+    let (api_key, base_url) = {
+        let conn = db_state.0.lock();
+        let key = crate::secrets::get_chat_api_key(&conn, &provider_str);
+        if key.is_none() && provider_str != "local_gguf" {
+            return Err(format!(
+                "No API key configured for {provider_str}. Set one in Settings → Connectors."
+            ));
+        }
+        let base = crate::db::get_setting(&conn, &format!("chat.{provider_str}.base_url"))
+            .ok()
+            .flatten();
+        (key.unwrap_or_default(), base)
+    };
+    if provider_str == "local_gguf" && base_url.is_none() {
+        return Err(
+            "No base URL configured for the local model. Start it in Settings → Models.".into(),
+        );
+    }
+
+    // Persist the user message FIRST: the tool loop streams into the session
+    // the UI may be watching, and a crash mid-run must not lose the request.
+    {
+        let conn = db_state.0.lock();
+        crate::db::add_chat_message(
+            &conn,
+            crate::db::NewChatMessage {
+                chat_session_id,
+                role: "user",
+                content: prompt,
+                ..Default::default()
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        crate::db::touch_chat_session(&conn, chat_session_id).map_err(|e| e.to_string())?;
+    }
+
+    let model = if model_str.is_empty() {
+        let conn = db_state.0.lock();
+        crate::db::get_setting(&conn, &format!("chat.{provider_str}.model"))
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+    } else {
+        model_str.clone()
+    };
+    if model.is_empty() && provider_str != "local_gguf" {
+        return Err("No model configured for this provider".into());
+    }
+
+    // Persona LAYERS on the global prompt; a non-bot session would get the
+    // global prompt back unchanged (resolve_custom_prompt is a no-op there).
+    let system = {
+        let conn = db_state.0.lock();
+        let global = crate::db::get_setting(&conn, "assistant.systemPrompt")
+            .ok()
+            .flatten();
+        crate::db::bots::resolve_custom_prompt(&conn, chat_session_id, global)
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+    };
+    let tools_on = {
+        let conn = db_state.0.lock();
+        crate::db::bots::tools_allowed(&conn, chat_session_id).unwrap_or(true)
+    };
+
+    let started_at = crate::db::now_ts();
+    let chat_req = crate::chat::providers::ChatRequest {
+        model: model.clone(),
+        messages: vec![crate::chat::providers::ChatMessage {
+            role: "user".into(),
+            content: prompt.to_string(),
+            images: Vec::new(),
+        }],
+        max_tokens: None,
+        system: if system.trim().is_empty() {
+            None
+        } else {
+            Some(system)
+        },
+        effort: None,
+        thinking: None,
+        local_docs_retrieval: Vec::new(),
+        web_search_options: false,
+        memory_context: None,
+        cache_prompt: provider_str == "local_gguf",
+    };
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(600))
+        .build()
+        .map_err(|e| format!("failed to create HTTP client: {e}"))?;
+
+    let call = async {
+        let kind = crate::chat::providers::provider_kind(&provider_str);
+        if !tools_on {
+            // "Allow tools" is off: the bot is chat-only by construction.
+            return match kind {
+                "openai" | "openrouter" => {
+                    let base = base_url.as_deref().unwrap_or(if provider_str == "openrouter" {
+                        crate::chat::providers::OpenRouterProvider::DEFAULT_BASE
+                    } else {
+                        crate::chat::providers::OpenAIProvider::DEFAULT_BASE
+                    });
+                    crate::chat::llm_client::openai_oneshot(
+                        &client,
+                        &api_key,
+                        base,
+                        &model,
+                        chat_req.system.as_deref().unwrap_or(""),
+                        prompt,
+                        None,
+                    )
+                    .await
+                }
+                "openai_compatible" | "openai_chat" | "local_gguf" => {
+                    let Some(base) = base_url.as_deref() else {
+                        return Err("No base URL configured for this provider. Set one in Settings → Connectors.".into());
+                    };
+                    crate::chat::llm_client::openai_oneshot(
+                        &client,
+                        &api_key,
+                        base,
+                        &model,
+                        chat_req.system.as_deref().unwrap_or(""),
+                        prompt,
+                        None,
+                    )
+                    .await
+                }
+                "openai_responses" => {
+                    let Some(base) = base_url.as_deref() else {
+                        return Err("No base URL configured for this provider. Set one in Settings → Connectors.".into());
+                    };
+                    crate::chat::llm_client::responses_oneshot(
+                        &client,
+                        &api_key,
+                        base,
+                        &model,
+                        chat_req.system.as_deref().unwrap_or(""),
+                        prompt,
+                    )
+                    .await
+                }
+                "anthropic" | "anthropic_compatible" => {
+                    let base = base_url
+                        .as_deref()
+                        .unwrap_or(crate::chat::providers::AnthropicProvider::DEFAULT_BASE);
+                    crate::chat::llm_client::anthropic_oneshot(
+                        &client,
+                        &api_key,
+                        base,
+                        &model,
+                        chat_req.system.as_deref().unwrap_or(""),
+                        prompt,
+                        1024,
+                    )
+                    .await
+                }
+                other => Err(format!("unsupported provider for a bot run: {other}")),
+            };
+        }
+
+        // Tools on: the full registry rides the schema so a write CAN be
+        // attempted — and be queued for the owner instead of executing
+        // (chat::bot_policy). Reads run normally.
+        let mgr = app.state::<crate::ChatState>().0.clone();
+        let caps = crate::chat::tools::ToolCaps::unlocked_registry();
+        let sandbox = crate::chat::permission::SandboxPolicy::WorkspaceWrite;
+        let approval = crate::chat::permission::ApprovalPolicy::OnRequest;
+        let perf = crate::chat::turn_perf::TurnPerf::new(app.clone(), chat_session_id);
+        let headers_timeout = crate::chat::reconnect::headers_timeout(provider_str == "local_gguf");
+        let base = match base_url.as_deref() {
+            Some(base) => base,
+            None => match kind {
+                "openrouter" => crate::chat::providers::OpenRouterProvider::DEFAULT_BASE,
+                "anthropic" | "anthropic_compatible" => {
+                    crate::chat::providers::AnthropicProvider::DEFAULT_BASE
+                }
+                "openai" => crate::chat::providers::OpenAIProvider::DEFAULT_BASE,
+                _ => {
+                    return Err("No base URL configured for this provider. Set one in Settings → Connectors.".into());
+                }
+            },
+        };
+        let (answer, _usage) = match kind {
+            "anthropic" | "anthropic_compatible" => {
+                crate::chat::streaming::run_anthropic_tool_loop(
+                    &client,
+                    base,
+                    &api_key,
+                    &chat_req,
+                    caps,
+                    sandbox,
+                    approval,
+                    &mgr,
+                    chat_session_id,
+                    app,
+                    &provider_str,
+                    false,
+                    perf,
+                    headers_timeout,
+                )
+                .await?
+            }
+            "openai_responses" => {
+                crate::chat::streaming::run_openai_responses_tool_loop(
+                    &client,
+                    base,
+                    &api_key,
+                    &chat_req,
+                    caps,
+                    sandbox,
+                    approval,
+                    &mgr,
+                    chat_session_id,
+                    app,
+                    &provider_str,
+                    false,
+                    perf,
+                    headers_timeout,
+                )
+                .await?
+            }
+            _ => {
+                crate::chat::streaming::run_openai_tool_loop(
+                    &client,
+                    base,
+                    &api_key,
+                    &chat_req,
+                    caps,
+                    sandbox,
+                    approval,
+                    &mgr,
+                    chat_session_id,
+                    app,
+                    &provider_str,
+                    false,
+                    false,
+                    perf,
+                    headers_timeout,
+                )
+                .await?
+            }
+        };
+        Ok(answer)
+    };
+
+    let answer = match cancel {
+        Some(flag) => rt.block_on(async {
+            tokio::select! {
+                r = call => r,
+                _ = wait_for_stop(flag) => Err(crate::automations::STOPPED_ERROR.to_string()),
+            }
+        })?,
+        None => rt.block_on(call)?,
+    };
+
+    // The loops stream tokens into the UI but never write the row — persisting
+    // the turn is the CALLER's job on this path too (the same division of
+    // labour the interactive send uses). A run that produced nothing still
+    // records an error rather than an empty assistant turn.
+    if answer.trim().is_empty() {
+        return Err("The run finished without producing a reply.".into());
+    }
+    {
+        let conn = db_state.0.lock();
+        crate::db::add_chat_message(
+            &conn,
+            crate::db::NewChatMessage {
+                started_at: Some(started_at),
+                completed_at: Some(crate::db::now_ts()),
+                ..crate::db::NewChatMessage::assistant(chat_session_id, &answer)
             },
         )
         .map_err(|e| e.to_string())?;

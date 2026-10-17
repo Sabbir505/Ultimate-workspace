@@ -228,7 +228,7 @@ mod pipeline_tests {
         let applied = {
             let conn = store.lock();
             apply_judge_op(&conn, &input, &parse_judge_op("{\"operation\":\"ADD\"}", &[]),
-                           Some("s1"), None, None, 1_000, crate::memory::model::origin::EXTRACTED).unwrap()
+                           Some("s1"), None, "default", None, 1_000, crate::memory::model::origin::EXTRACTED).unwrap()
         };
         assert_eq!(applied.op, "ADD");
 
@@ -251,7 +251,7 @@ mod pipeline_tests {
             let conn = store.lock();
             apply_judge_op(&conn, &input,
                            &parse_judge_op(&format!("{{\"operation\":\"DELETE\",\"target_id\":\"{}\"}}", targets[0]), &targets),
-                           Some("s1"), None, None, 2_000, crate::memory::model::origin::EXTRACTED).unwrap()
+                           Some("s1"), None, "default", None, 2_000, crate::memory::model::origin::EXTRACTED).unwrap()
         };
         assert_eq!(applied2.op, "DELETE");
 

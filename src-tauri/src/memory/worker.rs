@@ -207,17 +207,25 @@ pub async fn extract_session(app: &AppHandle, chat_session_id: &str) -> Result<(
     let db = app.state::<crate::DbState>();
 
     // Fast exits under a short lock: feature flag + cursor + debounce.
-    let (cursor, project_id) = {
+    // `write_profile` is the namespace everything below extracts INTO:
+    // `default` for the user's chats, `bot:<id>` for a bot's thread or run
+    // (docs/architecture/BOTS.md). A bot with memory_enabled = false extracts
+    // nothing at all — its turns are not the user's to remember.
+    let (cursor, project_id, write_profile) = {
         let conn = db.0.lock();
         if !crate::memory::memory_enabled(&conn) {
             return Ok(());
         }
-        let proj = db::get_chat_session(&conn, chat_session_id)
-            .map_err(|e| e.to_string())?
-            .and_then(|s| s.project_id);
+        let sess = db::get_chat_session(&conn, chat_session_id).map_err(|e| e.to_string())?;
+        let proj = sess.as_ref().and_then(|s| s.project_id.clone());
+        if !db::bots::memory_enabled_for_session(&conn, chat_session_id).unwrap_or(true) {
+            return Ok(());
+        }
         (
             db::get_cursor(&conn, chat_session_id).map_err(|e| e.to_string())?,
             proj,
+            db::bots::write_profile_for_session(&conn, chat_session_id)
+                .unwrap_or_else(|_| "default".to_string()),
         )
     };
     if !debounce_ok(chat_session_id) {
@@ -258,8 +266,9 @@ pub async fn extract_session(app: &AppHandle, chat_session_id: &str) -> Result<(
     let stale = oldest_pending.map_or(false, |t| crate::db::now_ts() - t > STALE_PENDING_SECS);
     if !extraction_due(new_turns) && !stale {
         // Still worth refreshing vectors for records written while the
-        // sidecar was down — a cheap no-op when the queue is empty.
-        maybe_backfill_embeddings(&app).await;
+        // sidecar was down — a cheap no-op when the queue is empty. Scoped to
+        // this session's own namespace.
+        maybe_backfill_embeddings(&app, &write_profile).await;
         return Ok(());
     }
 
@@ -433,7 +442,7 @@ pub async fn extract_session(app: &AppHandle, chat_session_id: &str) -> Result<(
                 let conn = db.0.lock();
                 fetch_similar(
                     &conn,
-                    "default",
+                    &write_profile,
                     project_id.as_deref(),
                     cand,
                     emb.as_deref(),
@@ -467,6 +476,7 @@ pub async fn extract_session(app: &AppHandle, chat_session_id: &str) -> Result<(
                     &op,
                     Some(chat_session_id),
                     project_id.as_deref(),
+                    &write_profile,
                     emb,
                     crate::db::now_ts(),
                     crate::memory::model::origin::EXTRACTED,
@@ -520,9 +530,13 @@ pub async fn extract_session(app: &AppHandle, chat_session_id: &str) -> Result<(
             old_content: a.old_content.clone(),
         })
         .collect();
+    // The memory document (`memory.document`) is the USER's single one-page
+    // memory; `merge_document` itself refuses a non-`default` profile, so a
+    // bot's extraction never rewrites it (and never inherits it).
     if !changes.is_empty() {
         if let Err(e) = merge_document(
             app,
+            &write_profile,
             &provider_str,
             &api_key,
             base_url.as_deref(),
@@ -546,6 +560,7 @@ pub async fn extract_session(app: &AppHandle, chat_session_id: &str) -> Result<(
         base_url.as_deref(),
         &model,
         project_id.as_deref(),
+        &write_profile,
     )
     .await
     {
@@ -566,11 +581,12 @@ async fn maybe_reflect(
     base_url: Option<&str>,
     model: &str,
     project_id: Option<&str>,
+    profile: &str,
 ) -> Result<(), String> {
     let db = app.state::<crate::DbState>();
     let input = {
         let conn = db.0.lock();
-        crate::memory::reflect::reflection_due(&conn, "default", project_id)
+        crate::memory::reflect::reflection_due(&conn, profile, project_id)
             .map_err(|e| e_tostring(e))?
     };
     let Some(input) = input else {
@@ -599,7 +615,7 @@ async fn maybe_reflect(
         questions
             .iter()
             .map(|q| {
-                let hits = db::search_memories_fts(&conn, "default", project_id, q, 4)
+                let hits = db::search_memories_fts(&conn, profile, project_id, q, 4)
                     .unwrap_or_default()
                     .into_iter()
                     .map(|m| m.content)
@@ -635,7 +651,7 @@ async fn maybe_reflect(
         let conn = db.0.lock();
         let n = crate::memory::reflect::apply_reflection(
             &conn,
-            "default",
+            profile,
             project_id,
             &input.sample,
             &insights,
@@ -657,8 +673,10 @@ async fn maybe_reflect(
             .iter()
             .map(|i| DocChange::added("insight", &i.content))
             .collect();
+        // `merge_document` refuses a non-`default` profile, so a bot's
+        // reflection never rewrites the user's one-page document.
         if let Err(e) =
-            merge_document(app, provider, api_key, base_url, model, None, &changes).await
+            merge_document(app, profile, provider, api_key, base_url, model, None, &changes).await
         {
             crate::relay_eprintln!("[memory] document merge (reflection) skipped: {e}");
         }
@@ -841,11 +859,19 @@ pub async fn save_memory(
         None => None,
     };
 
+    // A tool-driven save from a bot's thread lands in the BOT's namespace
+    // (docs/architecture/BOTS.md): `memory_save` can never write to the user's
+    // `default` profile from a bot session.
+    let write_profile = {
+        let conn = db.0.lock();
+        db::bots::write_profile_for_session(&conn, chat_session_id)
+            .unwrap_or_else(|_| "default".to_string())
+    };
     let similar = {
         let conn = db.0.lock();
         fetch_similar(
             &conn,
-            "default",
+            &write_profile,
             project_id.as_deref(),
             &cand,
             emb.as_deref(),
@@ -879,6 +905,7 @@ pub async fn save_memory(
             &op,
             Some(chat_session_id),
             project_id.as_deref(),
+            &write_profile,
             emb,
             crate::db::now_ts(),
             crate::memory::model::origin::AGENT_TOOL,
@@ -902,7 +929,9 @@ pub async fn save_memory(
         op if op == "NOOP" => "already known — nothing new stored",
         _ => "stored as a new memory",
     };
-    // Fold the change into the single memory document (non-NOOP only).
+    // Fold the change into the single memory document (non-NOOP only). A bot
+    // session's write_profile is `bot:<id>`, which `merge_document` refuses —
+    // the ONE `memory.document` is the user's, never a bot's.
     if applied.op != "NOOP" {
         let changes = vec![DocChange {
             op: applied.op.clone(),
@@ -912,6 +941,7 @@ pub async fn save_memory(
         }];
         if let Err(e) = merge_document(
             app,
+            &write_profile,
             &provider_str,
             &api_key,
             base_url.as_deref(),
@@ -937,8 +967,14 @@ pub async fn save_memory(
 /// a change summary so the bell panel records what happened. On ANY failure
 /// the stored document is cleared so injection falls back to a deterministic
 /// render from the records: correctness never depends on this call succeeding.
+///
+/// `profile` is the namespace the changes came from. `memory.document` is the
+/// USER's single one-page memory, so a non-`default` profile is a hard no-op:
+/// a bot's turn (its extraction, `memory_save`, or reflection) never rewrites
+/// the user's document (docs/architecture/BOTS.md §Memory scoping).
 pub async fn merge_document(
     app: &AppHandle,
+    profile: &str,
     provider: &str,
     api_key: &str,
     base_url: Option<&str>,
@@ -946,6 +982,9 @@ pub async fn merge_document(
     chat_session_id: Option<&str>,
     changes: &[DocChange],
 ) -> Result<(), String> {
+    if !rewrites_user_document(profile) {
+        return Ok(());
+    }
     let db = app.state::<crate::DbState>();
     let current = {
         let conn = db.0.lock();
@@ -1037,6 +1076,13 @@ pub async fn merge_document(
     Ok(())
 }
 
+/// The single `memory.document` belongs to the user's `default` profile only.
+/// Any other namespace (a bot's `bot:<id>`) may not rewrite it — one shared
+/// guard so extraction, `memory_save` and reflection can't drift apart.
+pub fn rewrites_user_document(profile: &str) -> bool {
+    profile == "default"
+}
+
 /// The "CURRENT document" input for the rewrite pass: the stored document,
 /// or — when none is stored (cleared by a UI mutation, a forget, or a failed
 /// rewrite, or never written yet) — a deterministic render of the record
@@ -1078,14 +1124,16 @@ fn tool_write_evidence(
 /// (model.rs §6 note: "backfilled on a later pass" — this is that pass).
 /// Bounded per run; a near-no-op when the queue is empty or the sidecar is
 /// down. Called on the extraction path so cost stays tied to it.
-async fn maybe_backfill_embeddings(app: &AppHandle) -> usize {
+async fn maybe_backfill_embeddings(app: &AppHandle, profile: &str) -> usize {
     let Some(base) = embedding_base_url(app) else {
         return 0;
     };
     let db = app.state::<crate::DbState>();
     let missing = {
         let conn = db.0.lock();
-        db::memories_missing_embedding(&conn, "default", 64).unwrap_or_default()
+        // Backfill the SESSION's own namespace: a bot's records written while
+        // the sidecar was down must not be stranded (they'd never be embedded).
+        db::memories_missing_embedding(&conn, profile, 64).unwrap_or_default()
     };
     if missing.is_empty() {
         return 0;
@@ -1235,6 +1283,15 @@ mod tests {
         assert_eq!(quote, "remember that my name is Sabbir Hossain");
         let msgs = db::list_active_chat_messages(&conn, &cs.id).unwrap();
         assert_eq!(id, msgs.last().unwrap().id);
+    }
+
+    /// The one memory document belongs to the user alone: a bot namespace must
+    /// never rewrite it (BOTS.md §Memory scoping).
+    #[test]
+    fn only_default_profile_rewrites_the_memory_document() {
+        assert!(rewrites_user_document("default"));
+        assert!(!rewrites_user_document("bot:abc-123"));
+        assert!(!rewrites_user_document(""));
     }
 }
 

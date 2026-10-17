@@ -24,6 +24,7 @@ import { useScreenMountTiming } from '../lib/screenTiming';
 import { useAfterPaint } from '../lib/afterPaint';
 import { tapLight } from '../lib/haptics';
 import ConnectionIndicator from '../components/ConnectionIndicator';
+import TtsSettingsCard from '../components/TtsSettingsCard';
 import QrScanModal from './QrScanModal';
 
 // ---------------------------------------------------------------------------
@@ -309,6 +310,12 @@ export default function SettingsScreen() {
           />
           <View style={[styles.divider, { backgroundColor: c.border }]} />
           <NavRow
+            icon={<Ionicons name="sparkles-outline" size={18} color={c.textSecondary} />}
+            label="Bots"
+            onPress={() => navigation.navigate('Bots')}
+          />
+          <View style={[styles.divider, { backgroundColor: c.border }]} />
+          <NavRow
             icon={<Ionicons name="git-branch-outline" size={18} color={c.textSecondary} />}
             label="Git"
             onPress={() => navigation.navigate('Git')}
@@ -361,6 +368,10 @@ export default function SettingsScreen() {
           </View>
         </Section>
         ) : null}
+
+        <Section title="Read aloud" hint="Text-to-speech for chat, cards, wiki & notes.">
+          <TtsSettingsCard />
+        </Section>
 
         {/* ---- About ---- */}
         <Section title="About">

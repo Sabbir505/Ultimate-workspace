@@ -29,7 +29,6 @@ import {
   Modal,
   ScrollView,
   TouchableOpacity,
-  TouchableWithoutFeedback,
   Image,
   ActivityIndicator,
   Alert,
@@ -43,6 +42,7 @@ import { useRelay, onArtifactContent, getCachedArtifactPreview, type ArtifactPre
 import { tapLight } from '../../lib/haptics';
 import MarkdownText from './MarkdownText';
 import CodePreview from './CodePreview';
+import SpeakButton from '../SpeakButton';
 import { WebView } from 'react-native-webview';
 
 export interface ArtifactSheetProps {
@@ -283,6 +283,15 @@ export function ArtifactSheet({ visible, onClose, artifacts, sessionId, initialP
   }, [selected, content]);
 
   const filename = selected ? (selected.filename || selected.path.split(/[\\/]/).pop() || selected.path) : '';
+  // Text the speaker can read: the fetched text content, or an inline
+  // component payload. Binary/image artifacts have nothing to read — the
+  // button hides.
+  const speakableArtifact = useMemo(() => {
+    if (!selected) return null;
+    if (mode === 'inline') return selected.inline?.code?.trim() || null;
+    if (content?.text != null && content.text.trim()) return content.text;
+    return null;
+  }, [selected, mode, content]);
   // WebView document: full pages render as-is (the desktop iframe contract);
   // fragments get a minimal shell. Transparent background so sheet theme
   // shows through, like the desktop preview pane.
@@ -512,14 +521,15 @@ export function ArtifactSheet({ visible, onClose, artifacts, sessionId, initialP
   }
 
   return (
-    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
-      <View style={styles.scrim}>
-        {/* Dedicated dismiss layer BEHIND the sheet — tapping the exposed
-            chrome closes; the sheet itself is a plain sibling so nothing
-            wraps the scroll views in a touch responder. */}
-        <TouchableWithoutFeedback onPress={onClose} style={styles.scrimBackdrop}>
-          <View style={[StyleSheet.absoluteFill, { backgroundColor: c.scrim }]} />
-        </TouchableWithoutFeedback>
+    // Opaque full-screen modal. The sheet was `transparent` with an
+    // 86%-then-100% `height`, which Android doesn't reliably resolve against
+    // a transparent modal root — the sheet wrapped its content instead of
+    // filling the display, so markdown opened as a half-height panel. An
+    // opaque modal always fills the screen, matching the vault/wiki screens.
+    // (With the sheet full-screen there is no exposed chrome left for the old
+    // tap-to-dismiss backdrop, so it is gone; hardware back still closes.)
+    <Modal visible={visible} animationType="slide" onRequestClose={onClose} statusBarTranslucent>
+      <View style={[styles.scrim, { backgroundColor: c.background }]}>
         <View style={[styles.sheet, { backgroundColor: c.elevated, paddingTop: insets.top + 6 }]}>
               <View style={styles.header}>
                 <View style={styles.headerText}>
@@ -532,6 +542,14 @@ export function ArtifactSheet({ visible, onClose, artifacts, sessionId, initialP
                     </Text>
                   ) : null}
                 </View>
+                {speakableArtifact ? (
+                  <SpeakButton
+                    id={`artifact:${selKey ?? ''}`}
+                    text={speakableArtifact}
+                    label={filename}
+                    size={18}
+                  />
+                ) : null}
                 <TouchableOpacity
                   style={[styles.closeButton, { backgroundColor: c.surface2 }]}
                   onPress={() => {
@@ -597,7 +615,6 @@ export function ArtifactSheet({ visible, onClose, artifacts, sessionId, initialP
 
 const styles = StyleSheet.create({
   scrim: { flex: 1 },
-  scrimBackdrop: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 },
   sheet: {
     // Full-screen preview (was an 86% sheet): artifacts get the whole
     // display — rendered HTML/code/markdown need the room. Definite height +

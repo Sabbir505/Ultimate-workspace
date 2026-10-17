@@ -29,6 +29,7 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 import { theme } from '../theme';
 import { useScreenMountTiming } from '../lib/screenTiming';
 import { useRelay, onTranscript } from '../hooks/useRelay';
+import SpeakButton from '../components/SpeakButton';
 
 const POLL_MS = 1500;
 
@@ -90,6 +91,12 @@ export default function TerminalScreen() {
           <Text numberOfLines={1} style={[styles.title, { color: c.text }]}>{title}</Text>
           <Text style={[styles.subtitle, { color: c.textSecondary }]}>Live terminal · desktop pane</Text>
         </View>
+        <SpeakButton
+          id="terminal:screen"
+          text={screen}
+          label="Terminal screen"
+          size={18}
+        />
       </View>
 
       <KeyboardAvoidingView

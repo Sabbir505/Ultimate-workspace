@@ -24,6 +24,7 @@ import { ScreenLoading, FadeIn } from '../components/ScreenFeedback';
 import DomainErrorBar from '../components/DomainErrorBar';
 import ScreenHeader from '../components/ScreenHeader';
 import MarkdownText from '../components/chat/MarkdownText';
+import SpeakButton from '../components/SpeakButton';
 
 const STATUS_COLOR: Record<string, string> = {
   fresh: theme.colors.success,
@@ -137,6 +138,14 @@ export default function WikiScreen() {
           <Text numberOfLines={1} style={[styles.headerTitle, { color: c.text }]}>
             {page ? page.title : projectName ? `${projectName} wiki` : 'Wiki'}
           </Text>
+          {page ? (
+            <SpeakButton
+              id={`wiki:${page.slug ?? page.title}`}
+              text={`${page.title}. ${page.brief ? `${page.brief}\n\n` : ''}${page.body}`}
+              label={page.title}
+              size={18}
+            />
+          ) : null}
         </View>
       ) : (
         <ScreenHeader title="Wiki" errorDomains={['wiki']} />

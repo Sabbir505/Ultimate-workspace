@@ -16,6 +16,7 @@ import { useState, type JSX } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
 import { theme } from '../../theme';
 import { notifySuccess, notifyError, tapLight } from '../../lib/haptics';
+import SpeakButton from '../SpeakButton';
 
 export interface ApprovalCardProps {
   approval: {
@@ -90,6 +91,12 @@ export function ApprovalCard({ approval, onApprove, onDeny }: ApprovalCardProps)
             {approval.summary}
           </Text>
         </View>
+        <SpeakButton
+          id={`approval:${approval.pendingId}`}
+          text={approval.summary}
+          label={`Approval: ${approval.tool}`}
+          size={15}
+        />
       </View>
 
       {/* Args: pretty JSON, collapsed by default. */}

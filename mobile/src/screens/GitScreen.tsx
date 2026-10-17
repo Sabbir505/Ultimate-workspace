@@ -20,6 +20,7 @@ import {
 import { useRelayList } from '../hooks/useRelayList';
 import { tapLight } from '../lib/haptics';
 import { screenCacheGet, screenCacheSet } from '../lib/screenCache';
+import SpeakButton from '../components/SpeakButton';
 import ScreenHeader from '../components/ScreenHeader';
 
 type ChangedFile = { status: string; kind: string; path: string };
@@ -244,6 +245,21 @@ export default function GitScreen() {
                 {status.dirty ? ' · uncommitted changes' : ' · clean'}
                 {status.remote_url ? ` · ${status.remote_url}` : ''}
               </Text>
+              <SpeakButton
+                id="git:status"
+                text={[
+                  `Branch ${status.branch ?? 'unknown'}.`,
+                  changed.length === 0
+                    ? 'The working tree is clean.'
+                    : `${changed.length} changed file${changed.length === 1 ? '' : 's'}, ${staged} staged. ` +
+                      changed.map((f) => `${f.path}, ${f.status.trim() || 'modified'}`).join('. '),
+                  logEntries.length > 0
+                    ? `Recent commits: ${logEntries.map((e) => String(e.message ?? '')).filter(Boolean).slice(0, 5).join('. ')}.`
+                    : '',
+                ].filter(Boolean).join(' ')}
+                label="Git status"
+                size={17}
+              />
             </View>
 
             <Text style={[styles.section, { color: c.textSecondary }]}>

@@ -4,11 +4,12 @@
  * mid-turn; the turn is PARKED until the answer lands, so the phone must
  * show the same card or the agent waits for a desktop visit.
  */
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { View, Text, StyleSheet, TextInput, TouchableOpacity } from 'react-native';
 import { theme } from '../../theme';
 import type { AgentQuestion } from '../../hooks/useRelay';
 import { tapLight } from '../../lib/haptics';
+import SpeakButton from '../SpeakButton';
 
 export interface QuestionCardProps {
   pendingId: string;
@@ -53,9 +54,29 @@ export function QuestionCard({ pendingId, questions, onAnswer }: QuestionCardPro
     onAnswer(answers, response.trim() || undefined);
   };
 
+  // The question + choices, phrased the way a person would read it aloud.
+  const speakableText = useMemo(
+    () =>
+      questions
+        .map((q) => {
+          const opts = (q.options ?? []).map((o) => (o.description ? `${o.label}: ${o.description}` : o.label));
+          return opts.length > 0 ? `${q.question}. Options: ${opts.join(', ')}.` : q.question;
+        })
+        .join('\n\n'),
+    [questions],
+  );
+
   return (
     <View style={[styles.card, { backgroundColor: c.surface, borderColor: c.accent }]}>
-      <Text style={[styles.title, { color: c.accent }]}>The agent has a question</Text>
+      <View style={styles.titleRow}>
+        <Text style={[styles.title, { color: c.accent, flex: 1 }]}>The agent has a question</Text>
+        <SpeakButton
+          id={`question:${pendingId}`}
+          text={speakableText}
+          label="Agent question"
+          size={15}
+        />
+      </View>
       {questions.map((q, qi) => (
         <View key={`${q.question}-${qi}`} style={styles.question}>
           {q.header ? (
@@ -128,6 +149,7 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   title: { fontSize: 12, fontWeight: '800', textTransform: 'uppercase', letterSpacing: 0.6 },
+  titleRow: { flexDirection: 'row', alignItems: 'center' },
   question: { gap: 6 },
   header: { fontSize: 11, fontWeight: '700' },
   questionText: { fontSize: 14, lineHeight: 19 },

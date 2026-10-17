@@ -340,6 +340,35 @@ export function useSessionChat(sessionId: string | null, liveHint = false) {
     resolvePlanProposal,
   } = useRelay();
 
+  // Relay senders behind a ref so NO effect depends on their identity.
+  //
+  // These are module-level constants, but Fast Refresh re-evaluates
+  // useRelay.ts and hands already-mounted hooks BRAND NEW function objects.
+  // Any effect listing one in its dep array then sees a "changed" dep on
+  // every refresh and re-runs — and these effects re-seed state and fire
+  // relay requests, so a refresh was enough to drive the chat into a
+  // setState/render/request cycle that React aborts with "Maximum update
+  // depth exceeded" (the reported line jumps around because whichever
+  // dispatch lands during the commit phase is the one React names).
+  // Reading the senders through a ref at CALL time keeps them current while
+  // dep arrays hold only primitives.
+  const relay = useRef({
+    getSessionMessages,
+    getSessionMeta,
+    listSessionArtifacts,
+    listChatCheckpoints,
+    cancelSessionStream,
+    sendSessionChat,
+  });
+  relay.current = {
+    getSessionMessages,
+    getSessionMeta,
+    listSessionArtifacts,
+    listChatCheckpoints,
+    cancelSessionStream,
+    sendSessionChat,
+  };
+
   // Mirror the hook's `connected` value into the ref: the onConnected-event
   // subscription only fires on TRANSITIONS, so mounting the chat while
   // already offline left the ref `true` and the first fetch took the
@@ -361,9 +390,9 @@ export function useSessionChat(sessionId: string | null, liveHint = false) {
       const now = Date.now();
       if (now - lastTranscriptSync.current < 1200) return;
       lastTranscriptSync.current = now;
-      getSessionMessages(sid);
+      relay.current.getSessionMessages(sid);
     },
-    [getSessionMessages],
+    [],
   );
 
   // Subscribe to event buses exactly once for the lifetime of the hook.
@@ -432,16 +461,39 @@ export function useSessionChat(sessionId: string | null, liveHint = false) {
         };
         const serverContent = new Set(rows.map((m) => baseText(m.content)));
         const pending = s.messages.filter((m) => m.id < 0 && !serverContent.has(baseText(m.content)));
+        const merged = [...pending, ...rows];
+        const nextStreaming = s.streaming || live;
+        const nextContent = partial == null ? s.streamingContent : mergeLivePrefix(s.streamingContent, partial);
+        // Bail out when this frame carries NO new information. The 2.5s
+        // live-convergence poll re-fetches the same page constantly, and a
+        // fresh `messages` array every time forced a full list re-render per
+        // poll. Those renders were long enough to keep the render phase open
+        // while the NEXT frame arrived, so its setState counted as a NESTED
+        // update and React aborted with "Maximum update depth exceeded".
+        // Returning `s` itself lets React bail out on Object.is and the loop
+        // cannot start.
+        const sameRows =
+          s.messages.length === merged.length &&
+          s.messages.every((m, i) => m.id === merged[i]?.id && m.content === merged[i]?.content);
+        if (
+          s.loading === false &&
+          s.hasMore === hasMore &&
+          s.streaming === nextStreaming &&
+          s.streamingContent === nextContent &&
+          sameRows
+        ) {
+          return s;
+        }
         return {
           ...s,
-          messages: [...pending, ...rows],
+          messages: merged,
           hasMore,
           loading: false,
           // The turn is still running but this hook instance never saw a
           // token (the user just opened the chat): the tail must render
           // anyway — "Working for…" plus typing dots until tokens resume.
-          streaming: s.streaming || live,
-          streamingContent: partial == null ? s.streamingContent : mergeLivePrefix(s.streamingContent, partial),
+          streaming: nextStreaming,
+          streamingContent: nextContent,
         };
       });
     });    // Delete ack: drop the row immediately. The relay also sends a refreshed
@@ -714,7 +766,7 @@ export function useSessionChat(sessionId: string | null, liveHint = false) {
       // every fresh user send does.
       if (!isRetry) retryAttempt.current = 0;
       lastTurnRef.current = { text, attachments };
-      const sent = sendSessionChat(sessionId, text, attachments);
+      const sent = relay.current.sendSessionChat(sessionId, text, attachments);
       if (sent) {
         turnInFlight.current = true;
         armTurnWatchdog(sessionId);
@@ -741,7 +793,7 @@ export function useSessionChat(sessionId: string | null, liveHint = false) {
       }));
       return sent;
     },
-    [sessionId, sendSessionChat],
+    [sessionId],
   );
   dispatchRef.current = dispatchTurn;
 
@@ -816,7 +868,7 @@ export function useSessionChat(sessionId: string | null, liveHint = false) {
       // Keep watching the SAME turn — do not cancel, do not re-dispatch.
       armTurnWatchdog(sid);
     }, waitMs);
-  }, [cancelSessionStream, getSessionMessages]);
+  }, []);
 
   // Queue flush: when a turn ends (Done, error, or cancel), dispatch the next
   // queued follow-up. Kept as an effect so every end-path is covered.
@@ -869,13 +921,22 @@ export function useSessionChat(sessionId: string | null, liveHint = false) {
   useEffect(() => {
     if (!state.streaming || !sessionId) return;
     const timer = setInterval(() => {
-      getSessionMessages(sessionId);
+      relay.current.getSessionMessages(sessionId);
     }, 2500);
     return () => clearInterval(timer);
-  }, [state.streaming, sessionId, getSessionMessages]);
+  }, [state.streaming, sessionId]);
 
   // Switch session: reset state and fetch the first page of the new session.
+  // Runs when the SESSION changes and for no other reason. The relay senders
+  // come from `relay` (see above) so Fast Refresh can't invalidate the dep
+  // array — when it did, this body re-ran on every refresh, re-seeding state
+  // (`loading`/`streaming` back on, the chat pinned in "send + refresh" mode)
+  // and firing four relay requests, which React finally aborted as
+  // "Maximum update depth exceeded".
+  const seededSession = useRef<string | null | undefined>(undefined);
   useEffect(() => {
+    if (seededSession.current === sessionId) return;
+    seededSession.current = sessionId;
     // Any in-flight stream belongs to the OLD session — drop its buffer.
     tokenBuf.current = '';
     stopFlushTimer();
@@ -924,14 +985,27 @@ export function useSessionChat(sessionId: string | null, liveHint = false) {
       streaming: live,
       streamingContent: partial ?? '',
     };
-    setState(seed);
-    if (connectedRef.current !== false) getSessionMessages(sessionId, undefined, 50);
+    // Object.is bail-out: re-seeding to an equivalent state must not force a
+    // render, or the seeding render and the effect that triggers it close a
+    // cycle that React counts as nested updates.
+    setState((s) => (
+      s.messages.length === rows.length &&
+      s.messages.every((m, i) => m.id === rows[i]?.id && m.content === rows[i]?.content) &&
+      s.hasMore === seed.hasMore &&
+      s.loading === seed.loading &&
+      s.streaming === seed.streaming &&
+      s.streamingContent === seed.streamingContent &&
+      s.meta === null && s.artifacts.length === 0 && s.checkpoints.length === 0
+        ? s
+        : seed
+    ));
+    if (connectedRef.current !== false) relay.current.getSessionMessages(sessionId, undefined, 50);
     // Header (model chip) + artifacts gallery state for this chat.
-    getSessionMeta(sessionId);
-    listSessionArtifacts(sessionId);
+    relay.current.getSessionMeta(sessionId);
+    relay.current.listSessionArtifacts(sessionId);
     // Per-turn checkpoint files (TurnChangesCard rows + Undo targets).
-    listChatCheckpoints(sessionId);
-  }, [sessionId, getSessionMessages, stopFlushTimer, getSessionMeta, listSessionArtifacts, listChatCheckpoints]);
+    relay.current.listChatCheckpoints(sessionId);
+  }, [sessionId, stopFlushTimer]);
 
   // Disconnect recovery: a mid-stream disconnect means the Done/Error events
   // for the in-flight turn will NEVER arrive — the chat used to sit "streaming"
@@ -961,10 +1035,10 @@ export function useSessionChat(sessionId: string | null, liveHint = false) {
   queuedRef.current = state.queued;
   useEffect(() => {
     if (!connected || !sessionId) return;
-    getSessionMessages(sessionId, undefined, 50);
+    relay.current.getSessionMessages(sessionId, undefined, 50);
     // Checkpoints rode the session-switch fetch that was dropped offline —
     // re-pull them so the per-turn changes cards come back too.
-    listChatCheckpoints(sessionId);
+    relay.current.listChatCheckpoints(sessionId);
     const queued = queuedRef.current;
     // An adopted turn is still running: a blind dispatch would race it.
     if (queued.length > 0 && !streamActive.current && !turnInFlight.current && !adoptedRef.current) {
@@ -972,7 +1046,7 @@ export function useSessionChat(sessionId: string | null, liveHint = false) {
       setState((s) => ({ ...s, queued: rest }));
       dispatchTurn(next);
     }
-  }, [connected, sessionId, getSessionMessages, dispatchTurn, listChatCheckpoints]);
+  }, [connected, sessionId, dispatchTurn]);
 
   // --- actions ---
 
@@ -996,7 +1070,7 @@ export function useSessionChat(sessionId: string | null, liveHint = false) {
 
   const cancel = useCallback(() => {
     if (!sessionId) return;
-    cancelSessionStream(sessionId);
+    relay.current.cancelSessionStream(sessionId);
     // Drop the unflushed tail too — a cancelled stream's tokens are moot.
     // Clearing turnInFlight lets the very next send start a fresh turn
     // immediately (steer) instead of being silently queued behind the
@@ -1014,7 +1088,7 @@ export function useSessionChat(sessionId: string | null, liveHint = false) {
     cancelledTurn.current = true;
     suppressNextFlush.current = true;
     setState((s) => ({ ...s, streaming: false, streamingContent: '' }));
-  }, [sessionId, cancelSessionStream, stopFlushTimer]);
+  }, [sessionId, stopFlushTimer]);
 
   /** Steer (desktop composer parity): cancel the running turn and send this
    *  queued message NOW, parking the rest of the queue until the steered
@@ -1198,8 +1272,8 @@ export function useSessionChat(sessionId: string | null, liveHint = false) {
     if (!sessionId || !state.hasMore || state.messages.length === 0) return;
     const oldest = state.messages[state.messages.length - 1]!;
     setState((s) => ({ ...s, loading: true }));
-    getSessionMessages(sessionId, oldest.id, 50);
-  }, [sessionId, state.hasMore, state.messages, getSessionMessages]);
+    relay.current.getSessionMessages(sessionId, oldest.id, 50);
+  }, [sessionId, state.hasMore, state.messages]);
 
   const rename = useCallback(
     (title: string) => {
@@ -1215,8 +1289,8 @@ export function useSessionChat(sessionId: string | null, liveHint = false) {
   const refresh = useCallback(() => {
     if (!sessionId) return;
     setState((s) => ({ ...s, loading: true }));
-    getSessionMessages(sessionId, undefined, 50);
-  }, [sessionId, getSessionMessages]);
+    relay.current.getSessionMessages(sessionId, undefined, 50);
+  }, [sessionId]);
 
   const clearError = useCallback(() => {
     setState((s) => ({ ...s, error: null }));

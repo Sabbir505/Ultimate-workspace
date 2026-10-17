@@ -23,6 +23,7 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 import { theme } from '../../theme';
 import { tapMedium } from '../../lib/haptics';
 import MarkdownText from './MarkdownText';
+import SpeakButton from '../SpeakButton';
 
 // M4: Ionicons glyph-font wrappers preserving the lucide call-shapes.
 const ChevronUp = ({ size, color }: { size?: number; color?: string }) => (
@@ -45,7 +46,7 @@ export interface PlanCardProps {
   onRevise: (feedback: string) => void;
 }
 
-export default function PlanCard({ title, plan, onApprove, onRevise }: PlanCardProps) {
+export default function PlanCard({ pendingId, title, plan, onApprove, onRevise }: PlanCardProps) {
   const c = theme.colors;
   const [expanded, setExpanded] = useState(true);
   const [feedback, setFeedback] = useState('');
@@ -77,6 +78,12 @@ export default function PlanCard({ title, plan, onApprove, onRevise }: PlanCardP
             {title}
           </Text>
         </View>
+        <SpeakButton
+          id={`plan:${pendingId}`}
+          text={`${title}. ${plan}`}
+          label="Plan proposal"
+          size={15}
+        />
         {expanded ? (
           <ChevronUp size={16} color={c.textSecondary} />
         ) : (

@@ -24,6 +24,7 @@ import MarkdownText from '../components/chat/MarkdownText';
 import { ActivityIndicator } from 'react-native';
 import { ScreenLoading, FadeIn } from '../components/ScreenFeedback';
 import { tapLight } from '../lib/haptics';
+import SpeakButton from '../components/SpeakButton';
 import DomainErrorBar from '../components/DomainErrorBar';
 
 type Kind = 'skill' | 'loop';
@@ -265,6 +266,12 @@ export default function SkillsScreen() {
           >
             <View style={styles.cardHead}>
               <Text style={[styles.name, { color: c.text }]} numberOfLines={1}>{s.name}</Text>
+              <SpeakButton
+                id={`skill:${s.slug}`}
+                text={`${s.name}. ${s.description ?? ''}`}
+                label={s.name}
+                size={15}
+              />
               <Text style={[styles.source, { color: c.textSecondary }]}>{s.source}</Text>
             </View>
             {s.description ? (

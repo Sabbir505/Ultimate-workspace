@@ -7,6 +7,7 @@ import { StatusBar } from 'expo-status-bar';
 import { ThemeProvider, useTheme, theme } from './src/theme';
 import { navigationRef } from './src/lib/navigation';
 import AppDrawer, { DrawerProvider } from './src/components/AppDrawer';
+import TtsSpeakingPill from './src/components/TtsSpeakingPill';
 import { tapMedium } from './src/lib/haptics';
 import { hydrateScreenCache } from './src/lib/screenCache';
 import { initDeepLinkHandling } from './src/lib/deepLinks';
@@ -17,6 +18,7 @@ import SessionChat from './src/screens/SessionChat';
 import ArtifactsScreen from './src/screens/ArtifactsScreen';
 import CostScreen from './src/screens/CostScreen';
 import AutomationsScreen from './src/screens/AutomationsScreen';
+import BotsScreen from './src/screens/BotsScreen';
 import MemoryScreen from './src/screens/MemoryScreen';
 import SkillsScreen from './src/screens/SkillsScreen';
 import GitScreen from './src/screens/GitScreen';
@@ -62,6 +64,7 @@ function HomeStackScreen() {
       <HomeStack.Screen name="SessionDetail" component={SessionChat} />
       <HomeStack.Screen name="Artifacts" component={ArtifactsScreen} />
       <HomeStack.Screen name="Automations" component={AutomationsScreen} />
+            <HomeStack.Screen name="Bots" component={BotsScreen} />
       <HomeStack.Screen name="Memory" component={MemoryScreen} />
       <HomeStack.Screen name="Skills" component={SkillsScreen} />
       <HomeStack.Screen name="Git" component={GitScreen} />
@@ -175,6 +178,9 @@ function AppShell() {
           <HomeStackScreen />
           {/* Global drawer overlay — above everything. */}
           <AppDrawer />
+          {/* Read-aloud transport — shell-level so the read keeps going
+              (and stays stoppable) while the user navigates. */}
+          <TtsSpeakingPill />
           {/* App-lock gate — above even the drawer. */}
           {locked && (
             <View style={[styles.lockGate, { backgroundColor: c.background }]}>

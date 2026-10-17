@@ -87,12 +87,23 @@ type DesktopMessage =
   | { type: 'GitLogMsg'; entries: Record<string, unknown>[] }
   | { type: 'BudgetList'; budgets: BudgetInfo[] }
   | { type: 'HiddenCostProjects'; project_ids: string[] }
+  // Cost-dashboard parity (usage limits / artifact attribution / prices).
+  // The nested structs are the desktop's camelCase payloads passed through
+  // untyped on the Rust side, so they are typed loosely here and narrowed by
+  // the EventBus consumers above.
+  | { type: 'UsageMeters'; meters: Record<string, unknown>[]; alerts: Record<string, unknown>[] }
+  | { type: 'UsageLimitsAck'; ok: boolean; error?: string | null }
+  | { type: 'ArtifactCosts'; rows: Record<string, unknown>[] }
+  | { type: 'PriceInfo'; fetched_at?: number | null }
   | { type: 'ProjectUpserted'; project: ProjectInfo }
   | { type: 'ProjectRemoved'; project_id: string }
   | { type: 'ConnectorList'; connectors: ConnectorInfo[] }
   | { type: 'SessionConnectors'; session_id: string; connector_ids: string[] }
   | { type: 'SessionConnectorsSet'; session_id: string; connector_ids: string[] }
   | { type: 'AutomationList'; automations: AutomationInfo[] }
+  | { type: 'BotsList'; bots: BotInfo[] }
+  | { type: 'BotApprovalsList'; approvals: BotApprovalInfo[] }
+  | { type: 'BotApprovalResolved'; id: string; status: string }
   | { type: 'AutomationRuns'; automation_id: string; runs: AutomationRunInfo[] }
   | { type: 'AutomationUpdated'; automation_id: string }
   | { type: 'AutomationDeleted'; automation_id: string }
@@ -191,6 +202,9 @@ type MobileMessagePlain =
   | { type: 'ListHarnessModels'; harness_id: string }
   | { type: 'ListChatSkills' }
   | { type: 'ListAutomations' }
+  | { type: 'ListBots' }
+  | { type: 'ListBotApprovals'; bot_id?: string | null }
+  | { type: 'ResolveBotApproval'; id: string; approve: boolean }
   | { type: 'ListProjects' }
   | { type: 'ListAcpAgents' }
   | { type: 'ListMemoryRecords'; include_inactive?: boolean }
@@ -252,6 +266,14 @@ type MobileMessagePlain =
   | { type: 'ResolveSessionQuestion'; session_id: string; pending_id: string; answers: Record<string, string | string[]>; response?: string }
   | { type: 'CompactSession'; session_id: string }
   | { type: 'GetCostRollups'; days?: number }
+  | { type: 'GetUsageMeters' }
+  | { type: 'CheckUsageLimits' }
+  | { type: 'SetUsageLimit'; target: string; window: string; cap_usd?: number | null; cap_tokens?: number | null; cap_requests?: number | null; threshold_pct?: number | null }
+  | { type: 'RemoveUsageLimit'; target: string; window: string }
+  | { type: 'RefreshUsageWindows' }
+  | { type: 'GetArtifactCosts'; range_days?: number }
+  | { type: 'GetPriceInfo' }
+  | { type: 'RefreshPrices' }
   | MobileChatTurn | { type: 'CancelChatTurn'; chat_session_id: string }
   | { type: 'SendToSession'; session_id: string; text: string }
   | { type: 'GetTranscript'; session_id: string }
@@ -406,6 +428,114 @@ export const onTranscription = new EventBus<{ text?: string; error?: string }>()
 export const onBudgetAlert = new EventBus<{ projectId: string; projectName: string; monthlyUsd: number; spentUsd: number }>();
 export const onArtifactLibrary = new EventBus<{ artifacts: ArtifactLibraryEntry[] }>();
 export const onCostRollups = new EventBus<{ rollups: CostRollupsData }>();
+
+// ---- Usage meters & limits (desktop UsageLimitsPanel parity) ----
+/** Rolling cumulative windows: a row inside the last hour counts in all four. */
+export interface UsageTotals {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  reasoningTokens: number;
+  requests: number;
+  costUsd: number;
+}
+export interface MeterWindows {
+  lastHour: UsageTotals;
+  lastDay: UsageTotals;
+  lastWeek: UsageTotals;
+  lastMonth: UsageTotals;
+}
+export type UsageTier = 'ok' | 'warn' | 'crit';
+export interface UsageCapState {
+  window: string;
+  usedPct: number;
+  usedUsd: number | null;
+  capUsd: number | null;
+  usedTokens: number | null;
+  capTokens: number | null;
+  usedRequests: number | null;
+  capRequests: number | null;
+  thresholdPct: number;
+  tier: UsageTier;
+}
+/** A provider/CLI-REPORTED plan window (plan_usage.rs). */
+export interface RateWindowPayload {
+  target: string;
+  window: string;
+  label: string;
+  source: string;
+  usedPct: number | null;
+  used: number | null;
+  limit: number | null;
+  remaining: number | null;
+  unit: string;
+  resetsAt: number | null;
+  status: string | null;
+  observedAt: number;
+}
+export interface PlanSnapshotPayload {
+  target: string;
+  planName: string | null;
+  planId: string | null;
+  status: string | null;
+  periodStart: number | null;
+  periodEnd: number | null;
+  creditsRemaining: number | null;
+  creditsTotal: number | null;
+  creditsUnit: string;
+  tokensTotal: number | null;
+  requestsTotal: number | null;
+  costTotalUsd: number | null;
+  source: string;
+  observedAt: number;
+}
+export interface UsageMeterPayload {
+  /** Rollup identity: `chat:<provider>` or a bare harness id. */
+  target: string;
+  label: string;
+  windows: MeterWindows;
+  caps: UsageCapState[];
+  reported: RateWindowPayload[];
+  plan: PlanSnapshotPayload | null;
+  health: string | null;
+}
+export interface UsageLimitAlertPayload {
+  target: string;
+  label: string;
+  tier: string;
+  window: string;
+  windowLabel: string;
+  usedPct: number;
+  usedUsd: number | null;
+  capUsd: number | null;
+  usedTokens: number | null;
+  capTokens: number | null;
+  usedRequests: number | null;
+  capRequests: number | null;
+  resetsAt: number | null;
+  message: string;
+}
+/** Per-artifact cost attribution (desktop ArtifactCostPanel parity). */
+export interface ArtifactCostRollup {
+  artifactId: string;
+  kind: string;
+  name: string;
+  liveRuns: number;
+  evalRuns: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  costUsd: number;
+}
+/** Live price-table freshness: epoch seconds, or null when never fetched. */
+export interface PriceInfo {
+  fetchedAt: number | null;
+}
+export const onUsageMeters = new EventBus<{ meters: UsageMeterPayload[]; alerts: UsageLimitAlertPayload[] }>();
+export const onUsageLimitsAck = new EventBus<{ ok: boolean; error: string | null }>();
+export const onArtifactCosts = new EventBus<{ rows: ArtifactCostRollup[] }>();
+export const onPriceInfo = new EventBus<PriceInfo>();
 export type HarnessModelsPayload = {
   harnessId: string;
   models: HarnessModelRow[];
@@ -494,6 +624,26 @@ export interface AutomationRunInfo {
   id: string; automation_id: string; started_at: number; finished_at?: number | null;
   status: string; summary: string; chat_session_id?: string | null; source: string;
 }
+export interface BotInfo {
+  id: string; name: string; description: string; emoji: string; color: string;
+  /** One of the six pets, or '' for none. */
+  pet: string;
+  enabled: boolean;
+  /** Standing jobs bound to this bot. */
+  jobs: number;
+  /** Writes a background run queued for the owner. */
+  pending_approvals: number;
+  /** A run is in flight right now. */
+  running: boolean;
+}
+export interface BotApprovalInfo {
+  id: string; bot_id: string; bot_name: string; summary: string; tool_name: string;
+  args_json: string; status: string; created_at: number;
+}
+export const onBotsList = new EventBus<{ bots: BotInfo[] }>();
+export const onBotApprovalsList = new EventBus<{ approvals: BotApprovalInfo[] }>();
+export const onBotApprovalResolved = new EventBus<{ id: string; status: string }>();
+export const onBotsError = new EventBus<{ message: string }>();
 export const onAutomationList = new EventBus<{ automations: AutomationInfo[] }>();
 export const onAutomationRunFinished = new EventBus<{ automationId: string | null; status: string; summary: string }>();
 export const onAutomationRuns = new EventBus<{ automationId: string; runs: AutomationRunInfo[] }>();
@@ -1217,6 +1367,13 @@ function _doConnect(target: string) {
             break;
           case 'ArtifactLibrary': onArtifactLibrary.emit({ artifacts: msg.artifacts || [] }); break;
           case 'CostRollups': onCostRollups.emit({ rollups: msg.rollups }); break;
+          case 'UsageMeters': onUsageMeters.emit({
+            meters: (msg.meters as unknown as UsageMeterPayload[]) || [],
+            alerts: (msg.alerts as unknown as UsageLimitAlertPayload[]) || [],
+          }); break;
+          case 'UsageLimitsAck': onUsageLimitsAck.emit({ ok: msg.ok, error: msg.error ?? null }); break;
+          case 'ArtifactCosts': onArtifactCosts.emit({ rows: (msg.rows as unknown as ArtifactCostRollup[]) || [] }); break;
+          case 'PriceInfo': onPriceInfo.emit({ fetchedAt: msg.fetched_at ?? null }); break;
           case 'SessionMessageDeleted': onSessionMessageDeleted.emit({ sessionId: msg.session_id, messageId: msg.message_id }); break;
           case 'ChatSearchResults': onSearchResults.emit({ query: msg.query, results: msg.results || [] }); break;
           case 'ChatCheckpoints': onCheckpoints.emit({ sessionId: msg.session_id, checkpoints: msg.checkpoints || [] }); break;
@@ -1262,6 +1419,9 @@ function _doConnect(target: string) {
           case 'SessionConnectors': onSessionConnectors.emit({ sessionId: msg.session_id, connectorIds: msg.connector_ids || [] }); break;
           case 'SessionConnectorsSet': onSessionConnectorsSet.emit({ sessionId: msg.session_id, connectorIds: msg.connector_ids || [] }); break;
           case 'AutomationList': onAutomationList.emit({ automations: msg.automations || [] }); break;
+          case 'BotsList': onBotsList.emit({ bots: msg.bots || [] }); break;
+          case 'BotApprovalsList': onBotApprovalsList.emit({ approvals: msg.approvals || [] }); break;
+          case 'BotApprovalResolved': onBotApprovalResolved.emit({ id: msg.id, status: msg.status }); break;
           case 'AutomationRuns': onAutomationRuns.emit({ automationId: msg.automation_id, runs: msg.runs || [] }); break;
           case 'AutomationUpdated': onAutomationUpdated.emit({ automationId: msg.automation_id }); break;
           case 'AutomationDeleted': onAutomationDeleted.emit({ automationId: msg.automation_id }); break;
@@ -1548,6 +1708,9 @@ const _listArtifacts = () => { _send({ type: 'ListArtifacts' }); };
 const _requestHarnessModels = (harnessId: string) => { _send({ type: 'ListHarnessModels', harness_id: harnessId }); };
 const _listChatSkills = () => { _send({ type: 'ListChatSkills' }); };
 const _listAutomations = () => { _send({ type: 'ListAutomations' }); };
+const _listBots = () => { _send({ type: 'ListBots' }); };
+const _listBotApprovals = (botId?: string | null) => { _send({ type: 'ListBotApprovals', bot_id: botId ?? null }); };
+const _resolveBotApproval = (id: string, approve: boolean) => { _send({ type: 'ResolveBotApproval', id, approve }); };
 const _listProjects = () => { _send({ type: 'ListProjects' }); };
 const _getVaultState = () => { _send({ type: 'GetVaultState' }); };
 const _getVaultTree = () => { _send({ type: 'GetVaultTree' }); };
@@ -1599,6 +1762,36 @@ const _runAutomationNow = (automationId: string) => { _send({ type: 'RunAutomati
 const _stopAutomationRun = (automationId: string) => { _send({ type: 'StopAutomationRun', automation_id: automationId }); };
 const _listAutomationRuns = (automationId: string, limit = 50) => { _send({ type: 'ListAutomationRuns', automation_id: automationId, limit }); };
 const _getCostRollups = (days: number) => { _send({ type: 'GetCostRollups', days }); };
+// Usage meters & limits. The alert pass runs on every meter fetch (the
+// desktop builds them as a pair), so `checkUsageLimits` exists for the
+// explicit refresh button and costs the same round trip otherwise.
+const _getUsageMeters = () => { _send({ type: 'GetUsageMeters' }); };
+const _checkUsageLimits = () => { _send({ type: 'CheckUsageLimits' }); };
+const _setUsageLimit = (
+  target: string,
+  window: string,
+  capUsd?: number | null,
+  capTokens?: number | null,
+  capRequests?: number | null,
+  thresholdPct?: number | null,
+) => {
+  _send({
+    type: 'SetUsageLimit',
+    target,
+    window,
+    cap_usd: capUsd ?? null,
+    cap_tokens: capTokens ?? null,
+    cap_requests: capRequests ?? null,
+    threshold_pct: thresholdPct ?? null,
+  });
+};
+const _removeUsageLimit = (target: string, window: string) => {
+  _send({ type: 'RemoveUsageLimit', target, window });
+};
+const _refreshUsageWindows = () => { _send({ type: 'RefreshUsageWindows' }); };
+const _getArtifactCosts = (rangeDays: number) => { _send({ type: 'GetArtifactCosts', range_days: rangeDays }); };
+const _getPriceInfo = () => { _send({ type: 'GetPriceInfo' }); };
+const _refreshPrices = () => { _send({ type: 'RefreshPrices' }); };
 const _deleteChatMessage = (sessionId: string, messageId: number) => { _send({ type: 'DeleteChatMessage', session_id: sessionId, message_id: messageId }); };
 const _editUserMessage = (sessionId: string, messageId: number, text: string) => { _send({ type: 'EditUserMessage', session_id: sessionId, message_id: messageId, text }); };
 const _regenerateMessage = (sessionId: string) => { _send({ type: 'RegenerateMessage', session_id: sessionId }); };
@@ -1634,6 +1827,9 @@ const _startLocalModel = (model: string, ggufPath: string) => { _send({ type: 'S
     requestHarnessModels: _requestHarnessModels,
     listChatSkills: _listChatSkills,
     listAutomations: _listAutomations,
+    listBots: _listBots,
+    listBotApprovals: _listBotApprovals,
+    resolveBotApproval: _resolveBotApproval,
     listProjects: _listProjects,
     listAcpAgents: _listAcpAgents,
     listMemoryRecords: _listMemoryRecords,
@@ -1673,6 +1869,16 @@ const _startLocalModel = (model: string, ggufPath: string) => { _send({ type: 'S
     stopAutomationRun: _stopAutomationRun,
     listAutomationRuns: _listAutomationRuns,
     getCostRollups: _getCostRollups,
+    // Usage meters & limits (Cost dashboard -> Usage & limits).
+    getUsageMeters: _getUsageMeters,
+    checkUsageLimits: _checkUsageLimits,
+    setUsageLimit: _setUsageLimit,
+    removeUsageLimit: _removeUsageLimit,
+    refreshUsageWindows: _refreshUsageWindows,
+    // Per-artifact cost attribution + live price freshness.
+    getArtifactCosts: _getArtifactCosts,
+    getPriceInfo: _getPriceInfo,
+    refreshPrices: _refreshPrices,
     refreshProviders: refreshProvidersSend,
     refreshCost: refreshCostSend,
     refreshCostDetails: refreshCostDetailsSend,

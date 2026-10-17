@@ -17,6 +17,7 @@ import {
   useRelay, onGitStatus, onGitOutput, onGitBranches, onGitLog, onDomainError,
 } from '../../hooks/useRelay';
 import { tapLight } from '../../lib/haptics';
+import SpeakButton from '../SpeakButton';
 
 type ChangedFile = { status: string; kind: string; path: string };
 type GitStatus = {
@@ -109,6 +110,26 @@ export default function ChatGitSheet({
 
   const changed = useMemo(() => status?.changed_files ?? [], [status]);
   const staged = changed.filter((f) => f.status[0] !== ' ' && f.status[0] !== '?').length;
+  // Repo state spoken aloud: branch, dirty/clean, each change, recent
+  // commits — a hands-free status check.
+  const speakableGit = useMemo(() => {
+    if (!status || !status.is_repo) return null;
+    const parts: string[] = [`Branch ${status.branch ?? 'unknown'}.`];
+    parts.push(
+      changed.length === 0
+        ? 'The working tree is clean.'
+        : `${changed.length} changed file${changed.length === 1 ? '' : 's'}, ${staged} staged. ` +
+          changed.map((f) => `${f.path}, ${f.status.trim() || 'modified'}`).join('. '),
+    );
+    const commits = logEntries
+      .map((e) => (typeof e.message === 'string' ? e.message : ''))
+      .filter((m) => m.trim())
+      .slice(0, 5);
+    if (commits.length > 0) parts.push(`Recent commits: ${commits.join('. ')}.`);
+    if (status.ahead > 0) parts.push(`${status.ahead} commit${status.ahead === 1 ? '' : 's'} ahead of the remote.`);
+    if (status.behind > 0) parts.push(`${status.behind} commit${status.behind === 1 ? '' : 's'} behind the remote.`);
+    return parts.join(' ');
+  }, [status, changed, staged, logEntries]);
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
@@ -121,6 +142,14 @@ export default function ChatGitSheet({
             <Text numberOfLines={1} style={[styles.title, { color: c.text }]}>
               Git{projectName ? ` — ${projectName}` : ''}
             </Text>
+            {speakableGit ? (
+              <SpeakButton
+                id={`git:${projectId ?? ''}`}
+                text={speakableGit}
+                label="Git status"
+                size={17}
+              />
+            ) : null}
             <TouchableOpacity
               onPress={() => {
                 if (!projectId) return;

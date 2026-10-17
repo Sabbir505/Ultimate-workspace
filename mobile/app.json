@@ -3,7 +3,7 @@
     "name": "Relay Mobile",
     "slug": "relay-mobile",
     "scheme": "relay",
-    "version": "0.7.0",
+    "version": "0.7.1",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "automatic",
@@ -47,7 +47,7 @@
     },
     "android": {
       "package": "com.relay.mobile",
-      "versionCode": 2,
+      "versionCode": 3,
       "permissions": [
         "android.permission.CAMERA",
         "android.permission.RECORD_AUDIO",

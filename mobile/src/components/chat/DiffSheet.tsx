@@ -13,6 +13,7 @@ import { View, Text, StyleSheet, TouchableOpacity, ScrollView, Modal } from 'rea
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { theme } from '../../theme';
 import { useRelay, onGitOutput, onDomainError } from '../../hooks/useRelay';
+import SpeakButton from '../SpeakButton';
 
 export interface DiffSheetProps {
   visible: boolean;
@@ -87,6 +88,20 @@ export default function DiffSheet({ visible, path, projectId, onClose }: DiffShe
 
   const lines = useMemo(() => (output ? parseDiffLines(output) : []), [output]);
   const filename = path?.split(/[\\/]/).pop() ?? '';
+  // Reading a raw unified diff aloud is noise — read it as a spoken change
+  // list: the file, the counts, then each added/removed line as its own
+  // sentence. Hunk headers and file metadata are skipped.
+  const speakableDiff = useMemo(() => {
+    if (!output || lines.length === 0) return null;
+    const adds = lines.filter((l) => l.kind === 'add');
+    const dels = lines.filter((l) => l.kind === 'del');
+    const head = `${filename || path || 'File'}: ${adds.length} line${adds.length === 1 ? '' : 's'} added, ${dels.length} removed.`;
+    const body = lines
+      .filter((l) => l.kind === 'add' || l.kind === 'del')
+      .map((l) => `${l.kind === 'add' ? 'Added' : 'Removed'}: ${l.text.replace(/^[+-]\s?/, '').replace(/[.,;:!?]+$/, '')}.`)
+      .join(' ');
+    return body ? `${head} ${body}` : head;
+  }, [output, lines, filename, path]);
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
@@ -100,6 +115,14 @@ export default function DiffSheet({ visible, path, projectId, onClose }: DiffShe
             <Text numberOfLines={1} style={[styles.path, { color: c.textSecondary }]}>
               {path}
             </Text>
+            {speakableDiff ? (
+              <SpeakButton
+                id={`diff:${path ?? ''}`}
+                text={speakableDiff}
+                label={`Diff: ${filename}`}
+                size={17}
+              />
+            ) : null}
             <TouchableOpacity
               onPress={onClose}
               hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}

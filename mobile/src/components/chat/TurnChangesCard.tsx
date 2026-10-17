@@ -25,6 +25,7 @@ import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { theme } from '../../theme';
 import { tapLight } from '../../lib/haptics';
+import SpeakButton from '../SpeakButton';
 import type { CheckpointFileInfo } from '../../hooks/useRelay';
 
 export interface TurnChangeFile {
@@ -122,6 +123,12 @@ export function TurnChangesCard({
             {label}
           </Text>
         </TouchableOpacity>
+        <SpeakButton
+          id={`turn:${files[0]?.path ?? ''}`}
+          text={`${label}. ${files.map((f) => `${f.path}${f.status ? `, ${f.status[0] === 'A' ? 'added' : f.status[0] === 'D' ? 'deleted' : 'modified'}` : ''}`).join('. ')}.`}
+          label={label}
+          size={14}
+        />
         {undoTargetId != null ? (
           <TouchableOpacity
             style={styles.undoBtn}

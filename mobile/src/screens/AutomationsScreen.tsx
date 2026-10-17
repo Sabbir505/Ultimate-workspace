@@ -42,6 +42,7 @@ import { screenCacheGet, screenCacheSet, screenCacheHas } from '../lib/screenCac
 import { timeAgo } from '../lib/format';
 import { openChatById } from '../lib/navigation';
 import { tapLight } from '../lib/haptics';
+import SpeakButton from '../components/SpeakButton';
 import ScreenHeader from '../components/ScreenHeader';
 
 const TRIGGER_LABELS: Record<string, string> = {
@@ -201,6 +202,12 @@ export default function AutomationsScreen() {
                   onValueChange={(v) => setAutomationEnabled(a.id, v)}
                   trackColor={{ true: c.accent, false: c.border }}
                   accessibilityLabel={`Toggle ${a.name}`}
+                />
+                <SpeakButton
+                  id={`automation:${a.id}`}
+                  text={`${a.name}. ${triggerLabel(a)}. ${a.prompt} Last run ${timeAgo(a.last_run_at, 'ago')}${a.last_status ? `, ${a.last_status}` : ''}.`}
+                  label={a.name}
+                  size={15}
                 />
               </View>
               <Text style={[styles.prompt, { color: c.textSecondary }]} numberOfLines={2}>

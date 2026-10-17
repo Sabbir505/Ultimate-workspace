@@ -56,7 +56,7 @@ import { screenCacheGet, screenCacheSet } from '../lib/screenCache';
 import { onProjectList, type ProjectInfo } from '../hooks/useRelay';
 import { useRelay, onConnectorList, onSessionConnectors, onSessionConnectorsSet, type ConnectorInfo, type SessionArtifact, type SessionChatAttachment, type SessionMessageRecord, onAcpAgentList, type AcpAgentInfo} from '../hooks/useRelay';
 import { useSessionChat } from '../hooks/useSessionChat';
-import MessageBubble from '../components/chat/MessageBubble';
+import MessageBubble, { speakableText } from '../components/chat/MessageBubble';
 import ChatComposer from '../components/chat/ChatComposer';
 import ApprovalCard from '../components/chat/ApprovalCard';
 import StatusBanner from '../components/chat/StatusBanner';
@@ -64,12 +64,19 @@ import PlanCard from '../components/chat/PlanCard';
 import QuestionCard from '../components/chat/QuestionCard';
 import ModelSheet from '../components/chat/ModelSheet';
 import ActionSheet, { type ActionSheetItem } from '../components/chat/ActionSheet';
+import ActionIconPopup from '../components/chat/ActionIconPopup';
 import ArtifactSheet, { extOf } from '../components/chat/ArtifactSheet';
 import DiffSheet from '../components/chat/DiffSheet';
 import ChatGitSheet from '../components/chat/ChatGitSheet';
 import TurnChangesCard, { buildTurnFiles, type TurnChangeFile } from '../components/chat/TurnChangesCard';
 import { useDrawerActions } from '../components/AppDrawer';
+import { isSpeakingKey, toggleSpeak } from '../lib/tts';
 import * as Clipboard from 'expo-clipboard';
+
+/** Stable FlatList key extractor — a module-level function so the prop's
+ *  identity never changes (an inline arrow is a new function every render,
+ *  which makes the list re-key its rows). */
+const messageKey = (item: SessionMessageRecord) => String(item.id);
 
 export default function SessionChat() {
   useScreenMountTiming('SessionChat');
@@ -86,6 +93,18 @@ export default function SessionChat() {
   // chat opened mid-turn rendered the in-flight reply as a finished bubble.
   // The hint is consumed once, at session-switch time.
   const chat = useSessionChat(sessionId, route.params?.session?.isLive === true);
+  // `chat` is a FRESH object literal every render (the hook returns
+  // `{...state, send, cancel, ...}`), so it must never be a memo/renderItem
+  // dependency. Doing so made renderItem change identity per render, which
+  // re-rendered every row on every streamed token — measured 34-SECOND
+  // commits. Worse, renders that long leave the render phase open while relay
+  // frames land: the SessionMessages handler then dispatches setState from
+  // inside the in-progress render, React counts them as NESTED updates and
+  // aborts with "Maximum update depth exceeded" (useSessionChat.ts:388) —
+  // which is also why the chat sat pinned in send + refresh mode forever.
+  // Latest-state reads go through this ref instead; the identity stays put.
+  const chatRef = React.useRef(chat);
+  chatRef.current = chat;
   const insets = useSafeAreaInsets();
 
   const [modelSheetOpen, setModelSheetOpen] = useState(false);
@@ -312,6 +331,7 @@ export default function SessionChat() {
             content={chat.streamingContent}
             streaming
             onPeekDiff={handlePeekDiff}
+            speakId="msg:stream"
           />
         </View>
       ) : null}
@@ -421,6 +441,20 @@ export default function SessionChat() {
     [chat.restoreCheckpoint],
   );
 
+  // Stable across renders on purpose (empty deps + chatRef) so it can sit in
+  // renderItem's dependency list without churning it.
+  const regenerateLast = useCallback(() => {
+    const c = chatRef.current;
+    const lastUser = [...c.messages]
+      .filter((m) => m.role === 'user' && m.id > 0)
+      .sort((a, b) => a.id - b.id)
+      .pop();
+    c.regenerate(lastUser?.id);
+  }, []);
+
+  // Select/deselect a row for the action bar. Stable-ish per render (a closure
+  // over `openActionsId`), so renderItem lists it in its deps — it only
+  // changes when the SELECTION changes, never per token.
   const renderItem = useCallback(({ item }: { item: SessionMessageRecord }) => {
     const turnFiles = item.role === 'assistant' ? turnFilesById.get(item.id) ?? [] : [];
     // Turn duration (desktop turn-rail parity): process turns show it INSIDE
@@ -438,6 +472,7 @@ export default function SessionChat() {
         onPeekDiff={handlePeekDiff}
         liveImages={item.id < 0 ? item.localAttachments : undefined}
         workedForSec={workedForSec}
+        speakId={`msg:${item.id}`}
       />
     );
     const worked =
@@ -452,7 +487,8 @@ export default function SessionChat() {
         }
         delayLongPress={350}
         accessibilityRole="button"
-        accessibilityLabel={`Message options: ${item.content.slice(0, 40)}`}
+        accessibilityHint="Long-press for message actions"
+        accessibilityLabel={`Message: ${item.content.slice(0, 40)}`}
       >
         {bubble}
         {worked ? (
@@ -481,7 +517,7 @@ export default function SessionChat() {
         ) : null}
       </TouchableOpacity>
     );
-  }, [openArtifact, handlePeekDiff, turnFilesById, undoTargetById, undoOpenTurn]);
+  }, [openArtifact, handlePeekDiff, turnFilesById, undoTargetById, undoOpenTurn, regenerateLast]);
 
   // ---- Batch 1: derived sheet contents ----
   const PERMISSION_MODES: { value: string; label: string; icon: keyof typeof Ionicons.glyphMap }[] = [
@@ -499,19 +535,38 @@ export default function SessionChat() {
           key: 'copy',
           label: 'Copy',
           icon: 'copy-outline',
-          onPress: () => { void Clipboard.setStringAsync(actionTarget.content); },
+          // Desktop copies the VISIBLE prose (plainText), not the raw
+          // transcript — a copy that drags `<think>`/`<tool>` JSON out of a
+          // turn isn't what the user asked for.
+          onPress: () => { void Clipboard.setStringAsync(speakableText(actionTarget.role, actionTarget.content)); },
+        },
+        {
+          key: 'speak',
+          label: isSpeakingKey(`msg:${actionTarget.id}`) ? 'Stop reading aloud' : 'Read aloud',
+          icon: isSpeakingKey(`msg:${actionTarget.id}`) ? 'stop-circle-outline' : 'play-outline',
+          onPress: () => {
+            // Read the turn's ANSWER only: `speakableText` skips the
+            // narration/tool/think region the bubble folds behind
+            // "Worked for Xs", so the app reads the deliverable rather than
+            // the agent's running commentary.
+            toggleSpeak(
+              `msg:${actionTarget.id}`,
+              speakableText(actionTarget.role, actionTarget.content),
+              actionTarget.role === 'user' ? 'Your message' : 'Assistant reply',
+            );
+          },
         },
         ...(actionTarget.role === 'user' && actionTarget.id > 0
           ? [{
               key: 'edit',
-              label: 'Edit & resend',
+              label: 'Edit',
               icon: 'create-outline' as const,
               onPress: () => setEditing({ id: actionTarget.id, text: actionTarget.content }),
             }]
           : []),
         {
           key: 'regenerate',
-          label: 'Regenerate response',
+          label: 'Retry',
           icon: 'refresh-outline',
           onPress: () => {
             const lastUser = [...chat.messages]
@@ -524,7 +579,7 @@ export default function SessionChat() {
         ...(actionTarget.id > 0
           ? [{
               key: 'delete',
-              label: 'Delete message',
+              label: 'Delete',
               icon: 'trash-outline' as const,
               destructive: true,
               onPress: () => chat.deleteMessage(actionTarget.id),
@@ -636,6 +691,22 @@ export default function SessionChat() {
     );
   }
 
+  // Memoized so the element's identity survives renders. Inline JSX made
+  // this a NEW element every pass, re-rendering the whole RefreshControl
+  // subtree each time — the pull-to-refresh spinner never got a clean idle
+  // transition, which is the "stuck refreshing" half of this bug.
+  const refreshControl = useMemo(
+    () => (
+      <RefreshControl
+        refreshing={chat.loading && chat.messages.length > 0}
+        onRefresh={chat.refresh}
+        tintColor={c.textSecondary}
+        colors={[c.accent]}
+      />
+    ),
+    [chat.loading, chat.messages.length, chat.refresh, c.textSecondary, c.accent],
+  );
+
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: c.background }]} edges={['top']}>
       <KeyboardAvoidingView
@@ -737,7 +808,7 @@ export default function SessionChat() {
         <FlatList
           ref={listRef}
           data={displayMessages}
-          keyExtractor={(item) => String(item.id)}
+          keyExtractor={messageKey}
           contentContainerStyle={styles.listContent}
           // Variable-height rows (markdown/code blocks) — no getItemLayout;
           // the batching props are the safe subset (PERFORMANCE_AUDIT.md M3).
@@ -750,14 +821,7 @@ export default function SessionChat() {
           renderItem={renderItem}
           onScroll={handleListScroll}
           scrollEventThrottle={100}
-          refreshControl={
-            <RefreshControl
-              refreshing={chat.loading && chat.messages.length > 0}
-              onRefresh={chat.refresh}
-              tintColor={c.textSecondary}
-              colors={[c.accent]}
-            />
-          }
+          refreshControl={refreshControl}
         />
 
         {/* Scroll-to-latest (desktop parity) — fades in once the user is
@@ -931,10 +995,10 @@ export default function SessionChat() {
           </View>
         </Modal>
 
-        {/* Message actions (long-press) — desktop MessageBubble menu. */}
-        <ActionSheet
+        {/* Message actions (long-press) — the desktop hover toolbar as a centred
+            icon popup. */}
+        <ActionIconPopup
           visible={actionTarget != null}
-          title={actionTarget ? `Message #${actionTarget.id} (${actionTarget.role})` : undefined}
           items={messageActionItems}
           onClose={() => setActionTarget(null)}
         />

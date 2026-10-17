@@ -116,6 +116,18 @@ const TRANSCRIBE_TIMEOUT_MS = 30_000;
  * static import: the package throws at import time when the native side is
  * missing, which would take the whole composer down).
  */
+/** Native on-device speech recognition error codes → human sentences (the raw
+ *  web-speech names read like stack traces in the inline error line). */
+const STT_ERROR_MESSAGES: Record<string, string> = {
+  'no-speech': "Didn't hear anything — hold the mic and try again.",
+  'speech-timeout': 'Stopped listening — no speech detected.',
+  network: 'Recognition needs a network connection.',
+  'not-allowed': 'Microphone permission denied.',
+  'service-not-allowed': 'Speech recognition is unavailable on this device.',
+  busy: 'Recognizer is busy — try again in a moment.',
+  client: "Couldn't run the speech recognizer — try again.",
+};
+
 function getNativeStt(): typeof import('expo-speech-recognition') | null {
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -241,6 +253,23 @@ export default function ChatComposer({
   const sttListeningRef = useRef(false);
   const sttBaseRef = useRef('');
   const sttFinalRef = useRef('');
+  // Android stop() race workaround (upstream jamsch/expo-speech-recognition
+  // issue #158): releasing the mic right after the last word closes the
+  // recognizer's audio stream while the engine is still reading it, which
+  // surfaces as ERROR_CLIENT ("client") INSTEAD of the final result — the
+  // dictation is silently dropped. So the latest interim transcript is
+  // buffered here, and whenever a stop() session ends without a final result
+  // (client error or a bare 'end'), the buffered partial is committed as the
+  // dictation instead of failing the whole press.
+  const sttStopRequestedRef = useRef(false);
+  const sttLastPartialRef = useRef('');
+  const commitSttPartial = useCallback(() => {
+    const partial = sttLastPartialRef.current.trim();
+    sttLastPartialRef.current = '';
+    if (!partial) return;
+    sttFinalRef.current = [sttFinalRef.current, partial].filter(Boolean).join(' ');
+    setText((sttBaseRef.current ? `${sttBaseRef.current} ` : '') + sttFinalRef.current);
+  }, []);
 
   useEffect(() => {
     const stt = NativeStt;
@@ -253,26 +282,45 @@ export default function ChatComposer({
       if (!sttListeningRef.current) return;
       const transcript = (e.results ?? []).map((r) => r.transcript).join(' ').trim();
       if (e.isFinal) {
+        sttLastPartialRef.current = '';
         sttFinalRef.current = [sttFinalRef.current, transcript].filter(Boolean).join(' ');
         setText((sttBaseRef.current ? `${sttBaseRef.current} ` : '') + sttFinalRef.current);
       } else if (transcript) {
+        sttLastPartialRef.current = transcript;
         const interim = [sttBaseRef.current, sttFinalRef.current, transcript].filter(Boolean).join(' ');
         setText(interim);
       }
     }) ?? { remove: () => {} });
-    subs.push(mod.addListener?.('error', (e: { error?: string }) => {
+    subs.push(mod.addListener?.('error', (e: { error?: string; code?: number }) => {
+      const code = e?.error;
       // 'aborted' is the deliberate slide-off cancel — not an error.
-      if (e?.error === 'aborted') return;
-      setVoiceError(`Speech recognition error: ${e?.error ?? 'unknown'}`);
+      if (code === 'aborted') return;
+      // The stop() race above can land as either 'client' or a bare 'end'
+      // with no final result — flush the buffered partial into the input
+      // either way instead of surfacing a bogus error line.
+      if (sttLastPartialRef.current && (code === 'client' || sttStopRequestedRef.current)) {
+        commitSttPartial();
+        return;
+      }
+      if (code === 'no-speech' || code === 'speech-timeout') {
+        // Holding the mic in silence isn't a failure worth an error line.
+        setVoiceError(STT_ERROR_MESSAGES[code] as string);
+      } else {
+        setVoiceError(STT_ERROR_MESSAGES[code ?? ''] ?? `Speech recognition error: ${code ?? 'unknown'}`);
+      }
       sttListeningRef.current = false;
       setRecording(false);
     }) ?? { remove: () => {} });
     subs.push(mod.addListener?.('end', () => {
+      // stop() raced the engine: no final result ever arrives, 'end' just
+      // fires — the buffered partial IS the dictation.
+      if (sttStopRequestedRef.current) commitSttPartial();
+      sttStopRequestedRef.current = false;
       sttListeningRef.current = false;
       setRecording(false);
     }) ?? { remove: () => {} });
     return () => subs.forEach((s) => s.remove());
-  }, []);
+  }, [commitSttPartial]);
 
 
   const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
@@ -410,6 +458,15 @@ export default function ChatComposer({
     if (NativeStt) {
       try {
         setVoiceError(null);
+        // A previous session can still be tearing down after a rapid
+        // re-press — abort it first or the recognizer rejects the new start
+        // with 'client'/'busy'.
+        if (sttListeningRef.current) {
+          NativeStt.ExpoSpeechRecognitionModule.abort();
+          sttListeningRef.current = false;
+        }
+        sttStopRequestedRef.current = false;
+        sttLastPartialRef.current = '';
         const perm = await NativeStt.ExpoSpeechRecognitionModule.requestPermissionsAsync();
         if (!perm.granted) {
           setVoiceError('Microphone permission denied.');
@@ -468,9 +525,17 @@ export default function ChatComposer({
     if (sttListeningRef.current) {
       const mod = NativeStt?.ExpoSpeechRecognitionModule;
       if (!transcribe || cancelSlideRef.current) {
+        // Slide-off cancel: discard everything — buffered partial included,
+        // so the trailing 'end' event can't resurrect half a sentence.
+        sttLastPartialRef.current = '';
+        sttFinalRef.current = '';
+        sttStopRequestedRef.current = false;
         mod?.abort();
         setText(sttBaseRef.current);
       } else {
+        // Flag the stop so the result/end handlers can flush the buffered
+        // partial if the engine never emits a final result (see #158 note).
+        sttStopRequestedRef.current = true;
         mod?.stop();
       }
       return;

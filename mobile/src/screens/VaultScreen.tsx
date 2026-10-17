@@ -29,6 +29,7 @@ import { ScreenLoading, FadeIn } from '../components/ScreenFeedback';
 import ScreenHeader from '../components/ScreenHeader';
 import PdfView from '../components/PdfView';
 import MarkdownText from '../components/chat/MarkdownText';
+import SpeakButton from '../components/SpeakButton';
 import DomainErrorBar from '../components/DomainErrorBar';
 
 export default function VaultScreen() {
@@ -272,6 +273,12 @@ export default function VaultScreen() {
             >
               <Ionicons name={editing ? 'close' : 'create-outline'} size={19} color={c.text} />
             </TouchableOpacity>
+            <SpeakButton
+              id={`vault:${current.path}`}
+              text={current.content || ''}
+              label={current.path.split(/[\\/]/).pop() ?? 'Vault note'}
+              size={18}
+            />
             <TouchableOpacity
               onPress={() => {
                 setNotice(null);

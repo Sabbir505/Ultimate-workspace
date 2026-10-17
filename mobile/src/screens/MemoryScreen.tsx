@@ -20,6 +20,7 @@ import { useRelayList } from '../hooks/useRelayList';
 import { screenCacheGet, screenCacheSet, screenCacheHas } from '../lib/screenCache';
 import { ScreenLoading, FadeIn } from '../components/ScreenFeedback';
 import { tapLight } from '../lib/haptics';
+import SpeakButton from '../components/SpeakButton';
 import ScreenHeader from '../components/ScreenHeader';
 
 const STATUS_DIM: Record<string, string> = {
@@ -147,6 +148,12 @@ export default function MemoryScreen() {
                 {m.kind}
                 {STATUS_DIM[m.status] ? ` · ${STATUS_DIM[m.status]}` : ''}
               </Text>
+              <SpeakButton
+                id={`memory:${m.id}`}
+                text={`${m.kind}. ${m.content}`}
+                label="Memory"
+                size={15}
+              />
               <Text style={[styles.meta, { color: c.textSecondary }]}>
                 importance {m.importance}/9 · {(m.confidence * 100).toFixed(0)}%
               </Text>

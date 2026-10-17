@@ -9,10 +9,11 @@
  * component so both surfaces color the same provider the same way.
  */
 import React, { useMemo, useState } from 'react';
-import { View, Text, StyleSheet, ScrollView } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity } from 'react-native';
 import Svg, { Path, Line, Text as SvgText } from 'react-native-svg';
 import { theme } from '../theme';
 import { formatUsd, formatTokens } from '../lib/format';
+import { tapLight } from '../lib/haptics';
 import type { CostRollupsData } from '../hooks/useRelay';
 
 type Mode = 'cost' | 'tokens';
@@ -132,13 +133,24 @@ export default function DailySpendChart({ daily }: { daily: CostRollupsData['dai
     <View style={[styles.wrap, { backgroundColor: c.surface2, borderColor: c.border }]}>
       {/* Mode toggle — desktop parity */}
       <View style={styles.toggleRow}>
-        {(['cost', 'tokens'] as Mode[]).map((m) => (
-          <View key={m} style={[styles.toggle, mode === m && { backgroundColor: c.accent }]}>
-            <Text style={{ color: mode === m ? c.white : c.textSecondary, fontSize: 11, fontWeight: '700' }}>
-              {m === 'cost' ? 'Cost' : 'Tokens'}
-            </Text>
-          </View>
-        ))}
+        {(['cost', 'tokens'] as Mode[]).map((m) => {
+          const active = mode === m;
+          return (
+            <TouchableOpacity
+              key={m}
+              style={[styles.toggle, active && { backgroundColor: c.accent }]}
+              activeOpacity={0.7}
+              accessibilityRole="button"
+              accessibilityState={{ selected: active }}
+              accessibilityLabel={`Show ${m === 'cost' ? 'cost' : 'tokens'}`}
+              onPress={() => { tapLight(); setMode(m); }}
+            >
+              <Text style={{ color: active ? c.white : c.textSecondary, fontSize: 11, fontWeight: '700' }}>
+                {m === 'cost' ? 'Cost' : 'Tokens'}
+              </Text>
+            </TouchableOpacity>
+          );
+        })}
       </View>
 
       <ScrollView horizontal showsHorizontalScrollIndicator={false}>

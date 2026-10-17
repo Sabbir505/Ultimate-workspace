@@ -17,6 +17,7 @@ import {
 } from '../lib/notificationJournal';
 import { tapLight } from '../lib/haptics';
 import ScreenHeader from '../components/ScreenHeader';
+import SpeakButton from '../components/SpeakButton';
 
 const KIND_ICON: Record<NotificationKind, keyof typeof Ionicons.glyphMap> = {
   turn_done: 'checkmark-circle-outline',
@@ -103,6 +104,12 @@ export default function NotificationsScreen() {
                 <Text style={[styles.body, { color: c.textSecondary }]} numberOfLines={2}>{e.body}</Text>
               ) : null}
             </View>
+            <SpeakButton
+              id={`notif:${e.id}`}
+              text={`${e.title}. ${e.body ?? ''}`}
+              label="Notification"
+              size={15}
+            />
             <Text style={[styles.time, { color: c.textSecondary }]}>{timeAgo(e.at)}</Text>
             {!e.read ? <View style={[styles.dot, { backgroundColor: c.accent }]} /> : null}
           </TouchableOpacity>

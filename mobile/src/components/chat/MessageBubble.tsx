@@ -45,6 +45,9 @@ export interface MessageBubbleProps {
   /** Turn duration in seconds (desktop durationSec parity) — drives the
    *  "Worked for Xs" fold header on process turns. */
   workedForSec?: number | null;
+  /** Stable identity for read-aloud (`msg:<id>`), so the long-press popup can
+   *  offer "Read aloud" for this message. */
+  speakId?: string;
 }
 
 export type Segment =
@@ -159,6 +162,9 @@ function AssistantContent({
   streaming: boolean;
   onPeekDiff?: (path: string) => void;
   workedForSec?: number | null;
+  /** Stable identity for read-aloud (`msg:<id>`); when omitted the bubble
+   *  shows no speak button. */
+  speakId?: string;
 }) {
   const segments = useMemo(() => parseSegments(content), [content]);
   const empty = content.length === 0;
@@ -255,6 +261,38 @@ function TurnProcessFold({
   );
 }
 
+/**
+ * What the speaker reads: the turn's ANSWER, nothing else.
+ *
+ * An assistant turn is usually narration-then-result — the model narrates
+ * ("I'll check X…", "Fetch worked, now let me…") around its thinking and tool
+ * calls, then writes the deliverable. On the phone that narration lives
+ * INSIDE the collapsed "Worked for Xs" fold, so it is process as far as the
+ * reader is concerned; reading it aloud sounded like the app reciting the
+ * agent's plumbing. So mirror the bubble's own split and speak only the text
+ * that comes AFTER the last process segment — exactly the prose left visible
+ * outside the fold. A turn with no process blocks, or one that ended inside
+ * one, falls back to all visible prose.
+ */
+export function speakableText(role: string, content: string): string {
+  if (role === 'user') return content.trim();
+  const segments = parseSegments(content);
+  const texts = (xs: Segment[]) =>
+    xs.filter((s): s is Extract<Segment, { type: 'text' }> => s.type === 'text')
+      .map((s) => s.text)
+      .join('\n\n')
+      .trim();
+  // Index of the LAST thinking/tool block — the same fold boundary the
+  // bubble renders with.
+  const lastProc = segments.reduce((last, seg, i) => (seg.type !== 'text' ? i : last), -1);
+  if (lastProc === -1) return texts(segments);
+  const after = texts(segments.slice(lastProc + 1));
+  // Turn ended inside a process block (or the tail is only process): nothing
+  // follows the fold, so fall back to the full visible prose rather than
+  // reading an empty string.
+  return after || texts(segments);
+}
+
 export default function MessageBubble({
   role,
   content,
@@ -262,11 +300,16 @@ export default function MessageBubble({
   onPeekDiff,
   liveImages,
   workedForSec,
-}: MessageBubbleProps) {
+  speakId,
+  }: MessageBubbleProps) {
   const c = theme.colors;
   // Attachment markers live in the content for BOTH roles (user messages carry
   // them; parse before any branch so hook order stays stable).
   const { attachments, text: cleanedContent } = useMemo(() => parseAttachments(content), [content]);
+
+  // Bubbles carry NO glyphs of their own — read-aloud, copy, regenerate,
+  // delete live in the long-press icon popup (ActionIconPopup), the phone's
+  // stand-in for the desktop's hover toolbar. Nothing to render here.
 
   if (role === 'system') {
     return (
